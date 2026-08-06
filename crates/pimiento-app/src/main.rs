@@ -69,6 +69,7 @@ impl Render for Hello {
             .justify_center()
             .gap_4()
             .p_8()
+            .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(div().text_2xl().child("Pimiento"))
             .child(
@@ -106,7 +107,7 @@ fn main() {
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
                 let view = cx.new(|_| Hello::new());
-                cx.new(|cx| Root::new(view, window, cx).bg(cx.theme().background))
+                cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("open primary window");
         })
