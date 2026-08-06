@@ -1,0 +1,19 @@
+# Pimiento cargo config — cache-friendly defaults, portable across macOS & Linux.
+#
+# rustc-wrapper is intentionally NOT set here so users without sccache aren't
+# forced to install it. Opt in by exporting `RUSTC_WRAPPER=sccache` in your
+# shell (or `CARGO_BUILD_RUSTC_WRAPPER=sccache`). Cargo picks that up.
+#
+# Linker configuration is deliberately absent:
+#   - macOS uses the new default ld-prime, already fast.
+#   - Linux users who want mold should set it in their user config
+#     (~/.cargo/config.toml) or via CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+#     and CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS. Baking it in here
+#     would silently break macOS builds if the file were shared verbatim.
+
+[build]
+# Incremental is on by default for dev; keep it explicit for clarity.
+incremental = true
+
+[net]
+git-fetch-with-cli = true

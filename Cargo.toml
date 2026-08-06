@@ -1,0 +1,84 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/omp-rpc-client",
+    "crates/pimiento-core",
+    "crates/pimiento-app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# Internal crates — strict dependency direction:
+#   omp-rpc-client  <-  pimiento-core  <-  pimiento-app
+omp-rpc-client = { path = "crates/omp-rpc-client" }
+pimiento-core  = { path = "crates/pimiento-core" }
+
+# GPUI stack (Apache-2.0). Never use crates.io gpui.
+#
+# Architecture exception — the git source must be UNQUALIFIED (no `rev`,
+# no `branch`, no `tag`). Cargo derives a dependency's `SourceId` from
+# the full URL string including any `?rev=…` fragment, so
+# `git = "…/zed"` and `git = "…/zed", rev = "4aad57f…"` are two
+# DIFFERENT sources to the resolver. gpui-component's own workspace
+# declares its Zed deps as `git = "…/zed"` with no rev; adding one on
+# our side would give us two independent gpui/gpui_platform/gpui_macros
+# copies in the graph and a type mismatch across the FFI to
+# gpui-component. Attempting to bridge that with
+# `[patch."…/zed"] gpui = { …, rev = "…" }` also fails: cargo rejects
+# patches whose source resolves to the same URL as the entry being
+# patched ("points to the same source, but patches must point to
+# different sources").
+#
+# So: keep the git source unqualified here (source-identical to
+# gpui-component), and freeze the exact rev in the committed
+# `Cargo.lock`. The frozen rev is
+#     4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1
+# which is the rev gpui-component itself resolves to in its own
+# Cargo.lock at commit 181cf147d1d68ff33bae60abb58a24917658142e.
+#
+# After the initial `cargo generate-lockfile`, verify with
+#     cargo update -p gpui --precise 4aad57fd1f002f9feeea2b7fb6229ccbcd576cb1
+# (a no-op if the resolver already picked it, an error if a newer commit
+# slipped in — that's how we detect drift). Never bump this rev in an
+# ad-hoc `cargo update`; upgrades go through a dedicated QA branch
+# (PLAN.md §5.1, §10.4).
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "181cf147d1d68ff33bae60abb58a24917658142e" }
+
+# Serialization / protocol
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Async — smol only (matches GPUI executors). No tokio.
+smol = "2"
+
+# Errors: thiserror in libraries, anyhow at the app edges.
+anyhow = "1"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+dbg_macro = "deny"
+todo = "warn"
+
+[profile.dev]
+# GPUI's dep graph is huge; slow debuginfo hurts more than it helps here.
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,25 @@
+# Rust build artifacts
+/target
+**/target
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Environment / local overrides
+.env
+.env.local
+
+# sccache / profiling
+*.profraw
+
+# NOTE: Cargo.lock IS committed (workspace with binary crate); do not add it here.

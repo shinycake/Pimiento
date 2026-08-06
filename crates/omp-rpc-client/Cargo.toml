@@ -1,0 +1,18 @@
+[package]
+name = "omp-rpc-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "OMP RPC client — protocol lib for the Pimiento GPUI desktop app (no UI deps)."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+smol = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
