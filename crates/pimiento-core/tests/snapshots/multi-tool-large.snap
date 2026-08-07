@@ -1,0 +1,45 @@
+---
+source: crates/pimiento-core/tests/replay_snapshots.rs
+expression: "& report.summary()"
+---
+run_phase: idle
+state:
+  quality: unknown
+  has_snapshot: false
+  model: ~
+  is_streaming: false
+  is_compacting: ~
+  fast_mode_enabled: ~
+  fast_mode_active: ~
+transcript:
+  - kind: notice
+    text: local-only prompt
+  - kind: tool_call
+    name: bash
+    args_json:
+      command: cargo build --manifest-path ./__pimiento_fixture_missing__/Cargo.toml
+    status: Err
+    output: "error: manifest path `./__pimiento_fixture_missing__/Cargo.toml` does not exist\n\n\nWall time: 0.11 seconds\n\nCommand exited with code 101"
+    duration_ms: ~
+  - kind: assistant_text
+    markdown: done
+    streaming: false
+pending_dialogs: []
+display:
+  title: ~
+  statuses: {}
+  widget_keys:
+    - autoresearch
+    - record-fixture-large
+  editor_text: ~
+todos:
+  present: false
+  entries: ~
+subagents_count: 0
+available_commands_count: 46
+dead_reason: ~
+counts:
+  physical_frames: 57
+  logical_frames: 52
+  chunk_frames: 6
+  reassembled_sequences: 1
