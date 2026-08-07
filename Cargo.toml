@@ -64,6 +64,9 @@ smol = "2"
 anyhow = "1"
 thiserror = "2"
 
+# Sync — use parking_lot when the code immediately unwraps std lock guards.
+parking_lot = "0.12"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
