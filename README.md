@@ -21,6 +21,12 @@ Rebuild and replace a running debug instance:
 
 ```sh
 cargo build -p pimiento-app && PIMIENTO_RESTART=1 ./scripts/run_app.sh
+
+Or:
+
+```sh
+./scripts/dev_loop.sh
+```
 ```
 
 Set `PIMIENTO_AUTO_CONNECT=1` when launching to automatically connect (also the default in `scripts/run_app.sh`):
