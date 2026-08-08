@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,6 +57,8 @@ type ModelChoice = (String, String);
 
 const MODEL_PICKER_VISIBLE_CAP: usize = 200;
 const MAX_RECENT_SESSIONS: usize = 12;
+const MAX_DISCOVERED_SESSIONS: usize = 24;
+const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
 static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -438,11 +441,53 @@ impl SessionView {
             let Some(path) = paths.into_iter().find(|path| path.is_dir()) else {
                 return;
             };
-            let _ = view.update_in(cx, |this, window, cx| {
-                this.begin_connection(window, path, None, true, cx);
+            let _ = view.update_in(cx, |this, _window, cx| {
+                this.set_launcher_cwd(path, cx);
             });
         })
         .detach();
+    }
+
+    fn set_launcher_cwd(&mut self, cwd: PathBuf, cx: &mut Context<Self>) {
+        self.launcher_cwd = cwd;
+        self.launcher_error = None;
+        self.refresh_launcher_sessions();
+        cx.notify();
+    }
+
+    fn refresh_launcher_sessions(&mut self) {
+        self.recent_sessions = collect_launcher_sessions(
+            &self.persistence,
+            &self.launcher_cwd,
+            omp_sessions_root().as_deref(),
+            home_dir().as_deref(),
+            std::env::temp_dir().as_path(),
+        );
+        self.last_session = self
+            .persistence
+            .load_last_session()
+            .filter(|resume| resume.exists());
+    }
+
+    fn return_to_launcher(&mut self, cx: &mut Context<Self>) {
+        self.client.take();
+        self.pump.take();
+        self.model_picker_open = false;
+        self.clear_composer = true;
+        if let Some(cwd) = self.session_cwd.take() {
+            self.launcher_cwd = cwd;
+        }
+        self.projection = SessionProjection::new();
+        self.available_models.clear();
+        self.expanded_tools.clear();
+        self.transcript_list.reset(0);
+        self.last_transcript_len = 0;
+        self.unread_below = 0;
+        self.launcher_phase = LauncherPhase::Visible;
+        self.launcher_error = None;
+        "Choose a working directory or session".clone_into(&mut self.status_message);
+        self.refresh_launcher_sessions();
+        cx.notify();
     }
 
     /// Keep `ListState` item count / measurements in sync with the projection.
@@ -977,7 +1022,7 @@ impl SessionView {
                         parent.child(
                             v_flex()
                                 .gap_1()
-                                .child(Label::new("Recent sessions").text_sm())
+                                .child(Label::new("Sessions for this directory").text_sm())
                                 .children(recents.into_iter().enumerate().map(|(ix, recent)| {
                                     let cwd = recent.cwd.clone();
                                     let resume = recent.session_file.clone();
@@ -1162,13 +1207,28 @@ impl Render for SessionView {
                                     ),
                             )
                             .child(
-                                h_flex().flex_1().justify_end().child(
-                                    Button::new("theme-toggle")
-                                        .label(toggle_label)
-                                        .small()
-                                        .ghost()
-                                        .on_click(toggle_theme),
-                                ),
+                                h_flex()
+                                    .flex_1()
+                                    .justify_end()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("sessions-launcher")
+                                            .label("Sessions")
+                                            .small()
+                                            .ghost()
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.return_to_launcher(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new("theme-toggle")
+                                            .label(toggle_label)
+                                            .small()
+                                            .ghost()
+                                            .on_click(toggle_theme),
+                                    ),
                             ),
                     )
                     .when(self.model_picker_open, |parent| {
@@ -1959,6 +2019,245 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+fn omp_agent_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("PI_CODING_AGENT_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    home_dir().map(|home| home.join(".omp").join("agent"))
+}
+
+fn omp_sessions_root() -> Option<PathBuf> {
+    omp_agent_dir().map(|dir| dir.join("sessions"))
+}
+
+fn encode_relative_session_dir_name(prefix: &str, relative: &str) -> String {
+    let encoded = relative.replace(['/', '\\', ':'], "-");
+    if encoded.is_empty() {
+        prefix.to_owned()
+    } else if prefix.ends_with('-') {
+        format!("{prefix}{encoded}")
+    } else {
+        format!("{prefix}-{encoded}")
+    }
+}
+
+fn encode_legacy_absolute_session_dir_name(cwd: &Path) -> String {
+    let trimmed = cwd
+        .to_string_lossy()
+        .trim_start_matches(['/', '\\'])
+        .replace(['/', '\\', ':'], "-");
+    format!("--{trimmed}--")
+}
+
+fn encode_omp_session_dir_name(cwd: &Path, home: Option<&Path>, temp_root: &Path) -> String {
+    if let Some(home) = home
+        && let Ok(relative) = cwd.strip_prefix(home)
+    {
+        return encode_relative_session_dir_name("-", &relative.to_string_lossy());
+    }
+    if let Ok(relative) = cwd.strip_prefix(temp_root) {
+        return encode_relative_session_dir_name("-tmp", &relative.to_string_lossy());
+    }
+    encode_legacy_absolute_session_dir_name(cwd)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OmpSessionHeader {
+    id: String,
+    cwd: Option<PathBuf>,
+    title: Option<String>,
+    first_user_message: Option<String>,
+}
+
+fn extract_message_text(content: &serde_json::Value) -> String {
+    if let Some(text) = content.as_str() {
+        return text.to_owned();
+    }
+    let Some(parts) = content.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            (part.get("type").and_then(|v| v.as_str()) == Some("text"))
+                .then(|| part.get("text").and_then(|v| v.as_str()).map(str::to_owned))
+                .flatten()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_omp_session_header_prefix(raw: &str) -> Option<OmpSessionHeader> {
+    let mut id = None;
+    let mut cwd = None;
+    let mut title = None;
+    let mut first_user_message = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("session") => {
+                id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .or(id);
+                cwd = value
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .or(cwd);
+                title = value
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or(title);
+            }
+            Some("title") => {
+                title = value
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .or(title);
+            }
+            Some("message") => {
+                if first_user_message.is_some() {
+                    continue;
+                }
+                let Some(message) = value.get("message") else {
+                    continue;
+                };
+                if message.get("role").and_then(|v| v.as_str()) != Some("user") {
+                    continue;
+                }
+                let text = message
+                    .get("content")
+                    .map(extract_message_text)
+                    .unwrap_or_default();
+                let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !text.is_empty() {
+                    first_user_message = Some(text.chars().take(96).collect());
+                }
+            }
+            _ => {}
+        }
+    }
+    let id = id?;
+    Some(OmpSessionHeader {
+        id,
+        cwd,
+        title,
+        first_user_message,
+    })
+}
+
+fn read_omp_session_header(path: &Path) -> Option<OmpSessionHeader> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut limited = file.take(SESSION_HEADER_PREFIX_BYTES as u64);
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut limited, &mut raw).ok()?;
+    parse_omp_session_header_prefix(&raw)
+}
+
+fn mtime_unix_seconds(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn discover_omp_sessions_for_cwd(
+    cwd: &Path,
+    sessions_root: Option<&Path>,
+    home: Option<&Path>,
+    temp_root: &Path,
+) -> Vec<RecentSession> {
+    let Some(sessions_root) = sessions_root else {
+        return Vec::new();
+    };
+    let dir_name = encode_omp_session_dir_name(cwd, home, temp_root);
+    let session_dir = sessions_root.join(dir_name);
+    let Ok(entries) = std::fs::read_dir(&session_dir) else {
+        return Vec::new();
+    };
+    let mut discovered = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(header) = read_omp_session_header(&path) else {
+            continue;
+        };
+        if let Some(session_cwd) = header.cwd.as_deref()
+            && session_cwd != cwd
+        {
+            continue;
+        }
+        let name = header
+            .title
+            .filter(|title| !title.trim().is_empty())
+            .or(header.first_user_message)
+            .unwrap_or_else(|| default_session_name(cwd));
+        let last_used = mtime_unix_seconds(&path);
+        discovered.push(RecentSession {
+            session_file: path,
+            cwd: cwd.to_owned(),
+            name,
+            last_used,
+        });
+    }
+    discovered.sort_by(|a, b| {
+        b.last_used
+            .cmp(&a.last_used)
+            .then_with(|| a.session_file.cmp(&b.session_file))
+    });
+    discovered.truncate(MAX_DISCOVERED_SESSIONS);
+    discovered
+}
+
+fn collect_launcher_sessions(
+    persistence: &SessionPersistence,
+    cwd: &Path,
+    sessions_root: Option<&Path>,
+    home: Option<&Path>,
+    temp_root: &Path,
+) -> Vec<RecentSession> {
+    let mut sessions = discover_omp_sessions_for_cwd(cwd, sessions_root, home, temp_root);
+    for remembered in persistence.load_recent_sessions() {
+        if remembered.cwd == cwd {
+            sessions.push(remembered);
+        }
+    }
+    sessions.retain(|session| session.cwd == cwd && session.session_file.exists());
+    // Prefer richer names when duplicates collide on session_file
+    sessions.sort_by(|a, b| {
+        b.last_used
+            .cmp(&a.last_used)
+            .then_with(|| a.session_file.cmp(&b.session_file))
+    });
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for session in sessions {
+        if seen.insert(session.session_file.clone()) {
+            deduped.push(session);
+        }
+    }
+    deduped.truncate(MAX_DISCOVERED_SESSIONS);
+    deduped
+}
+
 fn write_persistence_file(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2294,15 +2593,24 @@ fn filter_models(models: &[ModelChoice], query: &str) -> Vec<ModelChoice> {
 
 fn main() {
     let persistence = SessionPersistence::from_environment();
-    let recent = persistence.load_recent_sessions();
-    let last_session = persistence.load_last_session();
+    let remembered = persistence.load_recent_sessions();
+    let last_session = persistence
+        .load_last_session()
+        .filter(|resume| resume.exists());
     let cwd_override = std::env::var_os("PIMIENTO_CWD").map(PathBuf::from);
     let initial_cwd = initial_launcher_directory(
         cwd_override.as_deref(),
-        &recent,
+        &remembered,
         std::env::current_dir().ok(),
     )
     .unwrap_or_else(|| PathBuf::from("."));
+    let recent = collect_launcher_sessions(
+        &persistence,
+        &initial_cwd,
+        omp_sessions_root().as_deref(),
+        home_dir().as_deref(),
+        std::env::temp_dir().as_path(),
+    );
     let auto_connect = auto_connect_enabled(std::env::var("PIMIENTO_AUTO_CONNECT").ok().as_deref());
     let auto_resume = auto_connect
         .then(|| latest_resume_path(&persistence, &recent))
@@ -2597,6 +2905,42 @@ mod tests {
             initial_launcher_directory(None, &[], Some(PathBuf::from("/tmp/current"))),
             Some(PathBuf::from("/tmp/current"))
         );
+    }
+
+    #[test]
+    fn encode_omp_session_dir_name_matches_home_relative_layout() {
+        let home = Path::new("/Users/idan");
+        let cwd = Path::new("/Users/idan/Developer/Projects/Pimiento");
+        assert_eq!(
+            encode_omp_session_dir_name(cwd, Some(home), Path::new("/tmp")),
+            "-Developer-Projects-Pimiento"
+        );
+    }
+
+    #[test]
+    fn parse_omp_session_header_reads_title_and_first_user() {
+        let raw = concat!(
+            r#"{"type":"title","v":1,"title":"Proceed with M2 implementation"}"#,
+            "
+",
+            r#"{"type":"session","version":3,"id":"abc","timestamp":"2026-08-06T22:47:47.681Z","cwd":"/Users/idan/Developer/Projects/Pimiento","title":"Proceed with M2 implementation"}"#,
+            "
+",
+            r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"hello world"}]}}"#,
+            "
+",
+        );
+        let header = parse_omp_session_header_prefix(raw).expect("header");
+        assert_eq!(header.id, "abc");
+        assert_eq!(
+            header.cwd.as_deref(),
+            Some(Path::new("/Users/idan/Developer/Projects/Pimiento"))
+        );
+        assert_eq!(
+            header.title.as_deref(),
+            Some("Proceed with M2 implementation")
+        );
+        assert_eq!(header.first_user_message.as_deref(), Some("hello world"));
     }
 
     #[test]

@@ -96,6 +96,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The launcher opens before spawning OMP; its working directory comes from the picker or an existing recent pointer, with `PIMIENTO_CWD` as the initial override.
 - Recent pointers live in `recent.json` as `{sessionFile, cwd, name, lastUsed}`; `PIMIENTO_AUTO_CONNECT=1` preserves the one-shot eager-connect escape hatch.
 - `PIMIENTO_HOME` overrides the `~/.pimiento` directory used for `last-session` and `recent.json`.
+- Status strip **Sessions** returns to the launcher (drops the current child) so you can pick another cwd/session.
+- **Choose directory…** only updates the launcher cwd; it does not auto-start. Use **Start here** or a session row.
+- Session list for the selected cwd merges `recent.json` with on-disk OMP sessions under `~/.omp/agent/sessions/<encoded-cwd>/*.jsonl` (or `$PI_CODING_AGENT_DIR/sessions/...`), using session title / first user prompt for labels.
 
 ## Message history hydration — 2026-08-08
 
