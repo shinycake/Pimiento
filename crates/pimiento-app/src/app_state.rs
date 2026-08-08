@@ -48,10 +48,21 @@ pub(crate) fn apply_theme_preference(
     cx: &mut App,
 ) {
     cx.set_global(ThemePreferenceState(preference));
+    // Keep native macOS titlebar/chrome aligned with the content theme.
+    // None resumes following the OS appearance (PLAN D4 light/dark follow).
     match preference {
-        ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
-        ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
-        ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+        ThemePreference::System => {
+            cx.set_window_appearance(None);
+            Theme::sync_system_appearance(Some(window), cx);
+        }
+        ThemePreference::Light => {
+            cx.set_window_appearance(Some(WindowAppearance::Light));
+            Theme::change(ThemeMode::Light, Some(window), cx);
+        }
+        ThemePreference::Dark => {
+            cx.set_window_appearance(Some(WindowAppearance::Dark));
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+        }
     }
     // The label changes even when returning to System keeps the same concrete mode.
     window.refresh();

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, Global,
     KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions, Pixels, Render, Task,
-    Window, WindowBounds, WindowOptions, div, list, point, prelude::*, px, size,
+    Window, WindowAppearance, WindowBounds, WindowOptions, div, list, point, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
