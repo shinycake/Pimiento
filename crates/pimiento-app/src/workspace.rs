@@ -926,6 +926,11 @@ impl Render for WorkspaceView {
                                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                             this.toggle_rail(cx);
                                         })),
+                                )
+                                .child(
+                                    Label::new("⌘B")
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
                                 ),
                         )
                         .child(div().h(px(8.)))
@@ -956,8 +961,11 @@ impl Render for WorkspaceView {
                                             .rounded_md()
                                             .cursor_pointer()
                                             .when(selected, |row| {
-                                                row.bg(theme.primary)
-                                                    .text_color(theme.primary_foreground)
+                                                // Soft selection: secondary wash + accent bar.
+                                                // Solid primary fill is too loud on dark themes.
+                                                row.bg(theme.secondary)
+                                                    .border_l_2()
+                                                    .border_color(theme.primary)
                                             })
                                             .when(!selected, |row| {
                                                 row.hover(|row| row.bg(theme.secondary))
@@ -978,7 +986,12 @@ impl Render for WorkspaceView {
                                                         Label::new(entry.label)
                                                             .text_sm()
                                                             .flex_1()
-                                                            .truncate(),
+                                                            .truncate()
+                                                            .when(selected, |label| {
+                                                                label.font_weight(
+                                                                    gpui::FontWeight::MEDIUM,
+                                                                )
+                                                            }),
                                                     ),
                                             )
                                             .child(

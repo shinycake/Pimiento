@@ -277,6 +277,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - While a run is abortable/streaming, the primary composer button reads **Steer** (same `steer` RPC path as Enter); **Follow-up** remains a separate control.
 - Empty transcript copy is a short brand-ready orientation pair (no keymap wall).
 
+## Export reveal — 2026-08-08
+
+- After a successful `export_html`, Pimiento reveals the written file in the platform file manager (`open -R` on macOS; parent folder via `xdg-open` on Linux). The transcript notice still carries the authoritative path from OMP.
+
 ## Palette theme label — 2026-08-08
 
 - Command palette Theme entry shows the current preference (`Theme: Light` etc.) and documents the cycle order. Presentation-only.

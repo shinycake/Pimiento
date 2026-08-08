@@ -1149,6 +1149,9 @@ impl SessionView {
         let steer = composer_uses_steer(&self.projection.run_phase);
         self.projection.push_user_message(text.clone());
         self.close_slash_menu();
+        // Prefer an explicit empty pending value so the next paint always
+        // clears even if a later flag race skips `clear_composer`.
+        self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
         self.refocus_composer = true;
         cx.notify();
@@ -1463,6 +1466,7 @@ impl SessionView {
         };
 
         self.projection.push_user_message(text.clone());
+        self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
         self.refocus_composer = true;
         cx.notify();
@@ -2921,8 +2925,13 @@ impl Render for SessionView {
                                         "Send"
                                     })
                                     .disabled(!self.can_send())
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         this.send_composer_message(cx);
+                                        this.clear_composer = false;
+                                        this.pending_composer_value = None;
+                                        this.composer.update(cx, |input, cx| {
+                                            input.set_value("", window, cx);
+                                        });
                                     })),
                             )
                             .when(
