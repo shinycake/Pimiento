@@ -120,6 +120,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - The status strip exposes `set_thinking_level {level}` for the configured levels `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `auto`; Pimiento refreshes `get_state` after the command so the rendered selector remains OMP-authoritative.
 - `set_fast_mode {enabled}` returns `{enabled, active}`. These values describe configured and currently active fast mode and may diverge, so the status strip labels `fast:off`, `fast:on`, or `fast:active` rather than collapsing them into one boolean.
+- `get_state` on OMP 17.2.10 publishes top-level `fastModeEnabled` / `fastModeActive` booleans; Pimiento also still accepts the older nested `fastMode.{enabled,active}` fixture shape.
 
 ## Todo panel — 2026-08-08
 
