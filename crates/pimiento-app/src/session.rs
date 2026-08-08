@@ -2318,7 +2318,7 @@ impl Render for SessionView {
         let phase_label = match self.projection.run_phase {
             RunPhase::Idle => "idle",
             RunPhase::Streaming => "streaming",
-            RunPhase::AwaitingResume => "awaiting…",
+            RunPhase::AwaitingResume => "awaiting",
             RunPhase::Compacting => "compacting",
             RunPhase::Retrying => "retrying",
             RunPhase::Restarting => "restarting",
