@@ -196,3 +196,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The primary window's last windowed bounds are stored at `window.json` under `~/.pimiento` (or `PIMIENTO_HOME`) and restored on the next launch. Maximized and fullscreen bounds are not persisted.
 - Persisted width and height are clamped to 480×320 logical pixels; malformed or non-positive bounds are ignored.
 - Multi-monitor caveat: when a saved origin is no longer on-screen, GPUI or the host OS may adjust placement. Pimiento v1 deliberately does not invent display-coordinate correction logic.
+
+## Per-model thinking controls — 2026-08-08
+
+- `get_available_models` returns `ModelInfo` entries whose optional `thinking.efforts` array is the authority for each model's controllable effort levels. Pimiento preserves catalog order and offers only `off` + advertised efforts + `auto`, with duplicates removed.
+- Missing/null `thinking` or an empty `efforts` array means the model has no controllable thinking surface, so Pimiento hides the thinking picker. OMP still exposes `set_thinking_level` / `cycle_thinking_level` and remains responsible for clamping wire commands.
+- The status strip keeps `status_message` for the OMP version, connection state, errors, and transient notices only. Model/thinking controls and the quiet context/tokens readouts render separately, so runtime facts are not duplicated.

@@ -59,14 +59,6 @@ fn next_theme_preference(current: ThemePreference) -> ThemePreference {
     }
 }
 
-fn theme_preference_label(preference: ThemePreference) -> &'static str {
-    match preference {
-        ThemePreference::System => "Theme: System",
-        ThemePreference::Light => "Theme: Light",
-        ThemePreference::Dark => "Theme: Dark",
-    }
-}
-
 fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
     cx.set_global(ThemePreferenceState(preference));
     match preference {
@@ -83,20 +75,19 @@ fn cycle_theme_preference(window: &mut Window, cx: &mut App) {
     apply_theme_preference(next, window, cx);
 }
 
-fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
-    cycle_theme_preference(window, cx);
-}
-
 // ── SessionView ───────────────────────────────────────────────────────────
 
-/// `(provider, model_id)` pair from `get_available_models`.
-type ModelChoice = (String, String);
+/// Model metadata from `get_available_models` used by the model/thinking controls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelChoice {
+    provider: String,
+    id: String,
+    /// `None` means the model has no controllable thinking surface.
+    thinking_efforts: Option<Vec<String>>,
+}
 
 const MODEL_PICKER_VISIBLE_CAP: usize = 200;
 const SLASH_COMMAND_VISIBLE_CAP: usize = 12;
-const THINKING_LEVELS: &[&str] = &[
-    "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
-];
 const MAX_RECENT_SESSIONS: usize = 12;
 const MAX_DISCOVERED_SESSIONS: usize = 24;
 const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
@@ -398,7 +389,7 @@ impl SessionView {
                 .multi_line(true)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("Type… Enter send (steers while streaming); Shift+Enter newline")
+                .placeholder("Message · Enter to send")
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx)
@@ -1077,6 +1068,15 @@ impl SessionView {
     }
 
     fn toggle_thinking_picker(&mut self, cx: &mut Context<Self>) {
+        let current_model = find_model_choice(
+            &self.available_models,
+            self.projection.state.model.as_deref(),
+        );
+        if thinking_options_for_model(current_model).is_empty() {
+            self.thinking_picker_open = false;
+            cx.notify();
+            return;
+        }
         self.thinking_picker_open = !self.thinking_picker_open;
         if self.thinking_picker_open {
             self.model_picker_open = false;
@@ -1090,7 +1090,7 @@ impl SessionView {
         let filtered = filter_models(&self.available_models, &query);
         let choice = filtered
             .first()
-            .cloned()
+            .map(|choice| (choice.provider.clone(), choice.id.clone()))
             .or_else(|| split_model_label(query.trim()));
         let Some((provider, id)) = choice else {
             return;
@@ -1120,28 +1120,12 @@ impl SessionView {
     }
 
     fn sync_status_model(&mut self) {
-        // Keep the version prefix; refresh model / thinking / context suffix.
-        let model = self
-            .projection
-            .state
-            .model
-            .as_deref()
-            .unwrap_or("(no model)");
-        let thinking = thinking_label(self.projection.state.thinking.as_ref());
-        let ctx = context_percent_label(self.projection.state.context.as_ref());
-        let tps = tokens_per_second_label(self.projection.state.tokens.as_ref());
-        if let Some((ver, _)) = self.status_message.split_once("  •  ") {
-            let mut parts = vec![ver.to_owned(), model.to_owned()];
-            if let Some(t) = thinking {
-                parts.push(format!("think:{t}"));
-            }
-            if let Some(c) = ctx {
-                parts.push(format!("ctx:{c}"));
-            }
-            if let Some(t) = tps {
-                parts.push(format!("{t}/s"));
-            }
-            self.status_message = parts.join("  •  ");
+        // Older connection paths included runtime facts after the version.
+        // Keep only the connection/version fact; model metadata renders separately.
+        if self.status_message.starts_with("omp/")
+            && let Some((version, _)) = self.status_message.split_once("  •  ")
+        {
+            self.status_message = version.to_owned();
         }
     }
 
@@ -1152,6 +1136,7 @@ impl SessionView {
         let label = format!("{provider}/{model_id}");
         // Optimistic display; corrected from response / get_state refresh.
         self.projection.state.model = Some(label.clone());
+        self.close_thinking_picker();
         self.sync_status_model();
         cx.notify();
 
@@ -1202,11 +1187,12 @@ impl SessionView {
         .detach();
     }
 
-    fn set_thinking_level(&mut self, level: &'static str, cx: &mut Context<Self>) {
+    fn set_thinking_level(&mut self, level: &str, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
         self.close_thinking_picker();
+        let level = level.to_owned();
         // Optimistic display; corrected by the post-command get_state refresh.
         self.projection.state.thinking = Some(serde_json::json!(level));
         self.sync_status_model();
@@ -2814,20 +2800,20 @@ impl Render for WorkspaceView {
                     v_flex()
                         .w(px(220.))
                         .h_full()
-                        .gap_1()
-                        .p_2()
+                        .gap_2()
+                        .p_3()
                         .border_r_1()
                         .border_color(theme.border)
                         .bg(theme.muted)
                         .child(
                             h_flex()
                                 .w_full()
-                                .gap_1()
+                                .gap_2()
                                 .child(
                                     Button::new("workspace-new-session")
                                         .label("New")
                                         .small()
-                                        .primary()
+                                        .ghost()
                                         .on_click(cx.listener(
                                             |this, _: &ClickEvent, window, cx| {
                                                 this.add_session(window, cx);
@@ -2848,7 +2834,7 @@ impl Render for WorkspaceView {
                                 )
                                 .child(
                                     Button::new("workspace-hide-rail")
-                                        .label("Hide")
+                                        .label("Hide rail")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -2991,7 +2977,6 @@ impl Render for SessionView {
         }
 
         let theme = cx.theme().clone();
-        let toggle_label = theme_preference_label(cx.global::<ThemePreferenceState>().0);
         let phase_label = match self.projection.run_phase {
             RunPhase::Idle => "idle",
             RunPhase::Streaming => "streaming",
@@ -3009,6 +2994,19 @@ impl Render for SessionView {
             .unwrap_or_else(|| "(no model)".to_owned());
         let thinking_button_label = thinking_label(self.projection.state.thinking.as_ref())
             .map_or_else(|| "think:?".to_owned(), |level| format!("think:{level}"));
+        let current_model = find_model_choice(
+            &self.available_models,
+            self.projection.state.model.as_deref(),
+        );
+        let thinking_options = thinking_options_for_model(current_model);
+        let show_thinking_control = !thinking_options.is_empty();
+        if !show_thinking_control {
+            self.thinking_picker_open = false;
+        }
+        let context_label = context_percent_label(self.projection.state.context.as_ref())
+            .map(|context| format!("ctx:{context}"));
+        let tokens_label = tokens_per_second_label(self.projection.state.tokens.as_ref())
+            .map(|tokens| format!("{tokens}/s"));
         let fast_button_label = fast_mode_label(
             self.projection.state.fast_mode_enabled,
             self.projection.state.fast_mode_active,
@@ -3093,6 +3091,7 @@ impl Render for SessionView {
             self.palette_query.clone()
         };
         let pending_revert = self.pending_revert.clone();
+        let transcript_empty = self.projection.transcript.is_empty();
 
         div()
             .size_full()
@@ -3122,17 +3121,44 @@ impl Render for SessionView {
                                 h_flex()
                                     .w_full()
                                     .px_3()
-                                    .py_1()
-                                    .gap_3()
-                                    .child(Label::new(self.status_message.clone()).text_xs())
+                                    .py_2()
+                                    .gap_4()
                                     .child(
                                         h_flex()
                                             .gap_2()
                                             .child(
+                                                Label::new(self.status_message.clone()).text_xs(),
+                                            )
+                                            .child(
                                                 Label::new(phase_label)
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground),
-                                            )
+                                            ),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .justify_center()
+                                            .gap_2()
+                                            .when_some(context_label, |group, context| {
+                                                group.child(
+                                                    Label::new(context)
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                            })
+                                            .when_some(tokens_label, |group, tokens| {
+                                                group.child(
+                                                    Label::new(tokens)
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .justify_end()
+                                            .gap_2()
                                             .child(
                                                 Button::new("model-picker")
                                                     .label(model_label)
@@ -3145,18 +3171,20 @@ impl Render for SessionView {
                                                         },
                                                     )),
                                             )
-                                            .child(
-                                                Button::new("thinking-picker")
-                                                    .label(thinking_button_label)
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.toggle_thinking_picker(cx);
-                                                        },
-                                                    )),
-                                            )
+                                            .when(show_thinking_control, |group| {
+                                                group.child(
+                                                    Button::new("thinking-picker")
+                                                        .label(thinking_button_label)
+                                                        .small()
+                                                        .ghost()
+                                                        .disabled(!can_pick)
+                                                        .on_click(cx.listener(
+                                                            |this, _: &ClickEvent, _window, cx| {
+                                                                this.toggle_thinking_picker(cx);
+                                                            },
+                                                        )),
+                                                )
+                                            })
                                             .child(
                                                 Button::new("fast-mode")
                                                     .label(fast_button_label)
@@ -3168,13 +3196,10 @@ impl Render for SessionView {
                                                             this.toggle_fast_mode(cx);
                                                         },
                                                     )),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .flex_1()
-                                            .justify_end()
-                                            .gap_2()
+                                            )
+                                            .child(
+                                                div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
+                                            )
                                             .child(
                                                 Button::new("todo-panel-toggle")
                                                     .label(todo_button_label)
@@ -3200,46 +3225,18 @@ impl Render for SessionView {
                                                     )),
                                             )
                                             .child(
-                                                Button::new("export-html")
-                                                    .label("Export")
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.export_html(cx);
-                                                        },
-                                                    )),
+                                                div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
                                             )
                                             .child(
-                                                Button::new("rename-session")
-                                                    .label("Rename")
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.rename_session(cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("sessions-launcher")
-                                                    .label("Sessions")
+                                                Button::new("more-actions")
+                                                    .label("More")
                                                     .small()
                                                     .ghost()
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
-                                                            this.return_to_launcher(cx);
+                                                            this.toggle_palette(cx);
                                                         },
                                                     )),
-                                            )
-                                            .child(
-                                                Button::new("theme-toggle")
-                                                    .label(toggle_label)
-                                                    .small()
-                                                    .ghost()
-                                                    .on_click(toggle_theme),
                                             ),
                                     ),
                             )
@@ -3263,10 +3260,13 @@ impl Render for SessionView {
                                                 .overflow_y_scrollbar()
                                                 .max_h(px(240.))
                                                 .children(visible.iter().enumerate().map(
-                                                    |(ix, (provider, id))| {
-                                                        let label = format!("{provider}/{id}");
-                                                        let provider_c = provider.clone();
-                                                        let id_c = id.clone();
+                                                    |(ix, choice)| {
+                                                        let label = format!(
+                                                            "{}/{}",
+                                                            choice.provider, choice.id
+                                                        );
+                                                        let provider = choice.provider.clone();
+                                                        let id = choice.id.clone();
                                                         Button::new(("model-choice", ix))
                                                             .label(label)
                                                             .ghost()
@@ -3277,8 +3277,8 @@ impl Render for SessionView {
                                                                 move |this, _, _window, cx| {
                                                                     this.close_model_picker(cx);
                                                                     this.set_model(
-                                                                        provider_c.clone(),
-                                                                        id_c.clone(),
+                                                                        provider.clone(),
+                                                                        id.clone(),
                                                                         cx,
                                                                     );
                                                                 },
@@ -3311,17 +3311,17 @@ impl Render for SessionView {
                                         .gap_1()
                                         .border_b_1()
                                         .border_color(theme.border)
-                                        .children(THINKING_LEVELS.iter().enumerate().map(
+                                        .children(thinking_options.iter().enumerate().map(
                                             |(ix, level)| {
-                                                let level = *level;
+                                                let level = level.clone();
                                                 Button::new(("thinking-choice", ix))
-                                                    .label(level)
+                                                    .label(level.clone())
                                                     .ghost()
                                                     .small()
                                                     .on_click(window.listener_for(
                                                         &view,
                                                         move |this, _, _window, cx| {
-                                                            this.set_thinking_level(level, cx);
+                                                            this.set_thinking_level(&level, cx);
                                                         },
                                                     ))
                                             },
@@ -3474,6 +3474,21 @@ impl Render for SessionView {
                                 .px_3()
                                 .py_2(),
                             )
+                            .when(transcript_empty, |parent| {
+                                parent.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            Label::new("Send a message to start")
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                            })
                             .when(unread > 0, |parent| {
                                 parent.child(
                                     div().absolute().bottom_3().right_3().child(
@@ -5438,18 +5453,7 @@ fn try_connect_omp(
     // get_available_models can be large enough to exceed the default RPC timeout.
     let models = Vec::new();
 
-    let model = proj.state.model.as_deref().unwrap_or("(no model)");
-    let mut parts = vec![discovered.version_text.trim().to_owned(), model.to_owned()];
-    if let Some(t) = thinking_label(proj.state.thinking.as_ref()) {
-        parts.push(format!("think:{t}"));
-    }
-    if let Some(c) = context_percent_label(proj.state.context.as_ref()) {
-        parts.push(format!("ctx:{c}"));
-    }
-    if let Some(t) = tokens_per_second_label(proj.state.tokens.as_ref()) {
-        parts.push(format!("{t}/s"));
-    }
-    let status = parts.join("  •  ");
+    let status = discovered.version_text.trim().to_owned();
 
     Ok((client, proj, status, models))
 }
@@ -5502,21 +5506,65 @@ fn thinking_label(v: Option<&serde_json::Value>) -> Option<String> {
 }
 
 fn load_all_model_choices(catalog: &serde_json::Value, current: Option<&str>) -> Vec<ModelChoice> {
-    let current_choice = current.and_then(split_model_label);
     let mut out = Vec::new();
     if let Some(arr) = catalog.get("models").and_then(|v| v.as_array()) {
         for m in arr {
             if let Some(label) = format_model_label(m)
                 && let Some((provider, id)) = split_model_label(&label)
             {
-                out.push((provider, id));
+                let thinking_efforts = m
+                    .get("thinking")
+                    .and_then(|thinking| thinking.get("efforts"))
+                    .and_then(serde_json::Value::as_array)
+                    .map(|efforts| {
+                        efforts
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::trim)
+                            .filter(|effort| !effort.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|efforts| !efforts.is_empty());
+                out.push(ModelChoice {
+                    provider,
+                    id,
+                    thinking_efforts,
+                });
             }
         }
     }
+    let current_choice = current.and_then(split_model_label);
     out.sort_by(|a, b| {
         model_sort_key(a, current_choice.as_ref()).cmp(&model_sort_key(b, current_choice.as_ref()))
     });
     out
+}
+
+fn find_model_choice<'a>(
+    models: &'a [ModelChoice],
+    current_model: Option<&str>,
+) -> Option<&'a ModelChoice> {
+    let (provider, id) = split_model_label(current_model?)?;
+    models
+        .iter()
+        .find(|choice| choice.provider == provider && choice.id == id)
+}
+
+fn thinking_options_for_model(choice: Option<&ModelChoice>) -> Vec<String> {
+    let Some(efforts) = choice.and_then(|choice| choice.thinking_efforts.as_ref()) else {
+        return Vec::new();
+    };
+    let mut options = Vec::with_capacity(efforts.len() + 2);
+    for option in std::iter::once("off")
+        .chain(efforts.iter().map(String::as_str))
+        .chain(std::iter::once("auto"))
+    {
+        if !options.iter().any(|existing| existing == option) {
+            options.push(option.to_owned());
+        }
+    }
+    options
 }
 
 fn model_matches_query(provider: &str, id: &str, query: &str) -> bool {
@@ -5528,27 +5576,29 @@ fn model_matches_query(provider: &str, id: &str, query: &str) -> bool {
     provider.to_ascii_lowercase().contains(&q) || id.to_ascii_lowercase().contains(&q)
 }
 
-fn model_sort_key(choice: &ModelChoice, current: Option<&ModelChoice>) -> (u8, String, String) {
-    let (provider, id) = choice;
-    if current == Some(choice) {
-        return (0, provider.clone(), id.clone());
+fn model_sort_key(
+    choice: &ModelChoice,
+    current: Option<&(String, String)>,
+) -> (u8, String, String) {
+    if current.is_some_and(|(provider, id)| choice.provider == *provider && choice.id == *id) {
+        return (0, choice.provider.clone(), choice.id.clone());
     }
-    let is_composer_boost =
-        provider == "cursor" && (id == "composer-2.5" || id.contains("composer-2.5"));
+    let is_composer_boost = choice.provider == "cursor"
+        && (choice.id == "composer-2.5" || choice.id.contains("composer-2.5"));
     let tier = if is_composer_boost {
         1
-    } else if provider == "cursor" {
+    } else if choice.provider == "cursor" {
         2
     } else {
         3
     };
-    (tier, provider.clone(), id.clone())
+    (tier, choice.provider.clone(), choice.id.clone())
 }
 
 fn filter_models(models: &[ModelChoice], query: &str) -> Vec<ModelChoice> {
     models
         .iter()
-        .filter(|(provider, id)| model_matches_query(provider, id, query))
+        .filter(|choice| model_matches_query(&choice.provider, &choice.id, query))
         .cloned()
         .collect()
 }
@@ -5701,13 +5751,6 @@ mod tests {
             classify_messages_page_error(None, Some("boom")),
             MessagesPageErrorKind::Other
         );
-    }
-
-    #[test]
-    fn thinking_levels_are_non_empty_and_include_auto() {
-        assert!(!THINKING_LEVELS.is_empty());
-        assert!(THINKING_LEVELS.contains(&"auto"));
-        assert!(THINKING_LEVELS.contains(&"max"));
     }
 
     #[test]
@@ -5989,13 +6032,59 @@ mod tests {
         let catalog = serde_json::json!({
             "models": [
                 {"provider": "opencode-go", "id": "gpt-5.6-luna"},
-                {"provider": "cursor", "id": "composer-2.5"},
+                {
+                    "provider": "cursor",
+                    "id": "composer-2.5",
+                    "thinking": {"efforts": ["minimal", "low", "high"]}
+                },
                 {"provider": "other", "id": "m1"}
             ]
         });
         let models = load_all_model_choices(&catalog, None);
         assert_eq!(models.len(), 3);
-        assert!(models.contains(&("cursor".into(), "composer-2.5".into())));
+        let composer =
+            find_model_choice(&models, Some("cursor/composer-2.5")).expect("composer model");
+        assert_eq!(
+            composer.thinking_efforts.as_deref(),
+            Some(["minimal".to_owned(), "low".to_owned(), "high".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn model_catalog_missing_or_empty_thinking_has_no_controls() {
+        let models = load_all_model_choices(
+            &serde_json::json!({
+                "models": [
+                    {"provider": "x", "id": "missing"},
+                    {"provider": "x", "id": "null", "thinking": null},
+                    {"provider": "x", "id": "empty", "thinking": {"efforts": []}}
+                ]
+            }),
+            None,
+        );
+        for choice in &models {
+            assert_eq!(choice.thinking_efforts, None);
+            assert!(thinking_options_for_model(Some(choice)).is_empty());
+        }
+    }
+
+    #[test]
+    fn thinking_options_preserve_supported_order_and_deduplicate() {
+        let choice = ModelChoice {
+            provider: "anthropic".into(),
+            id: "claude".into(),
+            thinking_efforts: Some(vec![
+                "minimal".into(),
+                "low".into(),
+                "low".into(),
+                "high".into(),
+            ]),
+        };
+        assert_eq!(
+            thinking_options_for_model(Some(&choice)),
+            ["off", "minimal", "low", "high", "auto"]
+        );
+        assert!(thinking_options_for_model(None).is_empty());
     }
 
     #[test]
@@ -6012,7 +6101,8 @@ mod tests {
         );
         let filtered = filter_models(&models, "composer");
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0], ("cursor".into(), "composer-2.5".into()));
+        assert_eq!(filtered[0].provider, "cursor");
+        assert_eq!(filtered[0].id, "composer-2.5");
     }
 
     #[test]
@@ -6237,10 +6327,14 @@ mod tests {
             ]
         });
         let sorted = load_all_model_choices(&catalog, Some("alpha/a"));
-        assert_eq!(sorted[0], ("alpha".into(), "a".into()));
-        assert_eq!(sorted[1], ("cursor".into(), "composer-2.5".into()));
-        assert_eq!(sorted[2], ("cursor".into(), "other".into()));
-        assert_eq!(sorted[3], ("zeta".into(), "z".into()));
+        let labels = sorted
+            .iter()
+            .map(|choice| format!("{}/{}", choice.provider, choice.id))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            ["alpha/a", "cursor/composer-2.5", "cursor/other", "zeta/z"]
+        );
     }
 }
 
