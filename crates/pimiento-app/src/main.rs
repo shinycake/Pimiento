@@ -1223,6 +1223,7 @@ fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyE
         .child(match dialog.method.as_str() {
             "select" => render_select_dialog(dialog, &select_dialog_options(dialog), cx),
             "confirm" => render_confirm_dialog(dialog, cx),
+            "open_url" => render_open_url_dialog(dialog, cx),
             _ => render_cancel_button(dialog, cx),
         })
         .into_any_element()
@@ -1296,6 +1297,92 @@ fn render_confirm_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gp
                     do_dialog_response(&view, &id_no, fields, cx);
                 })
         })
+        .into_any_element()
+}
+
+fn open_url_target(dialog: &UiDialog) -> Option<String> {
+    dialog
+        .payload
+        .get("url")
+        .or_else(|| dialog.payload.get("launchUrl"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn open_url_in_os_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let _ = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+fn render_open_url_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let url = open_url_target(dialog).unwrap_or_default();
+    let instructions = dialog
+        .payload
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Open this URL to continue (e.g. OAuth login).");
+    let id = dialog.id.clone();
+    v_flex()
+        .w_full()
+        .gap_2()
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(instructions.to_owned()),
+        )
+        .child(div().text_xs().font_family("Menlo").child(url.clone()))
+        .child(
+            h_flex()
+                .gap_2()
+                .child({
+                    let url_c = url.clone();
+                    Button::new(format!("open-url-{id}"))
+                        .label("Open")
+                        .small()
+                        .primary()
+                        .disabled(url.is_empty())
+                        .on_click(move |_, _, _cx| {
+                            open_url_in_os_browser(&url_c);
+                        })
+                })
+                .child({
+                    let url_c = url.clone();
+                    Button::new(format!("copy-url-{id}"))
+                        .label("Copy URL")
+                        .small()
+                        .ghost()
+                        .disabled(url.is_empty())
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(url_c.clone()));
+                        })
+                })
+                .child(render_cancel_button(dialog, cx)),
+        )
         .into_any_element()
 }
 
@@ -1731,5 +1818,36 @@ mod tests {
         assert_eq!(sorted[1], ("cursor".into(), "composer-2.5".into()));
         assert_eq!(sorted[2], ("cursor".into(), "other".into()));
         assert_eq!(sorted[3], ("zeta".into(), "z".into()));
+    }
+}
+
+#[cfg(test)]
+mod open_url_tests {
+    use super::*;
+    use pimiento_core::projection::UiDialog;
+    use serde_json::json;
+
+    #[test]
+    fn open_url_target_reads_url_or_launch() {
+        let d = UiDialog {
+            id: "1".into(),
+            method: "open_url".into(),
+            payload: json!({"url": "https://example.com/a"}),
+            timeout_ms: None,
+        };
+        assert_eq!(
+            open_url_target(&d).as_deref(),
+            Some("https://example.com/a")
+        );
+        let d2 = UiDialog {
+            id: "2".into(),
+            method: "open_url".into(),
+            payload: json!({"launchUrl": "https://example.com/b"}),
+            timeout_ms: None,
+        };
+        assert_eq!(
+            open_url_target(&d2).as_deref(),
+            Some("https://example.com/b")
+        );
     }
 }
