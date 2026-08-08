@@ -179,7 +179,11 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## D4 composer keymap and theme override — 2026-08-08
 
 - `InputEvent::PressEnter.secondary` is gpui-component's `secondary-enter` binding (Cmd+Enter on macOS, Ctrl+Enter elsewhere). It bypasses slash completion and follows the existing prompt/steer send path. Shift+Enter remains the component-provided multiline newline path.
-- Pimiento initializes `ThemeMode` once from `window.appearance()`. The status-strip `Theme: Light` / `Theme: Dark` button remains a manual Light/Dark override; it deliberately does not track subsequent OS appearance changes.
+- Pimiento defaults to `Theme: System` and observes subsequent window appearance changes. The status button and command-palette theme action share a three-state `System → Light → Dark → System` cycle; Light/Dark are manual overrides, while returning to System synchronizes immediately and resumes following the OS.
+
+## D4 close-while-streaming confirmation — 2026-08-08
+
+- A primary-window close request is blocked while any workspace session is Streaming, AwaitingResume, Compacting, or Retrying. A workspace-level confirm card accepts Yes/No, y/n, and Esc=No; confirmation sends `abort` to every abortable session, half-closes all child stdin streams for graceful shutdown, then quits the app.
 
 ## D4 semantic rows and platform QA — 2026-08-08
 
