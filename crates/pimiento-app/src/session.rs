@@ -1509,7 +1509,7 @@ impl SessionView {
                     .py_6()
                     .gap_4()
                     .rounded_md()
-                    .bg(theme.muted)
+                    .bg(theme.secondary)
                     .border_1()
                     .border_color(theme.border)
                     .child(
@@ -1576,6 +1576,7 @@ impl SessionView {
                                 .py_1()
                                 .rounded_sm()
                                 .bg(theme.danger)
+                                .text_color(theme.danger_foreground)
                                 .text_xs()
                                 .child(error)
                                 .child(
@@ -2412,9 +2413,9 @@ impl Render for SessionView {
                     .child(
                         v_flex()
                             .w_full()
-                            .bg(theme.muted)
+                            .bg(theme.status_bar)
                             .border_b_1()
-                            .border_color(theme.border)
+                            .border_color(theme.status_bar_border)
                             .child(
                                 h_flex()
                                     .w_full()
@@ -2633,8 +2634,21 @@ impl Render for SessionView {
                                 .py_1()
                                 .gap_2()
                                 .bg(theme.warning)
+                                .text_color(theme.warning_foreground)
                                 .text_xs()
-                                .child(notice),
+                                .child(div().flex_1().child(notice))
+                                .child(
+                                    Button::new("dismiss-version-gate")
+                                        .label("Dismiss")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.version_gate_notice = None;
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
                         )
                     })
                     .when(show_activity_banner, |parent| {
@@ -2644,6 +2658,7 @@ impl Render for SessionView {
                                 .px_3()
                                 .py_1()
                                 .bg(theme.warning)
+                                .text_color(theme.warning_foreground)
                                 .text_xs()
                                 .child(if let Some(fallback_banner) = fallback_banner {
                                     fallback_banner
@@ -2737,6 +2752,7 @@ impl Render for SessionView {
                             .py_2()
                             .gap_2()
                             .bg(theme.warning)
+                            .text_color(theme.warning_foreground)
                             .border_t_1()
                             .border_color(theme.border)
                             .child(
@@ -2811,7 +2827,7 @@ impl Render for SessionView {
                             .px_3()
                             .py_2()
                             .gap_2()
-                            .bg(theme.muted)
+                            .bg(theme.secondary)
                             .border_t_1()
                             .border_color(theme.border)
                             .child(
@@ -2959,7 +2975,7 @@ impl Render for SessionView {
                         .items_start()
                         .justify_center()
                         .pt_16()
-                        .bg(gpui::rgba(0x0000_0080))
+                        .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                             this.close_palette(cx);
@@ -3026,7 +3042,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .bg(gpui::rgba(0x0000_0080))
+                        .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                             this.close_about(cx);

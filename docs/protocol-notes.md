@@ -240,3 +240,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - App sources were modularized for maintainability without changing protocol or runtime behavior.
 - Visual-hierarchy polish (rail affordance, transcript spacing, inspector emphasis, and empty-state copy) changes presentation only; all displayed session facts remain OMP-authoritative.
 - Versions below or newer than the tested `omp 17.2.10+` baseline proceed with a warning banner; the exact discovered semantic version comes from startup discovery.
+
+## D4 light-theme transcript audit — 2026-08-08
+
+- Transcript and workspace surfaces now use gpui-component semantic theme tokens for overlays, sidebars, elevated rows, and paired warning/danger foregrounds. This was a source audit; light and dark visual QA remain manual.

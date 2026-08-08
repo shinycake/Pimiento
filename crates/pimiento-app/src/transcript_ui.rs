@@ -106,7 +106,7 @@ pub(crate) fn render_entry(
                                 .text_color(theme.muted_foreground)
                                 .text_xs()
                                 .italic()
-                                .child("Thinking · click to expand"),
+                                .child("Thinking · expand"),
                         ),
                 )
                 .child(
@@ -137,7 +137,7 @@ pub(crate) fn render_entry(
                                 .gap_2()
                                 .child(
                                     Button::new(("thinking-collapse", row_ix))
-                                        .label("collapse thinking")
+                                        .label("Thinking · collapse")
                                         .small()
                                         .ghost()
                                         .on_click(move |_, _, cx| {
@@ -165,7 +165,7 @@ pub(crate) fn render_entry(
                                 .px_2()
                                 .py_1()
                                 .rounded_sm()
-                                .bg(theme.muted)
+                                .bg(theme.secondary)
                                 .text_color(theme.muted_foreground)
                                 .italic()
                                 .child(TextView::markdown(("thinking", row_ix), text.clone())),
@@ -189,6 +189,11 @@ pub(crate) fn render_entry(
                     h_flex()
                         .w_full()
                         .gap_2()
+                        .child(
+                            Label::new("Notice")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -228,6 +233,7 @@ pub(crate) fn render_entry(
                         .py_1()
                         .rounded_sm()
                         .bg(theme.danger)
+                        .text_color(theme.danger_foreground)
                         .child(div().flex_1().text_sm().child(message.clone()))
                         .child(
                             Button::new(("copy-error", row_ix))
@@ -257,7 +263,7 @@ pub(crate) fn render_entry(
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .bg(theme.muted)
+                        .bg(theme.secondary)
                         .font_family(theme.mono_font_family.clone())
                         .text_size(theme.mono_font_size)
                         .child(div().flex_1().child(text.clone()))
@@ -294,7 +300,7 @@ pub(crate) fn render_entry(
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .bg(theme.muted)
+                        .bg(theme.secondary)
                         .text_xs()
                         .text_color(tint)
                         .child(
@@ -338,7 +344,7 @@ pub(crate) fn render_entry(
                         .px_2()
                         .py_1()
                         .rounded_sm()
-                        .bg(theme.muted)
+                        .bg(theme.secondary)
                         .text_xs()
                         .text_color(tint)
                         .child(
@@ -376,6 +382,7 @@ pub(crate) fn render_entry(
                         .py_1()
                         .rounded_sm()
                         .bg(theme.warning)
+                        .text_color(theme.warning_foreground)
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
                         .child(div().flex_1().child(format!("{raw:#}")))
@@ -418,10 +425,10 @@ pub(crate) fn render_tool_card(
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let (status_color, status_label) = match tc.status {
-        ToolStatus::Running => (theme.info, "running"),
-        ToolStatus::Ok => (theme.success, "ok"),
-        ToolStatus::Err => (theme.danger, "error"),
+    let (status_color, status_foreground, status_label) = match tc.status {
+        ToolStatus::Running => (theme.info, theme.info_foreground, "running"),
+        ToolStatus::Ok => (theme.success, theme.success_foreground, "ok"),
+        ToolStatus::Err => (theme.danger, theme.danger_foreground, "error"),
     };
     let output_text = tc.output.to_string();
     let has_output = !tc.output.is_empty();
@@ -481,7 +488,12 @@ pub(crate) fn render_tool_card(
     v_flex()
         .w_full()
         .py_2()
+        .px_2()
         .gap_0p5()
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.secondary)
         .child(
             h_flex()
                 .w_full()
@@ -492,6 +504,7 @@ pub(crate) fn render_tool_card(
                         .py_0p5()
                         .rounded_sm()
                         .bg(status_color)
+                        .text_color(status_foreground)
                         .text_xs()
                         .child(status_label),
                 )
@@ -551,7 +564,7 @@ pub(crate) fn render_tool_card(
                             .px_2()
                             .py_1()
                             .rounded_sm()
-                            .bg(theme.muted)
+                            .bg(theme.background)
                             .font_family(theme.mono_font_family.clone())
                             .text_size(theme.mono_font_size)
                             .child(args_text.clone()),
@@ -568,7 +581,7 @@ pub(crate) fn render_tool_card(
                     .py_1()
                     .gap_0p5()
                     .rounded_sm()
-                    .bg(theme.muted)
+                    .bg(theme.background)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
                     .children(diff.lines.iter().enumerate().map(|(ix, line)| {
@@ -592,7 +605,7 @@ pub(crate) fn render_tool_card(
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(theme.muted)
+                    .bg(theme.background)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
                     .child(output_text.clone())
@@ -684,7 +697,7 @@ pub(crate) fn render_crash_card(
         .px_3()
         .py_2()
         .gap_2()
-        .bg(theme.muted)
+        .bg(theme.background)
         .border_t_1()
         .border_color(theme.border)
         .child(
