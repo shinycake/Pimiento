@@ -12,5 +12,5 @@ Run this checklist for every release and every GPUI/gpui-component pin bump. Rec
 - [ ] **macOS:** complete the full checklist on a supported macOS release, including popup placement and multi-window behavior.
 - [ ] **Linux X11:** complete the full checklist under X11, with special attention to menus, pickers, dialogs, and popup coordinates.
 - [ ] **Linux Wayland:** complete the full checklist under Wayland, with special attention to menus, pickers, dialogs, and popup coordinates.
-- [ ] **IME composition:** with a CJK input source on each OS/backend, press Enter while composing and confirm it commits the candidate without sending; press Enter again after commit and confirm exactly one send.
+- [ ] **IME composition:** with a CJK input source on each OS/backend, press Enter while composing and confirm it commits the candidate without sending; press Enter again after commit and confirm exactly one send. (App-level guard blocked until gpui-component exposes composition state — see `docs/protocol-notes.md` § D4 IME composition.)
 - [ ] **Window restore and multi-monitor:** move and resize the window across displays, relaunch, and verify usable placement, size, focus, and overlays.
