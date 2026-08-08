@@ -272,6 +272,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The empty transcript presents one short sentence without key-command tips.
 - Completed thinking rows with empty text render as zero-height placeholders so list indices stay stable without showing a hollow "Thinking · expand" control.
 - Info notices that look like tool/MCP mount chatter stay fully visible but drop the `Notice` label and render slightly quieter — text remains OMP-authoritative.
+- The context inspector header includes a ghost **Hide** control (alongside the existing `⌘J` hint) that toggles the same disposable `inspector_open` preference.
 
 ## Palette theme label — 2026-08-08
 
