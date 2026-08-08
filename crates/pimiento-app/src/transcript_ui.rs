@@ -732,6 +732,7 @@ pub(crate) fn render_crash_card(
                 .child(
                     Label::new("Session crashed")
                         .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.danger),
                 )
                 .child(
