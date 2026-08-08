@@ -141,3 +141,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Status strip **Export** calls `export_html` with a timestamped path under the session cwd and posts a notice with the result path.
 - **Agents (n)** toggles a read-only drawer of recent `subagent_*` payloads already retained on the projection.
 - Compacting / retrying phases show a warning banner above the transcript.
+
+## Thinking collapse + session rename — 2026-08-08
+
+- Collapsed thinking rows expand on click; expanded rows offer collapse.
+- Status strip **Rename** calls `set_session_name` with a stamped label (modal rename can come later).

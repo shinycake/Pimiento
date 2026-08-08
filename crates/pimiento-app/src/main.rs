@@ -1403,6 +1403,76 @@ impl SessionView {
             )
             .into_any_element()
     }
+    fn toggle_thinking_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+        if let Some(TranscriptEntry::Thinking { collapsed, .. }) =
+            self.projection.transcript.get_mut(row_ix)
+        {
+            *collapsed = !*collapsed;
+            self.sync_transcript_list();
+            cx.notify();
+        }
+    }
+
+    fn rename_session(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.launcher_cwd.as_path());
+        let current = projection_session_name(&self.projection, cwd);
+        // Lightweight rename: append a short stamp so it's actionable without a modal.
+        let name = format!(
+            "{current} · {stamp}",
+            stamp = current_unix_seconds() % 10_000
+        );
+        let name_for_state = name.clone();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::SetSessionName { name: name.clone() })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(state) = this.projection.state.state.as_mut()
+                            && let Some(obj) = state.as_object_mut()
+                        {
+                            obj.insert("sessionName".into(), serde_json::json!(name_for_state));
+                        }
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(format!("session renamed → {name}")));
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "set_session_name failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("set_session_name".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_session_name: {error}"),
+                            code: Some("set_session_name".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     fn rail_label_and_phase(&self) -> (String, String) {
         let cwd = self
             .session_cwd
@@ -2069,6 +2139,18 @@ impl Render for SessionView {
                                             )),
                                     )
                                     .child(
+                                        Button::new("rename-session")
+                                            .label("Rename")
+                                            .small()
+                                            .ghost()
+                                            .disabled(!can_pick)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.rename_session(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
                                         Button::new("sessions-launcher")
                                             .label("Sessions")
                                             .small()
@@ -2494,32 +2576,61 @@ fn render_entry(
             .into_any_element(),
         TranscriptEntry::Thinking {
             collapsed: true, ..
-        } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.muted)
-                    .text_color(theme.muted_foreground)
-                    .text_xs()
-                    .child("💭 thinking…"),
-            )
-            .into_any_element(),
-        TranscriptEntry::Thinking { text, .. } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.muted)
-                    .child(TextView::markdown("thinking", text.clone())),
-            )
-            .into_any_element(),
+        } => {
+            let view = cx.entity().downgrade();
+            div()
+                .id(("thinking-collapsed", row_ix))
+                .w_full()
+                .py_1()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let _ = view.update(cx, |this, cx| {
+                        this.toggle_thinking_row(row_ix, cx);
+                    });
+                })
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.muted)
+                        .text_color(theme.muted_foreground)
+                        .text_xs()
+                        .child("thinking… (click to expand)"),
+                )
+                .into_any_element()
+        }
+        TranscriptEntry::Thinking { text, .. } => {
+            let view = cx.entity().downgrade();
+            div()
+                .id(("thinking-expanded", row_ix))
+                .w_full()
+                .py_1()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(("thinking-collapse", row_ix))
+                                .label("collapse thinking")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.toggle_thinking_row(row_ix, cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.muted)
+                                .child(TextView::markdown(("thinking", row_ix), text.clone())),
+                        ),
+                )
+                .into_any_element()
+        }
         TranscriptEntry::ToolCall(tc) => {
             render_tool_card(tc, expanded.contains(&tc.tool_call_id), cx)
         }
