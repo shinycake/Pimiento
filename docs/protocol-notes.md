@@ -236,3 +236,4 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - The command palette exposes an in-app **About Pimiento** notice with the discovered `omp --version` output when connected; this is disposable display state only.
 - Launcher and inline-dialog changes are presentation-only. Dialog responses, Esc cancellation, and `open_url` copy/open behavior retain their existing RPC shapes.
+- App sources were modularized for maintainability without changing protocol or runtime behavior.
