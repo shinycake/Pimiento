@@ -4,12 +4,13 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, Context, FollowMode, KeyDownEvent, ListAlignment, ListState, Render, Task,
-    Window, WindowOptions, div, list, prelude::*, px,
+    App, ClickEvent, Context, FollowMode, KeyDownEvent, ListAlignment, ListState,
+    PathPromptOptions, Render, Task, Window, WindowOptions, div, list, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -30,6 +31,7 @@ use pimiento_core::{
     projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
     transcript::{ToolStatus, TranscriptEntry},
 };
+use serde::{Deserialize, Serialize};
 
 // ── theme toggle ──────────────────────────────────────────────────────────
 
@@ -52,6 +54,129 @@ fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
 type ModelChoice = (String, String);
 
 const MODEL_PICKER_VISIBLE_CAP: usize = 200;
+const MAX_RECENT_SESSIONS: usize = 12;
+static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherPhase {
+    Visible,
+    Connecting,
+    Hidden,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RecentSession {
+    #[serde(rename = "sessionFile")]
+    session_file: PathBuf,
+    cwd: PathBuf,
+    #[serde(default)]
+    name: String,
+    #[serde(rename = "lastUsed", default)]
+    last_used: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionPersistence {
+    root: PathBuf,
+}
+
+impl SessionPersistence {
+    fn from_environment() -> Self {
+        let home_override = std::env::var_os("PIMIENTO_HOME").map(PathBuf::from);
+        let root = app_data_dir(home_override.as_deref(), home_dir().as_deref());
+        Self { root }
+    }
+
+    #[cfg(test)]
+    fn from_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn last_session_path(&self) -> PathBuf {
+        self.root.join("last-session")
+    }
+
+    fn recent_sessions_path(&self) -> PathBuf {
+        self.root.join("recent.json")
+    }
+
+    fn load_last_session(&self) -> Option<PathBuf> {
+        let raw = std::fs::read_to_string(self.last_session_path()).ok()?;
+        let raw = raw.trim();
+        (!raw.is_empty()).then(|| PathBuf::from(raw))
+    }
+
+    fn remember_last_session(&self, session_file: Option<&str>) {
+        let Some(session_file) = session_file.map(str::trim).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let _ = write_persistence_file(&self.last_session_path(), session_file);
+    }
+
+    fn load_recent_sessions(&self) -> Vec<RecentSession> {
+        let Ok(raw) = std::fs::read_to_string(self.recent_sessions_path()) else {
+            return Vec::new();
+        };
+        parse_recent_sessions(&raw)
+    }
+
+    fn save_recent_sessions(&self, sessions: &[RecentSession]) -> std::io::Result<()> {
+        let sessions = normalize_recent_sessions(sessions.to_vec());
+        let contents = serde_json::to_string_pretty(&sessions).map_err(|error| {
+            std::io::Error::other(format!("serialize recent sessions: {error}"))
+        })?;
+        write_persistence_file(&self.recent_sessions_path(), &contents)
+    }
+
+    fn remember_recent_session(
+        &self,
+        session_file: Option<&str>,
+        cwd: Option<&Path>,
+        name: Option<&str>,
+    ) {
+        let Some(session_file) = session_file.map(str::trim).filter(|file| !file.is_empty()) else {
+            return;
+        };
+        let Some(cwd) = cwd.filter(|path| !path.as_os_str().is_empty()) else {
+            return;
+        };
+
+        let mut sessions = self.load_recent_sessions();
+        let last_used = next_last_used(&sessions);
+        let record = RecentSession {
+            session_file: PathBuf::from(session_file),
+            cwd: cwd.to_owned(),
+            name: name
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map_or_else(|| default_session_name(cwd), str::to_owned),
+            last_used,
+        };
+        sessions.retain(|existing| existing.session_file != record.session_file);
+        sessions.push(record);
+        let _ = self.save_recent_sessions(&sessions);
+    }
+
+    fn forget_session(&self, session_file: &Path) {
+        let mut sessions = self.load_recent_sessions();
+        let original_len = sessions.len();
+        sessions.retain(|session| session.session_file != session_file);
+        if sessions.len() != original_len {
+            let _ = self.save_recent_sessions(&sessions);
+        }
+        if self.load_last_session().as_deref() == Some(session_file) {
+            let _ = std::fs::remove_file(self.last_session_path());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LauncherBootstrap {
+    persistence: SessionPersistence,
+    launcher_cwd: PathBuf,
+    recent_sessions: Vec<RecentSession>,
+    last_session: Option<PathBuf>,
+}
 
 struct SessionView {
     projection: SessionProjection,
@@ -71,6 +196,13 @@ struct SessionView {
     unread_below: usize,
     _subscriptions: Vec<gpui::Subscription>,
     pump: Option<Task<()>>,
+    persistence: SessionPersistence,
+    session_cwd: Option<PathBuf>,
+    launcher_cwd: PathBuf,
+    recent_sessions: Vec<RecentSession>,
+    last_session: Option<PathBuf>,
+    launcher_phase: LauncherPhase,
+    launcher_error: Option<String>,
 }
 
 impl SessionView {
@@ -81,7 +213,14 @@ impl SessionView {
         status: String,
         initial_projection: SessionProjection,
         available_models: Vec<ModelChoice>,
+        bootstrap: LauncherBootstrap,
     ) -> Self {
+        let LauncherBootstrap {
+            persistence,
+            launcher_cwd,
+            recent_sessions,
+            last_session,
+        } = bootstrap;
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -115,40 +254,11 @@ impl SessionView {
             });
         }
 
-        // Start foreground pump if we have a live client
-        let pump = client.as_ref().map(|c| {
-            let events = c.events();
-            cx.spawn(async move |view, cx| {
-                while let Ok(event) = events.recv().await {
-                    let _ = view.update(cx, |this, cx| {
-                        match &event {
-                            ClientEvent::Frame(frame) => {
-                                let is_model_changed =
-                                    frame.raw.get("type").and_then(|v| v.as_str())
-                                        == Some("model_changed");
-                                this.projection.apply(frame);
-                                if is_model_changed {
-                                    this.refresh_state_after_model_change(cx);
-                                }
-                            }
-                            ClientEvent::Closed(info) => {
-                                let reason = info
-                                    .error_msg
-                                    .clone()
-                                    .unwrap_or_else(|| format!("exit code {:?}", info.exit_code));
-                                this.projection.mark_dead(reason);
-                                this.client = None;
-                                let tail = &info.stderr_tail;
-                                this.status_message =
-                                    format!("OMP closed — {}", &tail[..256.min(tail.len())]);
-                            }
-                        }
-                        cx.notify();
-                    });
-                }
-            })
-        });
-
+        let launcher_phase = if client.is_none() {
+            LauncherPhase::Visible
+        } else {
+            LauncherPhase::Hidden
+        };
         let mut view = Self {
             projection: initial_projection,
             client,
@@ -164,10 +274,174 @@ impl SessionView {
             last_transcript_len: initial_len,
             unread_below: 0,
             _subscriptions: subscriptions,
-            pump,
+            pump: None,
+            persistence,
+            session_cwd: None,
+            launcher_cwd,
+            recent_sessions,
+            last_session,
+            launcher_phase,
+            launcher_error: None,
         };
+        if let Some(client) = view.client.clone() {
+            view.start_event_pump(&client, cx);
+        }
         view.start_catalog_load(cx);
         view
+    }
+
+    fn start_event_pump(&mut self, client: &RpcClient, cx: &mut Context<Self>) {
+        let events = client.events();
+        self.pump = Some(cx.spawn(async move |view, cx| {
+            while let Ok(event) = events.recv().await {
+                let _ = view.update(cx, |this, cx| {
+                    match &event {
+                        ClientEvent::Frame(frame) => {
+                            let is_model_changed = frame.raw.get("type").and_then(|v| v.as_str())
+                                == Some("model_changed");
+                            this.projection.apply(frame);
+                            if is_model_changed {
+                                this.refresh_state_after_model_change(cx);
+                            }
+                        }
+                        ClientEvent::Closed(info) => {
+                            let reason = info
+                                .error_msg
+                                .clone()
+                                .unwrap_or_else(|| format!("exit code {:?}", info.exit_code));
+                            this.projection.mark_dead(reason);
+                            this.client = None;
+                            this.status_message = format!(
+                                "OMP closed — {}",
+                                info.stderr_tail.chars().take(256).collect::<String>()
+                            );
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    fn begin_connection(
+        &mut self,
+        window: &Window,
+        cwd: PathBuf,
+        resume: Option<PathBuf>,
+        launcher_mode: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.launcher_phase == LauncherPhase::Connecting {
+            return;
+        }
+        self.client.take();
+        self.pump.take();
+        self.launcher_phase = LauncherPhase::Connecting;
+        if launcher_mode {
+            self.launcher_cwd.clone_from(&cwd);
+            self.launcher_error = None;
+            self.session_cwd = None;
+            self.projection = SessionProjection::new();
+            self.available_models.clear();
+            self.expanded_tools.clear();
+            self.transcript_list.reset(0);
+            self.last_transcript_len = 0;
+            self.unread_below = 0;
+            "Connecting to OMP…".clone_into(&mut self.status_message);
+        } else {
+            self.launcher_phase = LauncherPhase::Hidden;
+            self.projection.mark_restarting();
+            "Restarting session…".clone_into(&mut self.status_message);
+        }
+        cx.notify();
+
+        let persistence = self.persistence.clone();
+        cx.spawn_in(window, async move |view, cx| {
+            let cwd_for_connect = cwd.clone();
+            let resume_for_connect = resume.clone();
+            let result = cx
+                .background_spawn(async move {
+                    try_connect_omp(
+                        Some(cwd_for_connect),
+                        resume_for_connect.as_deref(),
+                        &persistence,
+                    )
+                })
+                .await;
+            let _ = view.update_in(cx, |this, _window, cx| {
+                this.finish_connection(result, cwd, launcher_mode, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_connection(
+        &mut self,
+        result: Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String>,
+        cwd: PathBuf,
+        launcher_mode: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.launcher_phase = if launcher_mode {
+            LauncherPhase::Visible
+        } else {
+            LauncherPhase::Hidden
+        };
+        match result {
+            Ok((client, projection, status, models)) => {
+                self.available_models = models;
+                self.projection = projection;
+                self.status_message = status;
+                self.client = Some(client.clone());
+                self.session_cwd = Some(cwd);
+                self.launcher_phase = LauncherPhase::Hidden;
+                self.launcher_error = None;
+                self.transcript_list.reset(self.projection.transcript.len());
+                self.transcript_list.set_follow_mode(FollowMode::Tail);
+                self.last_transcript_len = self.projection.transcript.len();
+                self.unread_below = 0;
+                self.start_event_pump(&client, cx);
+                self.last_session = self.persistence.load_last_session();
+                self.recent_sessions = self.persistence.load_recent_sessions();
+                self.start_catalog_load(cx);
+            }
+            Err(error) => {
+                if launcher_mode {
+                    self.launcher_phase = LauncherPhase::Visible;
+                    self.launcher_error = Some(error.clone());
+                    "Unable to connect to OMP".clone_into(&mut self.status_message);
+                } else {
+                    self.launcher_phase = LauncherPhase::Hidden;
+                    self.projection.mark_dead(error.clone());
+                    self.status_message = error;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn choose_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.launcher_phase == LauncherPhase::Connecting {
+            return;
+        }
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select a working directory".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().find(|path| path.is_dir()) else {
+                return;
+            };
+            let _ = view.update_in(cx, |this, window, cx| {
+                this.begin_connection(window, path, None, true, cx);
+            });
+        })
+        .detach();
     }
 
     /// Keep `ListState` item count / measurements in sync with the projection.
@@ -430,72 +704,36 @@ impl SessionView {
     }
 
     fn restart_resume_path(&self) -> Option<PathBuf> {
-        if let Some(session) = self.projection.state.session_file.as_ref()
-            && !session.is_empty()
-        {
-            return Some(PathBuf::from(session));
-        }
-        let raw = std::fs::read_to_string(last_session_path()).ok()?;
-        let raw = raw.trim();
-        (!raw.is_empty()).then(|| PathBuf::from(raw))
+        self.projection
+            .state
+            .session_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| self.persistence.load_last_session())
+            .or_else(|| latest_resume_path(&self.persistence, &self.recent_sessions))
     }
 
-    fn do_restart(&mut self, cx: &mut Context<Self>) {
-        let resume = self.restart_resume_path();
-        self.projection.mark_restarting();
-        self.client = None;
-        self.pump = None;
-        "Restarting session…".clone_into(&mut self.status_message);
-        cx.notify();
+    fn restart_cwd(&self, resume: Option<&Path>) -> PathBuf {
+        self.session_cwd
+            .clone()
+            .or_else(|| {
+                resume.and_then(|session| {
+                    self.recent_sessions
+                        .iter()
+                        .find(|recent| recent.session_file == session)
+                        .map(|recent| recent.cwd.clone())
+                })
+            })
+            .or_else(|| Some(self.launcher_cwd.clone()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 
-        match try_connect_omp(resume) {
-            Ok((client, proj, status, models)) => {
-                self.available_models = models;
-                self.projection = proj;
-                self.status_message = status;
-                self.client = Some(client.clone());
-                let n = self.projection.transcript.len();
-                self.transcript_list.reset(n);
-                self.transcript_list.set_follow_mode(FollowMode::Tail);
-                self.last_transcript_len = n;
-                self.unread_below = 0;
-                let events = client.events();
-                self.pump = Some(cx.spawn(async move |view, cx| {
-                    while let Ok(event) = events.recv().await {
-                        let _ = view.update(cx, |this, cx| {
-                            match &event {
-                                ClientEvent::Frame(frame) => {
-                                    let is_model_changed =
-                                        frame.raw.get("type").and_then(|v| v.as_str())
-                                            == Some("model_changed");
-                                    this.projection.apply(frame);
-                                    if is_model_changed {
-                                        this.refresh_state_after_model_change(cx);
-                                    }
-                                }
-                                ClientEvent::Closed(info) => {
-                                    let reason = info.error_msg.clone().unwrap_or_else(|| {
-                                        format!("exit code {:?}", info.exit_code)
-                                    });
-                                    this.projection.mark_dead(reason);
-                                    this.client = None;
-                                    let tail = &info.stderr_tail;
-                                    this.status_message =
-                                        format!("OMP closed — {}", &tail[..256.min(tail.len())]);
-                                }
-                            }
-                            cx.notify();
-                        });
-                    }
-                }));
-                self.start_catalog_load(cx);
-            }
-            Err(e) => {
-                self.projection.mark_dead(e.clone());
-                self.status_message = e;
-            }
-        }
-        cx.notify();
+    fn do_restart(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let resume = self.restart_resume_path();
+        let cwd = self.restart_cwd(resume.as_deref());
+        self.begin_connection(window, cwd, resume, false, cx);
     }
 
     fn can_abort(&self) -> bool {
@@ -610,6 +848,165 @@ impl SessionView {
         })
         .detach();
     }
+
+    #[allow(clippy::too_many_lines)] // Launcher layout remains easier to audit as one declarative block.
+    fn render_launcher(&self, _window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme().clone();
+        let cwd = self.launcher_cwd.display().to_string();
+        let recents = self.recent_sessions.clone();
+        let last_resume = self.last_session.clone().filter(|resume| {
+            !self
+                .recent_sessions
+                .iter()
+                .any(|recent| recent.session_file == *resume)
+        });
+        let connecting = self.launcher_phase == LauncherPhase::Connecting;
+
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(
+                v_flex()
+                    .w_full()
+                    .max_w(px(720.))
+                    .p_5()
+                    .gap_3()
+                    .rounded_md()
+                    .bg(theme.muted)
+                    .border_1()
+                    .border_color(theme.border)
+                    .child(Label::new("Start a Pimiento session").text_lg())
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(Label::new("Working directory").text_sm())
+                            .child(
+                                div()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .bg(theme.background)
+                                    .child(cwd),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("choose-working-directory")
+                                    .label("Choose directory…")
+                                    .primary()
+                                    .disabled(connecting)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.choose_directory(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("start-working-directory")
+                                    .label("Start here")
+                                    .disabled(connecting)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        let cwd = this.launcher_cwd.clone();
+                                        this.begin_connection(window, cwd, None, true, cx);
+                                    })),
+                            ),
+                    )
+                    .when(connecting, |parent| {
+                        parent.child(
+                            Label::new("Connecting to OMP…")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    })
+                    .when_some(self.launcher_error.clone(), |parent, error| {
+                        parent.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.danger)
+                                .text_xs()
+                                .child(error)
+                                .child(
+                                    Label::new(
+                                        "If omp is missing, install manually: curl -fsSL https://omp.sh/install | sh",
+                                    )
+                                    .text_xs(),
+                                )
+                                .child(
+                                    Button::new("redetect-omp")
+                                        .label("Re-detect omp")
+                                        .small()
+                                        .ghost()
+                                        .disabled(connecting)
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                let cwd = this.launcher_cwd.clone();
+                                                this.begin_connection(window, cwd, None, true, cx);
+                                            },
+                                        )),
+                                ),
+                        )
+                    })
+                    .when_some(last_resume, |parent, resume| {
+                        let cwd = self.launcher_cwd.clone();
+                        parent.child(
+                            Button::new("resume-last-session")
+                                .label("Resume last session")
+                                .primary()
+                                .disabled(connecting)
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, window, cx| {
+                                        this.begin_connection(
+                                            window,
+                                            cwd.clone(),
+                                            Some(resume.clone()),
+                                            true,
+                                            cx,
+                                        );
+                                    },
+                                )),
+                        )
+                    })
+                    .when(!recents.is_empty(), |parent| {
+                        parent.child(
+                            v_flex()
+                                .gap_1()
+                                .child(Label::new("Recent sessions").text_sm())
+                                .children(recents.into_iter().enumerate().map(|(ix, recent)| {
+                                    let cwd = recent.cwd.clone();
+                                    let resume = recent.session_file.clone();
+                                    let label = if recent.name.trim().is_empty() {
+                                        recent.cwd.display().to_string()
+                                    } else {
+                                        format!("{}  —  {}", recent.name, recent.cwd.display())
+                                    };
+                                    Button::new(("recent-session", ix))
+                                        .label(label)
+                                        .ghost()
+                                        .w_full()
+                                        .disabled(connecting)
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.begin_connection(
+                                                    window,
+                                                    cwd.clone(),
+                                                    Some(resume.clone()),
+                                                    true,
+                                                    cx,
+                                                );
+                                            },
+                                        ))
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
 }
 
 // ── guards ────────────────────────────────────────────────────────────────
@@ -679,6 +1076,10 @@ impl Render for SessionView {
             self.model_search.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
+        }
+
+        if self.launcher_phase != LauncherPhase::Hidden {
+            return self.render_launcher(window, cx);
         }
 
         let theme = cx.theme().clone();
@@ -947,10 +1348,13 @@ impl Render for SessionView {
                     })
                     .when(self.can_restart(), |parent| {
                         parent.child(Button::new("restart").primary().label("Restart").on_click(
-                            cx.listener(|this, _: &ClickEvent, _window, cx| this.do_restart(cx)),
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.do_restart(window, cx);
+                            }),
                         ))
                     }),
             )
+            .into_any_element()
     }
 }
 
@@ -1256,8 +1660,8 @@ fn render_crash_card(
                                 .primary()
                                 .label("Restart")
                                 .disabled(!can_restart)
-                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                    this.do_restart(cx);
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.do_restart(window, cx);
                                 })),
                         )
                         .child(
@@ -1520,30 +1924,163 @@ fn do_dialog_response(
 
 // ── OMP connection helper ─────────────────────────────────────────────────
 
-fn last_session_path() -> PathBuf {
-    dirs_next_home()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".pimiento")
-        .join("last-session")
-}
-
-fn dirs_next_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
-}
-
-fn remember_session_file(session_file: Option<&str>) {
-    let Some(session_file) = session_file.filter(|s| !s.is_empty()) else {
-        return;
-    };
-    let path = last_session_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+fn app_data_dir(home_override: Option<&Path>, home: Option<&Path>) -> PathBuf {
+    if let Some(path) = home_override.filter(|path| !path.as_os_str().is_empty()) {
+        return path.to_owned();
     }
-    let _ = std::fs::write(path, session_file);
+    home.map_or_else(|| PathBuf::from(".pimiento"), |path| path.join(".pimiento"))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+}
+
+fn write_persistence_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let Some(file_name) = path.file_name() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "persistence path has no file name",
+        ));
+    };
+    let nonce = PERSISTENCE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_file_name(format!(
+        ".{}.tmp-{}-{nonce}",
+        file_name.to_string_lossy(),
+        std::process::id(),
+    ));
+    if let Err(error) = std::fs::write(&temporary, contents) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    match std::fs::rename(&temporary, path) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            let _ = std::fs::remove_file(&temporary);
+            std::fs::write(path, contents).map_err(|write_error| {
+                std::io::Error::new(
+                    write_error.kind(),
+                    format!("rename failed ({rename_error}); fallback write failed: {write_error}"),
+                )
+            })
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RecentSessionsFile {
+    List(Vec<RecentSession>),
+    Wrapped { sessions: Vec<RecentSession> },
+}
+
+fn normalize_recent_sessions(mut sessions: Vec<RecentSession>) -> Vec<RecentSession> {
+    sessions.retain(|session| {
+        !session.session_file.as_os_str().is_empty() && !session.cwd.as_os_str().is_empty()
+    });
+    sessions.sort_by(|a, b| {
+        b.last_used
+            .cmp(&a.last_used)
+            .then_with(|| a.session_file.cmp(&b.session_file))
+    });
+    let mut seen = HashSet::new();
+    sessions.retain(|session| seen.insert(session.session_file.clone()));
+    sessions.truncate(MAX_RECENT_SESSIONS);
+    sessions
+}
+
+fn parse_recent_sessions(raw: &str) -> Vec<RecentSession> {
+    match serde_json::from_str::<RecentSessionsFile>(raw) {
+        Ok(RecentSessionsFile::List(sessions) | RecentSessionsFile::Wrapped { sessions }) => {
+            normalize_recent_sessions(sessions)
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn next_last_used(sessions: &[RecentSession]) -> u64 {
+    let now = current_unix_seconds();
+    let previous = sessions
+        .iter()
+        .map(|session| session.last_used)
+        .max()
+        .unwrap_or(0);
+    now.max(previous.saturating_add(1))
+}
+
+fn default_session_name(cwd: &Path) -> String {
+    cwd.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| cwd.display().to_string())
+}
+
+fn projection_session_name(projection: &SessionProjection, cwd: &Path) -> String {
+    projection
+        .state
+        .state
+        .as_ref()
+        .and_then(|state| state.get("sessionName"))
+        .and_then(|name| name.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| default_session_name(cwd), str::to_owned)
+}
+
+fn resolve_launcher_path(path: &Path, current_dir: Option<&Path>) -> Option<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    if path.is_absolute() {
+        return Some(path.to_owned());
+    }
+    current_dir.map(|base| base.join(path))
+}
+
+fn initial_launcher_directory(
+    cwd_override: Option<&Path>,
+    recent: &[RecentSession],
+    current: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let current = current.filter(|path| path.is_absolute());
+    let current_dir = current.as_deref();
+    cwd_override
+        .and_then(|path| resolve_launcher_path(path, current_dir))
+        .or_else(|| {
+            recent
+                .iter()
+                .find_map(|session| resolve_launcher_path(&session.cwd, current_dir))
+        })
+        .or(current)
+}
+
+fn auto_connect_enabled(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "1")
+}
+
+fn latest_resume_path(
+    persistence: &SessionPersistence,
+    recent: &[RecentSession],
+) -> Option<PathBuf> {
+    persistence
+        .load_last_session()
+        .or_else(|| recent.first().map(|session| session.session_file.clone()))
 }
 
 fn try_connect_omp(
-    resume: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+    resume: Option<&Path>,
+    persistence: &SessionPersistence,
 ) -> Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String> {
     let inputs = DiscoveryInputs {
         override_bin: std::env::var_os("PIMIENTO_OMP_BIN")
@@ -1557,21 +2094,14 @@ fn try_connect_omp(
     let discovered = smol::block_on(async { discover(&inputs, &SystemRunner) })
         .map_err(|e| format!("OMP not found: {e}"))?;
 
-    let cwd = std::env::var_os("PIMIENTO_CWD")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
+    let cwd = cwd
+        .filter(|path| path.is_absolute())
         .or_else(|| std::env::current_dir().ok());
-
-    let resume = resume.or_else(|| {
-        let raw = std::fs::read_to_string(last_session_path()).ok()?;
-        let raw = raw.trim();
-        (!raw.is_empty()).then(|| PathBuf::from(raw))
-    });
-
+    let resume = resume.map(Path::to_owned);
     let mut cfg = ClientConfig {
         program: discovered.path,
         env: discovered.env,
-        cwd,
+        cwd: cwd.clone(),
         no_session: false,
         resume: resume.clone(),
         ..Default::default()
@@ -1580,7 +2110,9 @@ fn try_connect_omp(
     let client = match smol::block_on(async { RpcClient::connect(cfg.clone()).await }) {
         Ok(c) => c,
         Err(e) if resume.is_some() => {
-            let _ = std::fs::remove_file(last_session_path());
+            if let Some(resume) = &resume {
+                persistence.forget_session(resume);
+            }
             cfg.resume = None;
             smol::block_on(async { RpcClient::connect(cfg).await })
                 .map_err(|e2| format!("OMP connect failed (resume {e}; fresh {e2})"))?
@@ -1604,7 +2136,13 @@ fn try_connect_omp(
         && let Some(data) = &r.data
     {
         proj.hydrate_get_state(data);
-        remember_session_file(proj.state.session_file.as_deref());
+        persistence.remember_last_session(proj.state.session_file.as_deref());
+        if let (Some(session_file), Some(cwd)) =
+            (proj.state.session_file.as_deref(), cwd.as_deref())
+        {
+            let name = projection_session_name(&proj, cwd);
+            persistence.remember_recent_session(Some(session_file), Some(cwd), Some(&name));
+        }
     }
     if let Ok(r) = &avail
         && r.success
@@ -1726,17 +2264,48 @@ fn filter_models(models: &[ModelChoice], query: &str) -> Vec<ModelChoice> {
 // ── entry ─────────────────────────────────────────────────────────────────
 
 fn main() {
-    let connect_result = try_connect_omp(None);
+    let persistence = SessionPersistence::from_environment();
+    let recent = persistence.load_recent_sessions();
+    let last_session = persistence.load_last_session();
+    let cwd_override = std::env::var_os("PIMIENTO_CWD").map(PathBuf::from);
+    let initial_cwd = initial_launcher_directory(
+        cwd_override.as_deref(),
+        &recent,
+        std::env::current_dir().ok(),
+    )
+    .unwrap_or_else(|| PathBuf::from("."));
+    let auto_connect = auto_connect_enabled(std::env::var("PIMIENTO_AUTO_CONNECT").ok().as_deref());
+    let auto_resume = auto_connect
+        .then(|| latest_resume_path(&persistence, &recent))
+        .flatten();
 
-    gpui_platform::application().run(|cx| {
+    gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let (client, proj, status, models) = match &connect_result {
-                    Ok((c, p, s, m)) => (Some(c.clone()), p.clone(), s.clone(), m.clone()),
-                    Err(e) => (None, SessionProjection::new(), e.clone(), Vec::new()),
-                };
-                let view = cx.new(|cx| SessionView::new(window, cx, client, status, proj, models));
+                let view = cx.new(|cx| {
+                    SessionView::new(
+                        window,
+                        cx,
+                        None,
+                        "Choose a working directory to begin".to_owned(),
+                        SessionProjection::new(),
+                        Vec::new(),
+                        LauncherBootstrap {
+                            persistence: persistence.clone(),
+                            launcher_cwd: initial_cwd.clone(),
+                            recent_sessions: recent.clone(),
+                            last_session: last_session.clone(),
+                        },
+                    )
+                });
+                if auto_connect {
+                    let cwd = initial_cwd.clone();
+                    let resume = auto_resume.clone();
+                    view.update(cx, |this, cx| {
+                        this.begin_connection(window, cwd, resume, true, cx);
+                    });
+                }
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("open primary window");
@@ -1890,6 +2459,142 @@ mod tests {
         let filtered = filter_models(&models, "composer");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0], ("cursor".into(), "composer-2.5".into()));
+    }
+
+    #[test]
+    fn app_data_dir_prefers_override_over_home() {
+        assert_eq!(
+            app_data_dir(
+                Some(Path::new("/tmp/pimiento-override")),
+                Some(Path::new("/tmp/user")),
+            ),
+            PathBuf::from("/tmp/pimiento-override")
+        );
+        assert_eq!(
+            app_data_dir(None, Some(Path::new("/tmp/user"))),
+            PathBuf::from("/tmp/user/.pimiento")
+        );
+    }
+
+    #[test]
+    fn recent_session_json_uses_wire_field_names() {
+        let record = RecentSession {
+            session_file: PathBuf::from("/tmp/session.jsonl"),
+            cwd: PathBuf::from("/tmp/worktree"),
+            name: "worktree".to_owned(),
+            last_used: 42,
+        };
+        let value = serde_json::to_value(record).expect("recent session serializes");
+        assert_eq!(value["sessionFile"], "/tmp/session.jsonl");
+        assert_eq!(value["lastUsed"], 42);
+        assert!(value.get("session_file").is_none());
+    }
+
+    #[test]
+    fn recent_session_parser_tolerates_bad_json_and_wrapped_files() {
+        assert!(parse_recent_sessions("not json").is_empty());
+        let wrapped = serde_json::json!({
+            "sessions": [{
+                "sessionFile": "/tmp/session.jsonl",
+                "cwd": "/tmp/worktree",
+                "name": "worktree",
+                "lastUsed": 7
+            }]
+        });
+        let parsed = parse_recent_sessions(&wrapped.to_string());
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "worktree");
+    }
+
+    #[test]
+    fn recent_sessions_sort_deduplicate_and_cap() {
+        let mut sessions = (0..(MAX_RECENT_SESSIONS + 2))
+            .map(|ix| RecentSession {
+                session_file: PathBuf::from(format!("/tmp/session-{ix}.jsonl")),
+                cwd: PathBuf::from(format!("/tmp/worktree-{ix}")),
+                name: ix.to_string(),
+                last_used: ix as u64,
+            })
+            .collect::<Vec<_>>();
+        sessions.push(RecentSession {
+            session_file: PathBuf::from("/tmp/session-0.jsonl"),
+            cwd: PathBuf::from("/tmp/new-worktree"),
+            name: "new".to_owned(),
+            last_used: 999,
+        });
+        let normalized = normalize_recent_sessions(sessions);
+        assert_eq!(normalized.len(), MAX_RECENT_SESSIONS);
+        assert_eq!(normalized[0].name, "new");
+        assert_eq!(
+            normalized
+                .iter()
+                .filter(|session| session.session_file == Path::new("/tmp/session-0.jsonl"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn launcher_directory_precedence_is_override_recent_then_current() {
+        let recent = vec![RecentSession {
+            session_file: PathBuf::from("/tmp/session.jsonl"),
+            cwd: PathBuf::from("/tmp/recent"),
+            name: "recent".to_owned(),
+            last_used: 1,
+        }];
+        assert_eq!(
+            initial_launcher_directory(
+                Some(Path::new("/tmp/override")),
+                &recent,
+                Some(PathBuf::from("/tmp/current")),
+            ),
+            Some(PathBuf::from("/tmp/override"))
+        );
+        assert_eq!(
+            initial_launcher_directory(None, &recent, Some(PathBuf::from("/tmp/current"))),
+            Some(PathBuf::from("/tmp/recent"))
+        );
+        assert_eq!(
+            initial_launcher_directory(None, &[], Some(PathBuf::from("/tmp/current"))),
+            Some(PathBuf::from("/tmp/current"))
+        );
+    }
+
+    #[test]
+    fn session_persistence_roundtrip_uses_home_root() {
+        let root = std::env::temp_dir().join(format!(
+            "pimiento-persistence-{}-{}",
+            std::process::id(),
+            current_unix_seconds()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp persistence root");
+        let persistence = SessionPersistence::from_root(root.clone());
+        persistence.remember_last_session(Some("/tmp/session.jsonl"));
+        persistence.remember_recent_session(
+            Some("/tmp/session.jsonl"),
+            Some(Path::new("/tmp/work")),
+            Some("work"),
+        );
+        assert_eq!(
+            persistence.load_last_session(),
+            Some(PathBuf::from("/tmp/session.jsonl"))
+        );
+        let recent = persistence.load_recent_sessions();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].name, "work");
+        persistence.forget_session(Path::new("/tmp/session.jsonl"));
+        assert!(persistence.load_recent_sessions().is_empty());
+        assert!(persistence.load_last_session().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_connect_requires_explicit_one() {
+        assert!(auto_connect_enabled(Some("1")));
+        assert!(!auto_connect_enabled(Some("true")));
+        assert!(!auto_connect_enabled(Some("0")));
+        assert!(!auto_connect_enabled(None));
     }
 
     #[test]

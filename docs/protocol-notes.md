@@ -90,3 +90,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `get_state` reports `contextUsage: { tokens, contextWindow, percent }` (not `context`).
 - `tokensPerSecond` is a top-level scalar (often null until a turn is streaming).
 - Pimiento promotes these into `RuntimeState.context` / `.tokens` for the status strip (`ctx:N%`, `N/s`).
+
+## Session launcher — 2026-08-08
+
+- The launcher opens before spawning OMP; its working directory comes from the picker or an existing recent pointer, with `PIMIENTO_CWD` as the initial override.
+- Recent pointers live in `recent.json` as `{sessionFile, cwd, name, lastUsed}`; `PIMIENTO_AUTO_CONNECT=1` preserves the one-shot eager-connect escape hatch.
+- `PIMIENTO_HOME` overrides the `~/.pimiento` directory used for `last-session` and `recent.json`.
