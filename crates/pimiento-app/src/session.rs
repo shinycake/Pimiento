@@ -816,6 +816,8 @@ impl SessionView {
                         .and_then(|v| v.as_str())
                         .unwrap_or(&output_path_str)
                         .to_owned();
+                    let reveal_path = PathBuf::from(&path);
+                    let _ = reveal_path_in_file_manager(&reveal_path);
                     let _ = view.update(cx, |this, cx| {
                         this.projection
                             .transcript
