@@ -197,23 +197,28 @@ pub(crate) fn render_entry(
         ),
         TranscriptEntry::Notice(text) => {
             let text_for_copy = text.clone();
+            let mount_noise = notice_looks_like_mount_event(text);
             div()
                 .w_full()
-                .py_1()
+                .when(mount_noise, |row| row.py_0p5())
+                .when(!mount_noise, |row| row.py_1())
                 .child(
                     h_flex()
                         .w_full()
                         .gap_2()
-                        .child(
-                            Label::new("Notice")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
+                        .when(!mount_noise, |row| {
+                            row.child(
+                                Label::new("Notice")
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        })
                         .child(
                             div()
                                 .flex_1()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
+                                .opacity(if mount_noise { 0.72 } else { 1. })
                                 .child(text.clone()),
                         )
                         .child(
@@ -995,6 +1000,12 @@ pub(crate) fn do_cancel_dialog(view: &gpui::WeakEntity<SessionView>, id: &str, c
     let mut fields = serde_json::Map::new();
     fields.insert("cancel".into(), serde_json::Value::Bool(true));
     do_dialog_response(view, id, fields, cx);
+}
+
+/// OMP often emits tool-mount chatter as notices; keep the text, drop the label.
+pub(crate) fn notice_looks_like_mount_event(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("mounted") && (lower.contains("mcp") || lower.contains("tool"))
 }
 
 pub(crate) fn do_dialog_response(
