@@ -261,6 +261,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - The About overlay includes a compact keymap cheat-sheet (palette, sessions rail, inspector, new/close, send, abort). Presentation-only.
 
+## Window appearance sync — 2026-08-08
+
+- Explicit Light/Dark theme preferences call GPUI `App::set_window_appearance` so macOS native titlebar chrome matches the content theme. System preference clears the override (`None`) and resumes OS follow.
+
 ## Rail persistence + streaming polish — 2026-08-08
 
 - Session-rail visibility is disposable layout state stored as `{ "rail_collapsed": bool }` in `ui.json`; missing state defaults to expanded.
