@@ -211,6 +211,7 @@ struct SessionView {
     model_picker_open: bool,
     thinking_picker_open: bool,
     todo_panel_open: bool,
+    subagent_drawer_open: bool,
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
@@ -298,6 +299,7 @@ impl SessionView {
             model_picker_open: false,
             thinking_picker_open: false,
             todo_panel_open,
+            subagent_drawer_open: false,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
@@ -618,6 +620,71 @@ impl SessionView {
             self.todo_panel_open = !self.todo_panel_open;
         }
         cx.notify();
+    }
+
+    fn toggle_subagent_drawer(&mut self, cx: &mut Context<Self>) {
+        self.subagent_drawer_open = !self.subagent_drawer_open;
+        cx.notify();
+    }
+
+    fn export_html(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let cwd = self
+            .session_cwd
+            .clone()
+            .unwrap_or_else(|| self.launcher_cwd.clone());
+        let stamp = current_unix_seconds();
+        let output_path = cwd.join(format!("pimiento-export-{stamp}.html"));
+        let output_path_str = output_path.display().to_string();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::ExportHtml {
+                    output_path: Some(output_path_str.clone()),
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let path = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("outputPath").or_else(|| d.get("path")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&output_path_str)
+                        .to_owned();
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(format!("exported HTML → {path}")));
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "export_html failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("export_html".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("export_html: {error}"),
+                            code: Some("export_html".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
     }
 
     fn toggle_thinking_picker(&mut self, cx: &mut Context<Self>) {
@@ -1851,6 +1918,17 @@ impl Render for SessionView {
         let todo_count = todo_open_count(&todo_phases);
         let todo_button_label = format!("Todos ({todo_count})");
         let show_todo_panel = self.todo_panel_open && !todo_phases.is_empty();
+        let subagent_count = self.projection.subagents_raw.len();
+        let subagent_button_label = if subagent_count == 0 {
+            "Agents".to_owned()
+        } else if self.subagent_drawer_open {
+            format!("Agents ({subagent_count}) v")
+        } else {
+            format!("Agents ({subagent_count}) >")
+        };
+        let show_subagent_drawer = self.subagent_drawer_open && subagent_count > 0;
+        let compacting = matches!(self.projection.run_phase, RunPhase::Compacting);
+        let retrying = matches!(self.projection.run_phase, RunPhase::Retrying);
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -1967,6 +2045,30 @@ impl Render for SessionView {
                                             )),
                                     )
                                     .child(
+                                        Button::new("subagent-drawer-toggle")
+                                            .label(subagent_button_label)
+                                            .small()
+                                            .ghost()
+                                            .disabled(subagent_count == 0)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.toggle_subagent_drawer(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new("export-html")
+                                            .label("Export")
+                                            .small()
+                                            .ghost()
+                                            .disabled(!can_pick)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.export_html(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
                                         Button::new("sessions-launcher")
                                             .label("Sessions")
                                             .small()
@@ -2070,6 +2172,49 @@ impl Render for SessionView {
                         )
                     }),
             )
+            .when(compacting || retrying, |parent| {
+                parent.child(
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py_1()
+                        .bg(theme.warning)
+                        .text_xs()
+                        .child(if compacting {
+                            "Compacting session…".to_owned()
+                        } else {
+                            "Auto-retry in progress…".to_owned()
+                        }),
+                )
+            })
+            .when(show_subagent_drawer, |parent| {
+                parent.child(
+                    v_flex()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .gap_1()
+                        .max_h(px(160.))
+                        .overflow_y_scrollbar()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .bg(theme.secondary)
+                        .children(
+                            self.projection
+                                .subagents_raw
+                                .iter()
+                                .enumerate()
+                                .rev()
+                                .take(12)
+                                .map(|(ix, payload)| {
+                                    let summary = subagent_payload_summary(payload);
+                                    Label::new(format!("#{ix} {summary}"))
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                }),
+                        ),
+                )
+            })
             .child({
                 self.sync_transcript_list();
                 let list_state = self.transcript_list.clone();
@@ -2276,6 +2421,34 @@ impl Render for SessionView {
 // ── transcript rows ───────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
+fn subagent_payload_summary(payload: &serde_json::Value) -> String {
+    let kind = payload
+        .get("type")
+        .or_else(|| payload.get("event"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("subagent");
+    let name = payload
+        .get("name")
+        .or_else(|| payload.get("agent"))
+        .or_else(|| payload.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let detail = payload
+        .get("description")
+        .or_else(|| payload.get("status"))
+        .or_else(|| payload.get("message"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .take(72)
+        .collect::<String>();
+    if detail.is_empty() {
+        format!("{kind} {name}")
+    } else {
+        format!("{kind} {name}: {detail}")
+    }
+}
+
 fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,

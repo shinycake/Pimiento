@@ -135,3 +135,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - `edit` / `write` tool results prefer `details.diff` for visible output.
 - Expanded tool cards color add/remove/meta lines for quick review (read-only).
+
+## Export HTML + subagent strip — 2026-08-08
+
+- Status strip **Export** calls `export_html` with a timestamped path under the session cwd and posts a notice with the result path.
+- **Agents (n)** toggles a read-only drawer of recent `subagent_*` payloads already retained on the projection.
+- Compacting / retrying phases show a warning banner above the transcript.
