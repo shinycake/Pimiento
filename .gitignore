@@ -27,4 +27,6 @@
 # Local OMP session HTML exports (can be tens of MB)
 omp-session-*.html
 
-omp-session-*.html
+
+# Local Pimiento HTML exports
+pimiento-export-*.html
