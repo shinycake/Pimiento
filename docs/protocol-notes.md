@@ -280,3 +280,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Palette theme label — 2026-08-08
 
 - Command palette Theme entry shows the current preference (`Theme: Light` etc.) and documents the cycle order. Presentation-only.
+
+## Toolbar phase Tag — 2026-08-08
+
+- The status strip renders the projected run phase as a small gpui-component `Tag` (info/warning/danger/secondary) beside the OMP version, matching rail phase badges.
