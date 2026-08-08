@@ -175,3 +175,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Esc abort arming — 2026-08-08
 
 - When OMP's run phase allows abort, the first unmodified Esc shows `Press Esc again to abort`; a second Esc within 1.2 seconds sends the existing `abort` RPC. Palette, dialog, and slash-menu Esc handling runs first, so a lone Esc continues to dismiss those surfaces.
+
+## D4 composer keymap and theme override — 2026-08-08
+
+- `InputEvent::PressEnter.secondary` is gpui-component's `secondary-enter` binding (Cmd+Enter on macOS, Ctrl+Enter elsewhere). It bypasses slash completion and follows the existing prompt/steer send path. Shift+Enter remains the component-provided multiline newline path.
+- Pimiento initializes `ThemeMode` once from `window.appearance()`. The status-strip `Theme: Light` / `Theme: Dark` button remains a manual Light/Dark override; it deliberately does not track subsequent OS appearance changes.
