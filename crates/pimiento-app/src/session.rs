@@ -2916,7 +2916,11 @@ impl Render for SessionView {
                             .child(
                                 Button::new("send")
                                     .primary()
-                                    .label("Send")
+                                    .label(if composer_uses_steer(&self.projection.run_phase) {
+                                        "Steer"
+                                    } else {
+                                        "Send"
+                                    })
                                     .disabled(!self.can_send())
                                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
                                         this.send_composer_message(cx);
