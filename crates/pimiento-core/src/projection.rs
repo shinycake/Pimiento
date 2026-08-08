@@ -1050,6 +1050,17 @@ pub fn extract_visible_output(v: &Value) -> String {
         Value::Bool(_) | Value::Number(_) => v.to_string(),
         Value::Array(a) => join_visible_output(a),
         Value::Object(o) => {
+            if let Some(diff) = crate::diff::extract_tool_diff_text(v) {
+                let path = o
+                    .get("details")
+                    .and_then(|d| d.get("path"))
+                    .or_else(|| o.get("path"))
+                    .and_then(Value::as_str);
+                return match path {
+                    Some(path) => format!("{path}\n{diff}"),
+                    None => diff,
+                };
+            }
             if let Some(s) = o.get("text").and_then(Value::as_str) {
                 return s.to_owned();
             }

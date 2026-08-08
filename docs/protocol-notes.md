@@ -130,3 +130,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Root UI is a workspace with a left session rail; each rail entry is its own `SessionView` + supervised OMP child.
 - **New** / **Close** manage slots; Cmd/Ctrl+1..9 switches the active session without pausing inactive pumps.
+
+## Diff review — 2026-08-08
+
+- `edit` / `write` tool results prefer `details.diff` for visible output.
+- Expanded tool cards color add/remove/meta lines for quick review (read-only).

@@ -30,6 +30,7 @@ use omp_rpc_client::{
     frames::{RpcCommandBody, SubagentSubscriptionLevel},
 };
 use pimiento_core::{
+    diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
     projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
     todos::{TodoPhaseView, TodoTaskView, parse_todo_phases, todo_status_glyph},
     transcript::{ToolStatus, TranscriptEntry},
@@ -2440,15 +2441,51 @@ fn render_tool_card(
         ToolStatus::Ok => (theme.success, "ok"),
         ToolStatus::Err => (theme.danger, "error"),
     };
-    let arg_digest: String = tc.args_json.to_string().chars().take(80).collect();
+    let output_text = tc.output.to_string();
+    let has_output = !tc.output.is_empty();
+    let edit_diff = parse_edit_diff(
+        &tc.name,
+        &tc.args_json,
+        &serde_json::Value::String(output_text.clone()),
+    )
+    .or_else(|| {
+        // Fallback: treat plain tool output as a unified/compact diff body.
+        let lines = parse_unified_diff_lines(&output_text);
+        lines
+            .iter()
+            .any(|line| matches!(line.kind, DiffLineKind::Add | DiffLineKind::Remove))
+            .then(|| pimiento_core::diff::EditDiffView {
+                path: tc
+                    .args_json
+                    .get("path")
+                    .or_else(|| tc.args_json.pointer("/input/path"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                op: None,
+                lines,
+            })
+    });
+    let arg_digest: String = edit_diff
+        .as_ref()
+        .and_then(|diff| {
+            diff.path.as_ref().map(|path| {
+                format!(
+                    "{}{}",
+                    diff.op
+                        .as_deref()
+                        .map(|op| format!("{op} "))
+                        .unwrap_or_default(),
+                    path
+                )
+            })
+        })
+        .unwrap_or_else(|| tc.args_json.to_string().chars().take(80).collect());
     let duration_str = tc
         .duration_ms
         .map(|ms| format!("{}.{:03}s", ms / 1000, ms % 1000))
         .unwrap_or_default();
     let tc_id = tc.tool_call_id.clone();
     let view = cx.entity().downgrade();
-    let output_text = tc.output.to_string();
-    let has_output = !tc.output.is_empty();
 
     v_flex()
         .w_full()
@@ -2491,7 +2528,32 @@ fn render_tool_card(
                 }),
         )
         .when(expanded && has_output, |parent| {
-            parent.child(
+            parent.child(if let Some(diff) = edit_diff.as_ref() {
+                v_flex()
+                    .w_full()
+                    .max_h(px(320.))
+                    .overflow_y_scrollbar()
+                    .px_2()
+                    .py_1()
+                    .gap_0p5()
+                    .rounded_sm()
+                    .bg(theme.muted)
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(theme.mono_font_size)
+                    .children(diff.lines.iter().enumerate().map(|(ix, line)| {
+                        let color = match line.kind {
+                            DiffLineKind::Add => theme.success,
+                            DiffLineKind::Remove => theme.danger,
+                            DiffLineKind::Meta => theme.warning,
+                            DiffLineKind::Context => theme.muted_foreground,
+                        };
+                        div()
+                            .id(("diff-line", ix))
+                            .text_color(color)
+                            .child(line.text.clone())
+                    }))
+                    .into_any_element()
+            } else {
                 div()
                     .w_full()
                     .max_h(px(320.))
@@ -2502,8 +2564,9 @@ fn render_tool_card(
                     .bg(theme.muted)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
-                    .child(output_text.clone()),
-            )
+                    .child(output_text.clone())
+                    .into_any_element()
+            })
         })
         .when(has_output, |parent| {
             parent.child(

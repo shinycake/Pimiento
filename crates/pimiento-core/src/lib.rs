@@ -4,6 +4,7 @@
 //! `PLAN.md` §5.4 for the projection model this crate will host.
 #![forbid(unsafe_code)]
 
+pub mod diff;
 pub mod projection;
 pub mod replay;
 pub mod todos;
