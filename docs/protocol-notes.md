@@ -118,3 +118,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - The status strip exposes `set_thinking_level {level}` for the configured levels `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `auto`; Pimiento refreshes `get_state` after the command so the rendered selector remains OMP-authoritative.
 - `set_fast_mode {enabled}` returns `{enabled, active}`. These values describe configured and currently active fast mode and may diverge, so the status strip labels `fast:off`, `fast:on`, or `fast:active` rather than collapsing them into one boolean.
+
+## Todo panel — 2026-08-08
+
+- `get_state.todoPhases` (also accepted as `todos` / `{phases:[…]}`) is parsed into phase/task rows.
+- Status strip **Todos (actionable/total)** toggles a read-only panel above the composer with glyphs for pending/in_progress/completed/blocked/abandoned.

@@ -31,6 +31,7 @@ use omp_rpc_client::{
 };
 use pimiento_core::{
     projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
+    todos::{actionable_todo_count, parse_todo_phases, todo_status_glyph},
     transcript::{ToolStatus, TranscriptEntry},
 };
 use serde::{Deserialize, Serialize};
@@ -208,6 +209,7 @@ struct SessionView {
     model_search: gpui::Entity<InputState>,
     model_picker_open: bool,
     thinking_picker_open: bool,
+    todo_panel_open: bool,
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
@@ -293,6 +295,7 @@ impl SessionView {
             model_search,
             model_picker_open: false,
             thinking_picker_open: false,
+            todo_panel_open: true,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
@@ -601,6 +604,11 @@ impl SessionView {
 
     fn close_thinking_picker(&mut self) {
         self.thinking_picker_open = false;
+    }
+
+    fn toggle_todo_panel(&mut self, cx: &mut Context<Self>) {
+        self.todo_panel_open = !self.todo_panel_open;
+        cx.notify();
     }
 
     fn toggle_thinking_picker(&mut self, cx: &mut Context<Self>) {
@@ -1545,6 +1553,20 @@ impl Render for SessionView {
             self.projection.state.fast_mode_enabled,
             self.projection.state.fast_mode_active,
         );
+        let todo_phases = parse_todo_phases(self.projection.todos_raw.as_ref());
+        let todo_actionable = actionable_todo_count(&todo_phases);
+        let todo_total = todo_phases
+            .iter()
+            .map(|phase| phase.tasks.len())
+            .sum::<usize>();
+        let todo_button_label = if todo_phases.is_empty() {
+            "Todos".to_owned()
+        } else if self.todo_panel_open {
+            format!("Todos ({todo_actionable}/{todo_total}) v")
+        } else {
+            format!("Todos ({todo_actionable}/{todo_total}) >")
+        };
+        let show_todo_panel = self.todo_panel_open && !todo_phases.is_empty();
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -1648,6 +1670,18 @@ impl Render for SessionView {
                                     .flex_1()
                                     .justify_end()
                                     .gap_2()
+                                    .child(
+                                        Button::new("todo-panel-toggle")
+                                            .label(todo_button_label)
+                                            .small()
+                                            .ghost()
+                                            .disabled(todo_phases.is_empty())
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.toggle_todo_panel(cx);
+                                                },
+                                            )),
+                                    )
                                     .child(
                                         Button::new("sessions-launcher")
                                             .label("Sessions")
@@ -1818,6 +1852,47 @@ impl Render for SessionView {
                     ))
                 },
             )
+            .when(show_todo_panel, |parent| {
+                parent.child(
+                    v_flex()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .gap_2()
+                        .bg(theme.secondary)
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .max_h(px(220.))
+                        .overflow_y_scrollbar()
+                        .children(
+                            todo_phases
+                                .into_iter()
+                                .enumerate()
+                                .map(|(phase_ix, phase)| {
+                                    v_flex()
+                                        .w_full()
+                                        .gap_1()
+                                        .child(
+                                            Label::new(phase.name.clone())
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .children(phase.tasks.into_iter().enumerate().map(
+                                            |(task_ix, task)| {
+                                                let glyph = todo_status_glyph(&task.status);
+                                                let mut line = format!("{glyph} {}", task.content);
+                                                if let Some(blocker) = task.blocker.as_deref() {
+                                                    line.push_str(&format!(" — {blocker}"));
+                                                }
+                                                div()
+                                                    .id(("todo-task", phase_ix * 1000 + task_ix))
+                                                    .child(Label::new(line).text_sm())
+                                            },
+                                        ))
+                                }),
+                        ),
+                )
+            })
             .child(
                 h_flex()
                     .w_full()
