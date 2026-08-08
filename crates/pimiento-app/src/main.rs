@@ -3,7 +3,7 @@
 
 //! Pimiento — first live OMP session workspace.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,16 @@ struct PersistedWindowBounds {
     height: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedUi {
+    #[serde(default = "default_inspector_open")]
+    inspector_open: bool,
+}
+
+fn default_inspector_open() -> bool {
+    true
+}
+
 impl PersistedWindowBounds {
     fn from_bounds(bounds: Bounds<Pixels>) -> Option<Self> {
         let x = f32::from(bounds.origin.x);
@@ -229,6 +239,10 @@ impl SessionPersistence {
         self.root.join("window.json")
     }
 
+    fn ui_path(&self) -> PathBuf {
+        self.root.join("ui.json")
+    }
+
     fn load_last_session(&self) -> Option<PathBuf> {
         let raw = std::fs::read_to_string(self.last_session_path()).ok()?;
         let raw = raw.trim();
@@ -272,6 +286,21 @@ impl SessionPersistence {
             return;
         };
         let _ = write_persistence_file(&self.window_bounds_path(), &contents);
+    }
+
+    fn load_inspector_open(&self) -> bool {
+        let Ok(raw) = std::fs::read_to_string(self.ui_path()) else {
+            return default_inspector_open();
+        };
+        serde_json::from_str::<PersistedUi>(&raw)
+            .map_or_else(|_| default_inspector_open(), |ui| ui.inspector_open)
+    }
+
+    fn save_inspector_open(&self, inspector_open: bool) {
+        let Ok(contents) = serde_json::to_string_pretty(&PersistedUi { inspector_open }) else {
+            return;
+        };
+        let _ = write_persistence_file(&self.ui_path(), &contents);
     }
 
     fn remember_recent_session(
@@ -350,6 +379,8 @@ struct SessionView {
     abort_arm_generation: u64,
     available_models: Vec<ModelChoice>,
     expanded_tools: HashSet<String>,
+    running_tool_started: HashMap<String, Instant>,
+    running_tool_timer: Option<Task<()>>,
     clear_composer: bool,
     pending_composer_value: Option<String>,
     clear_model_search: bool,
@@ -447,6 +478,8 @@ impl SessionView {
             abort_arm_generation: 0,
             available_models,
             expanded_tools: HashSet::new(),
+            running_tool_started: HashMap::new(),
+            running_tool_timer: None,
             clear_composer: false,
             pending_composer_value: None,
             clear_model_search: false,
@@ -466,6 +499,7 @@ impl SessionView {
         if let Some(client) = view.client.clone() {
             view.start_event_pump(&client, cx);
         }
+        view.sync_running_tools(cx);
         view.start_catalog_load(cx);
         view
     }
@@ -497,6 +531,7 @@ impl SessionView {
                             );
                         }
                     }
+                    this.sync_running_tools(cx);
                     if !this.can_abort() {
                         this.clear_abort_arm();
                     }
@@ -531,6 +566,8 @@ impl SessionView {
             self.model_picker_open = false;
             self.thinking_picker_open = false;
             self.expanded_tools.clear();
+            self.running_tool_started.clear();
+            self.running_tool_timer.take();
             self.slash_menu = SlashMenuState::Closed;
             self.slash_selected = 0;
             self.transcript_list.reset(0);
@@ -589,6 +626,7 @@ impl SessionView {
                 self.transcript_list.set_follow_mode(FollowMode::Tail);
                 self.last_transcript_len = self.projection.transcript.len();
                 self.unread_below = 0;
+                self.sync_running_tools(cx);
                 self.start_event_pump(&client, cx);
                 self.last_session = self.persistence.load_last_session();
                 self.recent_sessions = self.persistence.load_recent_sessions();
@@ -669,6 +707,8 @@ impl SessionView {
         self.clear_subagent_drawer_state();
         self.available_models.clear();
         self.expanded_tools.clear();
+        self.running_tool_started.clear();
+        self.running_tool_timer.take();
         self.transcript_list.reset(0);
         self.last_transcript_len = 0;
         self.unread_below = 0;
@@ -703,6 +743,44 @@ impl SessionView {
             self.transcript_list.remeasure_items(start..new_len);
         }
         self.last_transcript_len = new_len;
+    }
+
+    fn sync_running_tools(&mut self, cx: &mut Context<Self>) {
+        let running_ids = self
+            .projection
+            .transcript
+            .iter()
+            .filter_map(|entry| match entry {
+                TranscriptEntry::ToolCall(tool) if tool.status == ToolStatus::Running => {
+                    Some(tool.tool_call_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        self.running_tool_started
+            .retain(|tool_id, _| running_ids.contains(tool_id));
+        let now = Instant::now();
+        for tool_id in running_ids {
+            self.running_tool_started.entry(tool_id).or_insert(now);
+        }
+
+        if self.running_tool_started.is_empty() {
+            self.running_tool_timer.take();
+        } else if self.running_tool_timer.is_none() {
+            self.running_tool_timer = Some(cx.spawn(async move |view, cx| {
+                loop {
+                    smol::Timer::after(Duration::from_secs(1)).await;
+                    if view
+                        .update(cx, |_this, cx| {
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }));
+        }
     }
 
     fn jump_to_transcript_tail(&mut self, cx: &mut Context<Self>) {
@@ -1691,28 +1769,41 @@ impl SessionView {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_3()
+            .p_4()
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
                 v_flex()
                     .w_full()
                     .max_w(px(720.))
-                    .p_5()
-                    .gap_3()
+                    .p_8()
+                    .gap_4()
                     .rounded_md()
                     .bg(theme.muted)
                     .border_1()
                     .border_color(theme.border)
-                    .child(Label::new("Start a Pimiento session").text_lg())
                     .child(
                         v_flex()
                             .gap_1()
+                            .child(
+                                Label::new("Start a Pimiento session")
+                                    .text_lg()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD),
+                            )
+                            .child(
+                                Label::new("Choose where OMP should work, or resume a recent session.")
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
                             .child(Label::new("Working directory").text_sm())
                             .child(
                                 div()
-                                    .px_2()
-                                    .py_1()
+                                    .px_3()
+                                    .py_2()
                                     .rounded_sm()
                                     .bg(theme.background)
                                     .child(cwd),
@@ -1722,21 +1813,22 @@ impl SessionView {
                         h_flex()
                             .gap_2()
                             .child(
-                                Button::new("choose-working-directory")
-                                    .label("Choose directory…")
-                                    .primary()
-                                    .disabled(connecting)
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.choose_directory(window, cx);
-                                    })),
-                            )
-                            .child(
                                 Button::new("start-working-directory")
                                     .label("Start here")
+                                    .primary()
                                     .disabled(connecting)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                         let cwd = this.launcher_cwd.clone();
                                         this.begin_connection(window, cwd, None, true, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("choose-working-directory")
+                                    .label("Choose directory…")
+                                    .ghost()
+                                    .disabled(connecting)
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.choose_directory(window, cx);
                                     })),
                             ),
                     )
@@ -1782,7 +1874,7 @@ impl SessionView {
                         parent.child(
                             Button::new("resume-last-session")
                                 .label("Resume last session")
-                                .primary()
+                                .ghost()
                                 .disabled(connecting)
                                 .on_click(cx.listener(
                                     move |this, _: &ClickEvent, window, cx| {
@@ -1800,8 +1892,8 @@ impl SessionView {
                     .when(!recents.is_empty(), |parent| {
                         parent.child(
                             v_flex()
-                                .gap_1()
-                                .child(Label::new("Sessions for this directory").text_sm())
+                                .gap_2()
+                                .child(Separator::horizontal().label("Recent sessions"))
                                 .children(recents.into_iter().enumerate().map(|(ix, recent)| {
                                     let cwd = recent.cwd.clone();
                                     let resume = recent.session_file.clone();
@@ -1810,22 +1902,30 @@ impl SessionView {
                                     } else {
                                         format!("{}  —  {}", recent.name, recent.cwd.display())
                                     };
-                                    Button::new(("recent-session", ix))
-                                        .label(label)
-                                        .ghost()
+                                    v_flex()
                                         .w_full()
-                                        .disabled(connecting)
-                                        .on_click(cx.listener(
-                                            move |this, _: &ClickEvent, window, cx| {
-                                                this.begin_connection(
-                                                    window,
-                                                    cwd.clone(),
-                                                    Some(resume.clone()),
-                                                    true,
-                                                    cx,
-                                                );
-                                            },
-                                        ))
+                                        .gap_1()
+                                        .when(ix > 0, |row| {
+                                            row.child(Separator::horizontal())
+                                        })
+                                        .child(
+                                            Button::new(("recent-session", ix))
+                                                .label(label)
+                                                .ghost()
+                                                .w_full()
+                                                .disabled(connecting)
+                                                .on_click(cx.listener(
+                                                    move |this, _: &ClickEvent, window, cx| {
+                                                        this.begin_connection(
+                                                            window,
+                                                            cwd.clone(),
+                                                            Some(resume.clone()),
+                                                            true,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        )
                                 })),
                         )
                     }),
@@ -2130,11 +2230,38 @@ impl SessionView {
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
+        self.running_tool_started.clear();
+        self.running_tool_timer.take();
         cx.notify();
     }
 }
 
 // ── guards ────────────────────────────────────────────────────────────────
+
+fn short_model_label(full: &str) -> String {
+    full.strip_prefix("cursor/").unwrap_or(full).to_owned()
+}
+
+fn phase_tag(phase: &str) -> Tag {
+    match phase {
+        "stream" | "streaming" | "await" | "awaiting" => Tag::info(),
+        "compact" | "compacting" | "retry" | "retrying" | "restart" | "restarting" => {
+            Tag::warning()
+        }
+        "dead" => Tag::danger(),
+        _ => Tag::secondary(),
+    }
+}
+
+fn format_running_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    let minutes = seconds / 60;
+    if minutes == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{minutes}m {}s", seconds % 60)
+    }
+}
 
 fn composer_uses_steer(phase: &RunPhase) -> bool {
     matches!(phase, RunPhase::Streaming)
@@ -2543,10 +2670,10 @@ impl WorkspaceView {
         Self {
             sessions: vec![first],
             active: 0,
+            inspector_open: persistence.load_inspector_open(),
             persistence,
             initial_cwd,
             rail_collapsed: false,
-            inspector_open: true,
             inspector_focus: InspectorFocus::Session,
             pending_quit_confirm: false,
             quit_in_progress: false,
@@ -2710,6 +2837,7 @@ impl WorkspaceView {
 
     fn open_inspector(&mut self, focus: InspectorFocus, cx: &mut Context<Self>) {
         self.inspector_open = true;
+        self.persistence.save_inspector_open(true);
         self.inspector_focus = focus;
         if let Some(session) = self.sessions.get(self.active).cloned() {
             session.update(cx, SessionView::ensure_subagent_snapshots);
@@ -2719,6 +2847,7 @@ impl WorkspaceView {
 
     fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
         self.inspector_open = !self.inspector_open;
+        self.persistence.save_inspector_open(self.inspector_open);
         if self.inspector_open
             && let Some(session) = self.sessions.get(self.active).cloned()
         {
@@ -2978,7 +3107,7 @@ fn render_inspector(
                                 .text_xs()
                                 .font_weight(gpui::FontWeight::SEMIBOLD),
                         )
-                        .child(Tag::secondary().small().child(phase)),
+                        .child(phase_tag(&phase).small().child(phase)),
                 )
                 .child(Label::new(workspace_display_name(&cwd)).text_sm())
                 .child(
@@ -3178,11 +3307,14 @@ fn render_inspector(
                 .when(!tool_names.is_empty(), |section| {
                     let hidden = tool_names.len().saturating_sub(12);
                     section
-                        .children(tool_names.iter().take(12).map(|name| {
-                            Label::new(name.clone())
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                        }))
+                        .child(
+                            h_flex().w_full().flex_wrap().gap_1().children(
+                                tool_names
+                                    .iter()
+                                    .take(12)
+                                    .map(|name| Tag::secondary().small().child(name.clone())),
+                            ),
+                        )
                         .when(hidden > 0, |section| {
                             section.child(
                                 Label::new(format!("+{hidden} more"))
@@ -3345,7 +3477,9 @@ impl Render for WorkspaceView {
                                                     .flex_1()
                                                     .truncate(),
                                             )
-                                            .child(Tag::secondary().small().child(entry.phase))
+                                            .child(
+                                                phase_tag(&entry.phase).small().child(entry.phase),
+                                            )
                                             .on_click(cx.listener(
                                                 move |this, _: &ClickEvent, _window, cx| {
                                                     this.select_session(ix, cx);
@@ -3495,6 +3629,7 @@ impl Render for SessionView {
             .model
             .clone()
             .unwrap_or_else(|| "(no model)".to_owned());
+        let model_button_label = short_model_label(&model_label);
         let thinking_button_label = thinking_label(self.projection.state.thinking.as_ref())
             .map_or_else(|| "think:?".to_owned(), |level| format!("think:{level}"));
         let current_model = find_model_choice(
@@ -3625,7 +3760,7 @@ impl Render for SessionView {
                                             .gap_2()
                                             .child(
                                                 Button::new("model-picker")
-                                                    .label(model_label)
+                                                    .label(model_button_label)
                                                     .small()
                                                     .ghost()
                                                     .disabled(!can_pick)
@@ -3817,7 +3952,15 @@ impl Render for SessionView {
                                     view.update(cx, |this, cx| {
                                         this.projection.transcript.get(ix).map_or_else(
                                             || div().into_any_element(),
-                                            |e| render_entry(ix, e, &this.expanded_tools, cx),
+                                            |e| {
+                                                render_entry(
+                                                    ix,
+                                                    e,
+                                                    &this.expanded_tools,
+                                                    &this.running_tool_started,
+                                                    cx,
+                                                )
+                                            },
                                         )
                                     })
                                     .unwrap_or_else(|_| div().into_any_element())
@@ -4268,10 +4411,11 @@ fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,
     expanded: &HashSet<String>,
+    running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    match entry {
+    let row = match entry {
         TranscriptEntry::User { text } => {
             let text_for_copy = text.clone();
             h_flex()
@@ -4292,6 +4436,8 @@ fn render_entry(
                         .label("Copy")
                         .small()
                         .ghost()
+                        .invisible()
+                        .group_hover("transcript-row", gpui::Styled::visible)
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
                         }),
@@ -4328,6 +4474,8 @@ fn render_entry(
                         .label("Copy")
                         .small()
                         .ghost()
+                        .invisible()
+                        .group_hover("transcript-row", gpui::Styled::visible)
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(
                                 markdown_for_copy.clone(),
@@ -4359,12 +4507,10 @@ fn render_entry(
                         })
                         .child(
                             div()
-                                .px_2()
                                 .py_1()
-                                .rounded_sm()
-                                .bg(theme.muted)
                                 .text_color(theme.muted_foreground)
                                 .text_xs()
+                                .italic()
                                 .child("thinking… (click to expand)"),
                         ),
                 )
@@ -4373,6 +4519,8 @@ fn render_entry(
                         .label("Copy")
                         .small()
                         .ghost()
+                        .invisible()
+                        .group_hover("transcript-row", gpui::Styled::visible)
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
                         }),
@@ -4408,6 +4556,8 @@ fn render_entry(
                                         .label("Copy")
                                         .small()
                                         .ghost()
+                                        .invisible()
+                                        .group_hover("transcript-row", gpui::Styled::visible)
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 text_for_copy.clone(),
@@ -4428,9 +4578,13 @@ fn render_entry(
                 )
                 .into_any_element()
         }
-        TranscriptEntry::ToolCall(tc) => {
-            render_tool_card(row_ix, tc, expanded.contains(&tc.tool_call_id), cx)
-        }
+        TranscriptEntry::ToolCall(tc) => render_tool_card(
+            row_ix,
+            tc,
+            expanded.contains(&tc.tool_call_id),
+            running_tool_started,
+            cx,
+        ),
         TranscriptEntry::Notice(text) => {
             let text_for_copy = text.clone();
             div()
@@ -4452,6 +4606,8 @@ fn render_entry(
                                 .label("Copy")
                                 .small()
                                 .ghost()
+                                .invisible()
+                                .group_hover("transcript-row", gpui::Styled::visible)
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         text_for_copy.clone(),
@@ -4483,6 +4639,8 @@ fn render_entry(
                                 .label("Copy")
                                 .small()
                                 .ghost()
+                                .invisible()
+                                .group_hover("transcript-row", gpui::Styled::visible)
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         copy_text.clone(),
@@ -4513,6 +4671,8 @@ fn render_entry(
                                 .label("Copy")
                                 .small()
                                 .ghost()
+                                .invisible()
+                                .group_hover("transcript-row", gpui::Styled::visible)
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         text_for_copy.clone(),
@@ -4552,6 +4712,8 @@ fn render_entry(
                                         .label("Copy")
                                         .small()
                                         .ghost()
+                                        .invisible()
+                                        .group_hover("transcript-row", gpui::Styled::visible)
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 label_for_copy.clone(),
@@ -4594,6 +4756,8 @@ fn render_entry(
                                         .label("Copy")
                                         .small()
                                         .ghost()
+                                        .invisible()
+                                        .group_hover("transcript-row", gpui::Styled::visible)
                                         .on_click(move |_, _, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 detail_for_copy.clone(),
@@ -4625,6 +4789,8 @@ fn render_entry(
                                 .label("Copy")
                                 .small()
                                 .ghost()
+                                .invisible()
+                                .group_hover("transcript-row", gpui::Styled::visible)
                                 .on_click(move |_, _, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(
                                         raw_for_copy.clone(),
@@ -4634,7 +4800,12 @@ fn render_entry(
                 )
                 .into_any_element()
         }
-    }
+    };
+    div()
+        .w_full()
+        .group("transcript-row")
+        .child(row)
+        .into_any_element()
 }
 
 fn code_block_copy_id(row_ix: usize, lang: Option<&str>, code: &str) -> ElementId {
@@ -4648,6 +4819,7 @@ fn render_tool_card(
     row_ix: usize,
     tc: &pimiento_core::transcript::ToolCall,
     expanded: bool,
+    running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
@@ -4696,6 +4868,15 @@ fn render_tool_card(
     let duration_str = tc
         .duration_ms
         .map(|ms| format!("{}.{:03}s", ms / 1000, ms % 1000))
+        .or_else(|| {
+            (tc.status == ToolStatus::Running)
+                .then(|| {
+                    running_tool_started
+                        .get(&tc.tool_call_id)
+                        .map(|started| format_running_elapsed(started.elapsed()))
+                })
+                .flatten()
+        })
         .unwrap_or_default();
     let tc_id = tc.tool_call_id.clone();
     let view = cx.entity().downgrade();
@@ -4758,6 +4939,8 @@ fn render_tool_card(
                                     .label("Copy")
                                     .small()
                                     .ghost()
+                                    .invisible()
+                                    .group_hover("transcript-row", gpui::Styled::visible)
                                     .on_click(move |_, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             args_for_copy.clone(),
@@ -4845,6 +5028,8 @@ fn render_tool_card(
                             .label("Copy")
                             .small()
                             .ghost()
+                            .invisible()
+                            .group_hover("transcript-row", gpui::Styled::visible)
                             .on_click({
                                 let output_text = output_text.clone();
                                 move |_, _window, cx| {
@@ -6150,6 +6335,7 @@ mod tests {
         );
         assert_eq!(tokens_per_second_label(Some(&serde_json::json!(0.0))), None);
     }
+
     #[test]
     fn phase_disallows_send_dead() {
         assert!(!phase_allows_send(&RunPhase::Dead));
@@ -6703,6 +6889,41 @@ mod tests {
         assert!(!auto_connect_enabled(Some("true")));
         assert!(!auto_connect_enabled(Some("0")));
         assert!(!auto_connect_enabled(None));
+    }
+
+    #[test]
+    fn short_model_label_strips_only_cursor_provider() {
+        assert_eq!(short_model_label("cursor/composer-2.5"), "composer-2.5");
+        assert_eq!(
+            short_model_label("anthropic/claude-opus"),
+            "anthropic/claude-opus"
+        );
+        assert_eq!(short_model_label("unqualified"), "unqualified");
+    }
+
+    #[test]
+    fn inspector_visibility_defaults_open_and_roundtrips() {
+        let root = std::env::temp_dir().join(format!(
+            "pimiento-ui-persistence-{}-{}",
+            std::process::id(),
+            current_unix_seconds()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let persistence = SessionPersistence::from_root(root.clone());
+        assert!(persistence.load_inspector_open());
+
+        persistence.save_inspector_open(false);
+        assert!(!persistence.load_inspector_open());
+        persistence.save_inspector_open(true);
+        assert!(persistence.load_inspector_open());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn running_tool_elapsed_uses_compact_seconds_and_minutes() {
+        assert_eq!(format_running_elapsed(Duration::from_secs(9)), "9s");
+        assert_eq!(format_running_elapsed(Duration::from_secs(125)), "2m 5s");
     }
 
     #[test]
