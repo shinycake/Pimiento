@@ -1165,16 +1165,30 @@ pub(crate) fn context_percent(v: Option<&serde_json::Value>) -> Option<f32> {
 
 pub(crate) fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(path)?;
+    reveal_path_in_file_manager(path)
+}
 
+/// Reveal an existing file or directory in the platform file manager.
+pub(crate) fn reveal_path_in_file_manager(path: &Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(path).spawn()?;
+        let mut cmd = std::process::Command::new("open");
+        if path.is_file() {
+            cmd.arg("-R");
+        }
+        cmd.arg(path).spawn()?;
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     {
-        std::process::Command::new("xdg-open").arg(path).spawn()?;
+        // xdg-open opens files; for directories it opens the folder.
+        let target = if path.is_file() {
+            path.parent().unwrap_or(path)
+        } else {
+            path
+        };
+        std::process::Command::new("xdg-open").arg(target).spawn()?;
         Ok(())
     }
 
@@ -1183,7 +1197,7 @@ pub(crate) fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
         let _ = path;
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "revealing the Pimiento home folder is unsupported on this platform",
+            "revealing paths is unsupported on this platform",
         ))
     }
 }
