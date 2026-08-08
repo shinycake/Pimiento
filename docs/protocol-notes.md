@@ -146,3 +146,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Collapsed thinking rows expand on click; expanded rows offer collapse.
 - Status strip **Rename** calls `set_session_name` with a stamped label (modal rename can come later).
+
+## Confirmed revert + command palette — 2026-08-08
+
+- Edit/write tool cards expose **Revert file…** → confirm card showing `git restore --worktree -- '<path>'` → `bash` RPC.
+- Cmd/Ctrl+K opens an in-app command palette (type to filter, Enter runs). Cmd/Ctrl+T/W/B = new/close/toggle rail.
+- Tool output JSON is parsed when present so `details.diff` coloring still works for structured results.

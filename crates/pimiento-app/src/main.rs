@@ -212,6 +212,11 @@ struct SessionView {
     thinking_picker_open: bool,
     todo_panel_open: bool,
     subagent_drawer_open: bool,
+    pending_revert: Option<PendingRevert>,
+    palette_open: bool,
+    palette_query: String,
+    palette_selected: usize,
+    pending_workspace_palette: Option<PaletteActionId>,
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
@@ -300,6 +305,11 @@ impl SessionView {
             thinking_picker_open: false,
             todo_panel_open,
             subagent_drawer_open: false,
+            pending_revert: None,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_selected: 0,
+            pending_workspace_palette: None,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
@@ -1473,6 +1483,209 @@ impl SessionView {
         .detach();
     }
 
+    fn take_pending_workspace_palette(&mut self) -> Option<PaletteActionId> {
+        self.pending_workspace_palette.take()
+    }
+
+    fn toggle_palette(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = !self.palette_open;
+        if self.palette_open {
+            self.palette_query.clear();
+            self.palette_selected = 0;
+            self.model_picker_open = false;
+            self.thinking_picker_open = false;
+            self.slash_menu = SlashMenuState::Closed;
+        }
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, cx: &mut Context<Self>) {
+        if self.palette_open {
+            self.palette_open = false;
+            self.palette_query.clear();
+            self.palette_selected = 0;
+            cx.notify();
+        }
+    }
+
+    fn request_file_revert(&mut self, path: String, tool_call_id: String, cx: &mut Context<Self>) {
+        let command = revert_command_for_path(&path);
+        self.pending_revert = Some(PendingRevert {
+            path,
+            command,
+            tool_call_id,
+        });
+        cx.notify();
+    }
+
+    fn cancel_pending_revert(&mut self, cx: &mut Context<Self>) {
+        self.pending_revert = None;
+        cx.notify();
+    }
+
+    fn confirm_pending_revert(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_revert.take() else {
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            self.projection.transcript.push(TranscriptEntry::Error {
+                message: "revert requires a live session".into(),
+                code: Some("revert".into()),
+            });
+            cx.notify();
+            return;
+        };
+        let command = pending.command.clone();
+        let path = pending.path.clone();
+        self.projection
+            .transcript
+            .push(TranscriptEntry::Notice(format!(
+                "reverting {path} via `{command}`"
+            )));
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Bash {
+                    command: command.clone(),
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let detail = resp
+                        .data
+                        .as_ref()
+                        .map(std::string::ToString::to_string)
+                        .filter(|s| s != "null" && !s.is_empty())
+                        .unwrap_or_else(|| "ok".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::CommandOutput(format!(
+                                "$ {command}\n{detail}"
+                            )));
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "bash revert failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("revert failed: {error}"),
+                            code: Some("revert".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("revert: {error}"),
+                            code: Some("revert".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn run_palette_action(
+        &mut self,
+        id: PaletteActionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_palette(cx);
+        match id {
+            PaletteActionId::ToggleTheme => {
+                let next = next_theme_mode(cx.theme().mode);
+                Theme::change(next, Some(window), cx);
+            }
+            PaletteActionId::ToggleTodos => self.toggle_todo_panel(cx),
+            PaletteActionId::ToggleAgents => self.toggle_subagent_drawer(cx),
+            PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
+            PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
+            PaletteActionId::ToggleFast => self.toggle_fast_mode(cx),
+            PaletteActionId::ExportHtml => self.export_html(cx),
+            PaletteActionId::RenameSession => self.rename_session(cx),
+            PaletteActionId::AbortRun => self.do_abort(cx),
+            PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
+            PaletteActionId::NewSession
+            | PaletteActionId::CloseSession
+            | PaletteActionId::ToggleRail => {
+                self.pending_workspace_palette = Some(id);
+            }
+        }
+    }
+
+    fn handle_palette_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.palette_open {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        let matches = filter_palette_entries(&self.palette_query);
+        if matches.is_empty() {
+            self.palette_selected = 0;
+        } else {
+            self.palette_selected = self.palette_selected.min(matches.len() - 1);
+        }
+        match key {
+            "escape" | "esc" => {
+                self.close_palette(cx);
+                true
+            }
+            "up" | "arrowup" => {
+                if !matches.is_empty() {
+                    self.palette_selected =
+                        (self.palette_selected + matches.len() - 1) % matches.len();
+                    cx.notify();
+                }
+                true
+            }
+            "down" | "arrowdown" => {
+                if !matches.is_empty() {
+                    self.palette_selected = (self.palette_selected + 1) % matches.len();
+                    cx.notify();
+                }
+                true
+            }
+            "enter" | "return" => {
+                if let Some(entry) = matches.get(self.palette_selected) {
+                    let id = entry.id;
+                    // Workspace-only actions need the parent; emit notice and still try local.
+                    self.run_palette_action(id, window, cx);
+                }
+                true
+            }
+            "backspace" => {
+                self.palette_query.pop();
+                self.palette_selected = 0;
+                cx.notify();
+                true
+            }
+            _ if key.len() == 1
+                && !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt =>
+            {
+                self.palette_query.push_str(key);
+                self.palette_selected = 0;
+                cx.notify();
+                true
+            }
+            _ => true, // swallow while open
+        }
+    }
+
     fn rail_label_and_phase(&self) -> (String, String) {
         let cwd = self
             .session_cwd
@@ -1513,6 +1726,130 @@ fn phase_allows_abort(phase: &RunPhase) -> bool {
         phase,
         RunPhase::Streaming | RunPhase::AwaitingResume | RunPhase::Compacting | RunPhase::Retrying
     )
+}
+
+#[derive(Debug, Clone)]
+struct PendingRevert {
+    path: String,
+    command: String,
+    #[allow(dead_code)]
+    tool_call_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteActionId {
+    ToggleTheme,
+    ToggleTodos,
+    ToggleAgents,
+    ToggleModels,
+    ToggleThinking,
+    ToggleFast,
+    ExportHtml,
+    RenameSession,
+    AbortRun,
+    SessionsLauncher,
+    NewSession,
+    CloseSession,
+    ToggleRail,
+}
+
+#[derive(Debug, Clone)]
+struct PaletteEntry {
+    id: PaletteActionId,
+    label: &'static str,
+    hint: &'static str,
+}
+
+fn palette_catalog() -> &'static [PaletteEntry] {
+    &[
+        PaletteEntry {
+            id: PaletteActionId::ToggleTheme,
+            label: "Toggle theme",
+            hint: "light/dark",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleTodos,
+            label: "Toggle todo panel",
+            hint: "todos",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleAgents,
+            label: "Toggle agents drawer",
+            hint: "subagents",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleModels,
+            label: "Model picker",
+            hint: "models",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleThinking,
+            label: "Thinking level",
+            hint: "thinking",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleFast,
+            label: "Toggle fast mode",
+            hint: "fast",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ExportHtml,
+            label: "Export HTML",
+            hint: "export",
+        },
+        PaletteEntry {
+            id: PaletteActionId::RenameSession,
+            label: "Rename session",
+            hint: "rename",
+        },
+        PaletteEntry {
+            id: PaletteActionId::AbortRun,
+            label: "Abort run",
+            hint: "stop",
+        },
+        PaletteEntry {
+            id: PaletteActionId::SessionsLauncher,
+            label: "Sessions launcher",
+            hint: "back",
+        },
+        PaletteEntry {
+            id: PaletteActionId::NewSession,
+            label: "New session tab",
+            hint: "workspace",
+        },
+        PaletteEntry {
+            id: PaletteActionId::CloseSession,
+            label: "Close session tab",
+            hint: "workspace",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleRail,
+            label: "Toggle session rail",
+            hint: "rail",
+        },
+    ]
+}
+
+fn filter_palette_entries(query: &str) -> Vec<&'static PaletteEntry> {
+    let q = query.trim().to_ascii_lowercase();
+    palette_catalog()
+        .iter()
+        .filter(|entry| {
+            if q.is_empty() {
+                return true;
+            }
+            entry.label.to_ascii_lowercase().contains(&q)
+                || entry.hint.to_ascii_lowercase().contains(&q)
+        })
+        .collect()
+}
+
+fn shell_single_quote(path: &str) -> String {
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+fn revert_command_for_path(path: &str) -> String {
+    format!("git restore --worktree -- {}", shell_single_quote(path))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1742,6 +2079,7 @@ struct WorkspaceView {
     active: usize,
     persistence: SessionPersistence,
     initial_cwd: PathBuf,
+    rail_collapsed: bool,
 }
 
 impl WorkspaceView {
@@ -1755,6 +2093,7 @@ impl WorkspaceView {
             active: 0,
             persistence,
             initial_cwd,
+            rail_collapsed: false,
         }
     }
 
@@ -1830,19 +2169,70 @@ impl WorkspaceView {
         }
     }
 
-    fn handle_workspace_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        if !(event.keystroke.modifiers.platform || event.keystroke.modifiers.control) {
+    fn toggle_rail(&mut self, cx: &mut Context<Self>) {
+        self.rail_collapsed = !self.rail_collapsed;
+        cx.notify();
+    }
+
+    fn handle_workspace_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mods = &event.keystroke.modifiers;
+        if !(mods.platform || mods.control) {
             return false;
         }
-        let Some(digit) = workspace_digit_key(&event.keystroke.key) else {
+        let key = event.keystroke.key.as_str();
+        if let Some(digit) = workspace_digit_key(key) {
+            let index = digit.saturating_sub(1);
+            if index < self.sessions.len() {
+                self.select_session(index, cx);
+                return true;
+            }
             return false;
-        };
-        let index = digit.saturating_sub(1);
-        if index < self.sessions.len() {
-            self.select_session(index, cx);
-            true
-        } else {
-            false
+        }
+        match key {
+            "t" | "T" => {
+                self.add_session(window, cx);
+                true
+            }
+            "w" | "W" => {
+                self.close_active(window, cx);
+                true
+            }
+            "b" | "B" => {
+                self.toggle_rail(cx);
+                true
+            }
+            "k" | "K" => {
+                if let Some(session) = self.sessions.get(self.active).cloned() {
+                    session.update(cx, SessionView::toggle_palette);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn run_workspace_palette_action(
+        &mut self,
+        id: PaletteActionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match id {
+            PaletteActionId::NewSession => self.add_session(window, cx),
+            PaletteActionId::CloseSession => self.close_active(window, cx),
+            PaletteActionId::ToggleRail => self.toggle_rail(cx),
+            other => {
+                if let Some(session) = self.sessions.get(self.active).cloned() {
+                    session.update(cx, |session, cx| {
+                        session.run_palette_action(other, window, cx);
+                    });
+                }
+            }
         }
     }
 }
@@ -1855,8 +2245,16 @@ fn workspace_digit_key(key: &str) -> Option<usize> {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    #[allow(clippy::too_many_lines)]
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_active();
+        if let Some(session) = self.sessions.get(self.active).cloned() {
+            let pending =
+                session.update(cx, |session, _cx| session.take_pending_workspace_palette());
+            if let Some(action) = pending {
+                self.run_workspace_palette_action(action, window, cx);
+            }
+        }
         let theme = cx.theme().clone();
         let active = self.active;
         let labels: Vec<(String, String, usize)> = self
@@ -1873,57 +2271,92 @@ impl Render for WorkspaceView {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .capture_key_down(cx.listener(|this, event, _window, cx| {
-                if this.handle_workspace_key(event, cx) {
+            .capture_key_down(cx.listener(|this, event, window, cx| {
+                if this.handle_workspace_key(event, window, cx) {
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                v_flex()
-                    .w(px(220.))
-                    .h_full()
-                    .gap_1()
-                    .p_2()
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .bg(theme.muted)
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .gap_1()
-                            .child(
-                                Button::new("workspace-new-session")
-                                    .label("New")
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.add_session(window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("workspace-close-session")
-                                    .label("Close")
-                                    .small()
-                                    .ghost()
-                                    .disabled(self.sessions.is_empty())
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.close_active(window, cx);
-                                    })),
-                            ),
-                    )
-                    .children(labels.into_iter().map(|(label, phase, ix)| {
-                        let selected = ix == active;
-                        Button::new(("workspace-session", ix))
-                            .label(format!("{label} · {phase}"))
-                            .small()
-                            .when(selected, Button::primary)
-                            .when(!selected, Button::ghost)
-                            .w_full()
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                this.select_session(ix, cx);
-                            }))
-                    })),
-            )
+            .when(!self.rail_collapsed, |parent| {
+                parent.child(
+                    v_flex()
+                        .w(px(220.))
+                        .h_full()
+                        .gap_1()
+                        .p_2()
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .child(
+                                    Button::new("workspace-new-session")
+                                        .label("New")
+                                        .small()
+                                        .primary()
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.add_session(window, cx);
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    Button::new("workspace-close-session")
+                                        .label("Close")
+                                        .small()
+                                        .ghost()
+                                        .disabled(self.sessions.is_empty())
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, window, cx| {
+                                                this.close_active(window, cx);
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    Button::new("workspace-hide-rail")
+                                        .label("Hide")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.toggle_rail(cx);
+                                        })),
+                                ),
+                        )
+                        .children(labels.into_iter().map(|(label, phase, ix)| {
+                            let selected = ix == active;
+                            Button::new(("workspace-session", ix))
+                                .label(format!("{label} · {phase}"))
+                                .small()
+                                .when(selected, Button::primary)
+                                .when(!selected, Button::ghost)
+                                .w_full()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                    this.select_session(ix, cx);
+                                }))
+                        })),
+                )
+            })
+            .when(self.rail_collapsed, |parent| {
+                parent.child(
+                    v_flex()
+                        .w(px(36.))
+                        .h_full()
+                        .p_1()
+                        .border_r_1()
+                        .border_color(theme.border)
+                        .bg(theme.muted)
+                        .child(
+                            Button::new("workspace-show-rail")
+                                .label("»")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.toggle_rail(cx);
+                                })),
+                        ),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -2027,408 +2460,483 @@ impl Render for SessionView {
             .slash_selected
             .min(slash_matches.len().saturating_sub(1));
         let slash_has_matches = !slash_matches.is_empty();
+        let palette_matches = filter_palette_entries(&self.palette_query);
+        if palette_matches.is_empty() {
+            self.palette_selected = 0;
+        } else {
+            self.palette_selected = self.palette_selected.min(palette_matches.len() - 1);
+        }
+        let palette_selected = self.palette_selected;
+        let palette_query_label = if self.palette_query.is_empty() {
+            "Type to filter…".to_owned()
+        } else {
+            self.palette_query.clone()
+        };
+        let pending_revert = self.pending_revert.clone();
 
-        v_flex()
+        div()
             .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .capture_key_down(cx.listener(|this, event, window, cx| {
-                let handled =
-                    this.handle_dialog_key(event, cx) || this.handle_slash_key(event, window, cx);
-                if handled {
-                    cx.stop_propagation();
-                }
-            }))
+            .relative()
             .child(
                 v_flex()
-                    .w_full()
-                    .bg(theme.muted)
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .size_full()
+                    .bg(theme.background)
+                    .text_color(theme.foreground)
+                    .capture_key_down(cx.listener(|this, event, window, cx| {
+                        let handled = this.handle_palette_key(event, window, cx)
+                            || this.handle_dialog_key(event, cx)
+                            || this.handle_slash_key(event, window, cx);
+                        if handled {
+                            cx.stop_propagation();
+                        }
+                    }))
                     .child(
-                        h_flex()
+                        v_flex()
                             .w_full()
-                            .px_3()
-                            .py_1()
-                            .gap_3()
-                            .child(Label::new(self.status_message.clone()).text_xs())
+                            .bg(theme.muted)
+                            .border_b_1()
+                            .border_color(theme.border)
                             .child(
                                 h_flex()
-                                    .gap_2()
+                                    .w_full()
+                                    .px_3()
+                                    .py_1()
+                                    .gap_3()
+                                    .child(Label::new(self.status_message.clone()).text_xs())
                                     .child(
-                                        Label::new(phase_label)
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground),
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                Label::new(phase_label)
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
+                                                Button::new("model-picker")
+                                                    .label(model_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.toggle_model_picker(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("thinking-picker")
+                                                    .label(thinking_button_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.toggle_thinking_picker(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("fast-mode")
+                                                    .label(fast_button_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.toggle_fast_mode(cx);
+                                                        },
+                                                    )),
+                                            ),
                                     )
                                     .child(
-                                        Button::new("model-picker")
-                                            .label(model_label)
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.toggle_model_picker(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("thinking-picker")
-                                            .label(thinking_button_label)
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.toggle_thinking_picker(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("fast-mode")
-                                            .label(fast_button_label)
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.toggle_fast_mode(cx);
-                                                },
-                                            )),
+                                        h_flex()
+                                            .flex_1()
+                                            .justify_end()
+                                            .gap_2()
+                                            .child(
+                                                Button::new("todo-panel-toggle")
+                                                    .label(todo_button_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(todo_phases.is_empty())
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.toggle_todo_panel(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("subagent-drawer-toggle")
+                                                    .label(subagent_button_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(subagent_count == 0)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.toggle_subagent_drawer(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("export-html")
+                                                    .label("Export")
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.export_html(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("rename-session")
+                                                    .label("Rename")
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.rename_session(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("sessions-launcher")
+                                                    .label("Sessions")
+                                                    .small()
+                                                    .ghost()
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.return_to_launcher(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("theme-toggle")
+                                                    .label(toggle_label)
+                                                    .small()
+                                                    .ghost()
+                                                    .on_click(toggle_theme),
+                                            ),
                                     ),
                             )
-                            .child(
-                                h_flex()
-                                    .flex_1()
-                                    .justify_end()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("todo-panel-toggle")
-                                            .label(todo_button_label)
-                                            .small()
-                                            .ghost()
-                                            .disabled(todo_phases.is_empty())
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.toggle_todo_panel(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("subagent-drawer-toggle")
-                                            .label(subagent_button_label)
-                                            .small()
-                                            .ghost()
-                                            .disabled(subagent_count == 0)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.toggle_subagent_drawer(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("export-html")
-                                            .label("Export")
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.export_html(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("rename-session")
-                                            .label("Rename")
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.rename_session(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("sessions-launcher")
-                                            .label("Sessions")
-                                            .small()
-                                            .ghost()
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.return_to_launcher(cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Button::new("theme-toggle")
-                                            .label(toggle_label)
-                                            .small()
-                                            .ghost()
-                                            .on_click(toggle_theme),
-                                    ),
-                            ),
-                    )
-                    .when(self.model_picker_open, |parent| {
-                        parent.child(
-                            v_flex()
-                                .w_full()
-                                .px_3()
-                                .pb_2()
-                                .gap_1()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(
-                                    Input::new(&self.model_search)
-                                        .appearance(true)
-                                        .focus_bordered(true),
-                                )
-                                .child(
-                                    div()
+                            .when(self.model_picker_open, |parent| {
+                                parent.child(
+                                    v_flex()
                                         .w_full()
-                                        .overflow_y_scrollbar()
-                                        .max_h(px(240.))
-                                        .children(visible.iter().enumerate().map(
-                                            |(ix, (provider, id))| {
-                                                let label = format!("{provider}/{id}");
-                                                let provider_c = provider.clone();
-                                                let id_c = id.clone();
-                                                Button::new(("model-choice", ix))
-                                                    .label(label)
+                                        .px_3()
+                                        .pb_2()
+                                        .gap_1()
+                                        .border_b_1()
+                                        .border_color(theme.border)
+                                        .child(
+                                            Input::new(&self.model_search)
+                                                .appearance(true)
+                                                .focus_bordered(true),
+                                        )
+                                        .child(
+                                            div()
+                                                .w_full()
+                                                .overflow_y_scrollbar()
+                                                .max_h(px(240.))
+                                                .children(visible.iter().enumerate().map(
+                                                    |(ix, (provider, id))| {
+                                                        let label = format!("{provider}/{id}");
+                                                        let provider_c = provider.clone();
+                                                        let id_c = id.clone();
+                                                        Button::new(("model-choice", ix))
+                                                            .label(label)
+                                                            .ghost()
+                                                            .small()
+                                                            .w_full()
+                                                            .on_click(window.listener_for(
+                                                                &view,
+                                                                move |this, _, _window, cx| {
+                                                                    this.close_model_picker(cx);
+                                                                    this.set_model(
+                                                                        provider_c.clone(),
+                                                                        id_c.clone(),
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                    },
+                                                )),
+                                        )
+                                        .when(!footer.is_empty(), |panel| {
+                                            panel.child(
+                                                Label::new(footer)
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        })
+                                        .when(visible.is_empty(), |panel| {
+                                            panel.child(
+                                                Label::new("(no matches)")
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        }),
+                                )
+                            })
+                            .when(self.thinking_picker_open, |parent| {
+                                parent.child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .pb_2()
+                                        .gap_1()
+                                        .border_b_1()
+                                        .border_color(theme.border)
+                                        .children(THINKING_LEVELS.iter().enumerate().map(
+                                            |(ix, level)| {
+                                                let level = *level;
+                                                Button::new(("thinking-choice", ix))
+                                                    .label(level)
                                                     .ghost()
                                                     .small()
-                                                    .w_full()
                                                     .on_click(window.listener_for(
                                                         &view,
                                                         move |this, _, _window, cx| {
-                                                            this.close_model_picker(cx);
-                                                            this.set_model(
-                                                                provider_c.clone(),
-                                                                id_c.clone(),
-                                                                cx,
-                                                            );
+                                                            this.set_thinking_level(level, cx);
                                                         },
                                                     ))
                                             },
                                         )),
                                 )
-                                .when(!footer.is_empty(), |panel| {
-                                    panel.child(
-                                        Label::new(footer)
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                })
-                                .when(visible.is_empty(), |panel| {
-                                    panel.child(
-                                        Label::new("(no matches)")
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                }),
-                        )
-                    })
-                    .when(self.thinking_picker_open, |parent| {
+                            }),
+                    )
+                    .when(compacting || retrying, |parent| {
                         parent.child(
-                            h_flex()
+                            div()
                                 .w_full()
                                 .px_3()
-                                .pb_2()
-                                .gap_1()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .children(THINKING_LEVELS.iter().enumerate().map(|(ix, level)| {
-                                    let level = *level;
-                                    Button::new(("thinking-choice", ix))
-                                        .label(level)
-                                        .ghost()
-                                        .small()
-                                        .on_click(window.listener_for(
-                                            &view,
-                                            move |this, _, _window, cx| {
-                                                this.set_thinking_level(level, cx);
-                                            },
-                                        ))
-                                })),
-                        )
-                    }),
-            )
-            .when(compacting || retrying, |parent| {
-                parent.child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_1()
-                        .bg(theme.warning)
-                        .text_xs()
-                        .child(if compacting {
-                            "Compacting session…".to_owned()
-                        } else {
-                            "Auto-retry in progress…".to_owned()
-                        }),
-                )
-            })
-            .when(show_subagent_drawer, |parent| {
-                parent.child(
-                    v_flex()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .gap_1()
-                        .max_h(px(160.))
-                        .overflow_y_scrollbar()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .bg(theme.secondary)
-                        .children(
-                            self.projection
-                                .subagents_raw
-                                .iter()
-                                .enumerate()
-                                .rev()
-                                .take(12)
-                                .map(|(ix, payload)| {
-                                    let summary = subagent_payload_summary(payload);
-                                    Label::new(format!("#{ix} {summary}"))
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
+                                .py_1()
+                                .bg(theme.warning)
+                                .text_xs()
+                                .child(if compacting {
+                                    "Compacting session…".to_owned()
+                                } else {
+                                    "Auto-retry in progress…".to_owned()
                                 }),
-                        ),
-                )
-            })
-            .child({
-                self.sync_transcript_list();
-                let list_state = self.transcript_list.clone();
-                let view = cx.entity().downgrade();
-                let unread = self.unread_below;
-                div()
-                    .flex_1()
-                    .w_full()
-                    .relative()
-                    .child(
-                        list(list_state, move |ix, _window, cx| {
-                            view.update(cx, |this, cx| {
-                                this.projection.transcript.get(ix).map_or_else(
-                                    || div().into_any_element(),
-                                    |e| render_entry(ix, e, &this.expanded_tools, cx),
-                                )
-                            })
-                            .unwrap_or_else(|_| div().into_any_element())
-                        })
-                        .size_full()
-                        .px_3()
-                        .py_2(),
-                    )
-                    .when(unread > 0, |parent| {
-                        parent.child(
-                            div().absolute().bottom_3().right_3().child(
-                                Button::new("jump-transcript-tail")
-                                    .label(format!("{unread} new ↓"))
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.jump_to_transcript_tail(cx);
-                                    })),
-                            ),
                         )
                     })
-            })
-            .when(!self.projection.pending_dialogs.is_empty(), |parent| {
-                parent.child(
-                    v_flex()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .bg(theme.secondary)
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .children(
-                            self.projection
-                                .pending_dialogs
-                                .iter()
-                                .map(|d| render_dialog(d, cx)),
-                        ),
-                )
-            })
-            .when(
-                matches!(self.projection.run_phase, RunPhase::Dead),
-                |parent| {
-                    parent.child(render_crash_card(
-                        &self.status_message,
-                        self.projection.dead_reason.as_deref(),
-                        self.can_restart(),
-                        cx,
-                    ))
-                },
-            )
-            .when(show_todo_panel, |parent| {
-                parent.child(render_todo_panel(&todo_phases, cx))
-            })
-            .child(
-                h_flex()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .gap_2()
-                    .bg(theme.muted)
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .child(
+                    .when(show_subagent_drawer, |parent| {
+                        parent.child(
+                            v_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_1()
+                                .max_h(px(160.))
+                                .overflow_y_scrollbar()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .bg(theme.secondary)
+                                .children(
+                                    self.projection
+                                        .subagents_raw
+                                        .iter()
+                                        .enumerate()
+                                        .rev()
+                                        .take(12)
+                                        .map(|(ix, payload)| {
+                                            let summary = subagent_payload_summary(payload);
+                                            Label::new(format!("#{ix} {summary}"))
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                        }),
+                                ),
+                        )
+                    })
+                    .child({
+                        self.sync_transcript_list();
+                        let list_state = self.transcript_list.clone();
+                        let view = cx.entity().downgrade();
+                        let unread = self.unread_below;
                         div()
-                            .relative()
                             .flex_1()
+                            .w_full()
+                            .relative()
                             .child(
-                                Input::new(&self.composer)
-                                    .appearance(false)
-                                    .focus_bordered(false),
+                                list(list_state, move |ix, _window, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.projection.transcript.get(ix).map_or_else(
+                                            || div().into_any_element(),
+                                            |e| render_entry(ix, e, &this.expanded_tools, cx),
+                                        )
+                                    })
+                                    .unwrap_or_else(|_| div().into_any_element())
+                                })
+                                .size_full()
+                                .px_3()
+                                .py_2(),
                             )
-                            .when(slash_menu_visible, |parent| {
+                            .when(unread > 0, |parent| {
                                 parent.child(
-                                    v_flex()
-                                        .absolute()
-                                        .bottom_full()
-                                        .left_0()
-                                        .right_0()
-                                        .max_h(px(280.))
-                                        .overflow_y_scrollbar()
-                                        .gap_0()
-                                        .p_1()
-                                        .bg(theme.background)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .children(slash_matches.iter().enumerate().map(
-                                            |(ix, command)| {
-                                                let command_for_click = command.clone();
-                                                Button::new(("slash-command", ix))
-                                                    .ghost()
-                                                    .small()
-                                                    .w_full()
-                                                    .when(ix == self.slash_selected, |button| {
-                                                        button.bg(theme.secondary)
-                                                    })
-                                                    .on_click(window.listener_for(
-                                                        &view,
-                                                        move |this, _, _window, cx| {
-                                                            this.accept_slash_command(
-                                                                &command_for_click,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        h_flex()
+                                    div().absolute().bottom_3().right_3().child(
+                                        Button::new("jump-transcript-tail")
+                                            .label(format!("{unread} new ↓"))
+                                            .small()
+                                            .primary()
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.jump_to_transcript_tail(cx);
+                                                },
+                                            )),
+                                    ),
+                                )
+                            })
+                    })
+                    .children(pending_revert.into_iter().map(|pending| {
+                        let path = pending.path;
+                        let command = pending.command;
+                        v_flex()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .bg(theme.warning)
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                Label::new(format!("Revert file {path}?"))
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::MEDIUM),
+                            )
+                            .child(
+                                Label::new(format!("Runs: {command}"))
+                                    .text_xs()
+                                    .font_family(theme.mono_font_family.clone()),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("confirm-revert")
+                                            .label("Confirm revert")
+                                            .small()
+                                            .danger()
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _w, cx| {
+                                                    this.confirm_pending_revert(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new("cancel-revert")
+                                            .label("Cancel")
+                                            .small()
+                                            .ghost()
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _w, cx| {
+                                                    this.cancel_pending_revert(cx);
+                                                },
+                                            )),
+                                    ),
+                            )
+                    }))
+                    .when(!self.projection.pending_dialogs.is_empty(), |parent| {
+                        parent.child(
+                            v_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .bg(theme.secondary)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .children(
+                                    self.projection
+                                        .pending_dialogs
+                                        .iter()
+                                        .map(|d| render_dialog(d, cx)),
+                                ),
+                        )
+                    })
+                    .when(
+                        matches!(self.projection.run_phase, RunPhase::Dead),
+                        |parent| {
+                            parent.child(render_crash_card(
+                                &self.status_message,
+                                self.projection.dead_reason.as_deref(),
+                                self.can_restart(),
+                                cx,
+                            ))
+                        },
+                    )
+                    .when(show_todo_panel, |parent| {
+                        parent.child(render_todo_panel(&todo_phases, cx))
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .gap_2()
+                            .bg(theme.muted)
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_1()
+                                    .child(
+                                        Input::new(&self.composer)
+                                            .appearance(false)
+                                            .focus_bordered(false),
+                                    )
+                                    .when(slash_menu_visible, |parent| {
+                                        parent.child(
+                                            v_flex()
+                                                .absolute()
+                                                .bottom_full()
+                                                .left_0()
+                                                .right_0()
+                                                .max_h(px(280.))
+                                                .overflow_y_scrollbar()
+                                                .gap_0()
+                                                .p_1()
+                                                .bg(theme.background)
+                                                .border_1()
+                                                .border_color(theme.border)
+                                                .children(slash_matches.iter().enumerate().map(
+                                                    |(ix, command)| {
+                                                        let command_for_click = command.clone();
+                                                        Button::new(("slash-command", ix))
+                                                            .ghost()
+                                                            .small()
                                                             .w_full()
-                                                            .gap_2()
-                                                            .child(
-                                                                Label::new(command.name.clone())
-                                                                    .text_sm(),
-                                                            )
                                                             .when(
-                                                                !command.description.is_empty(),
-                                                                |row| {
-                                                                    row.child(
+                                                                ix == self.slash_selected,
+                                                                |button| button.bg(theme.secondary),
+                                                            )
+                                                            .on_click(window.listener_for(
+                                                                &view,
+                                                                move |this, _, _window, cx| {
+                                                                    this.accept_slash_command(
+                                                                        &command_for_click,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            ))
+                                                            .child(
+                                                                h_flex()
+                                                                    .w_full()
+                                                                    .gap_2()
+                                                                    .child(
+                                                                        Label::new(
+                                                                            command.name.clone(),
+                                                                        )
+                                                                        .text_sm(),
+                                                                    )
+                                                                    .when(
+                                                                        !command
+                                                                            .description
+                                                                            .is_empty(),
+                                                                        |row| {
+                                                                            row.child(
                                                                         Label::new(
                                                                             command
                                                                                 .description
@@ -2439,63 +2947,134 @@ impl Render for SessionView {
                                                                             theme.muted_foreground,
                                                                         ),
                                                                     )
-                                                                },
-                                                            ),
+                                                                        },
+                                                                    ),
+                                                            )
+                                                    },
+                                                ))
+                                                .when(!slash_has_matches, |panel| {
+                                                    panel.child(
+                                                        Label::new("(no matches)")
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
                                                     )
-                                            },
-                                        ))
-                                        .when(!slash_has_matches, |panel| {
-                                            panel.child(
-                                                Label::new("(no matches)")
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground),
-                                            )
-                                        }),
-                                )
-                            }),
-                    )
-                    .child(
-                        Button::new("send")
-                            .primary()
-                            .label("Send")
-                            .disabled(!self.can_send())
-                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                this.on_composer_event(
-                                    this.composer.clone(),
-                                    &InputEvent::PressEnter {
-                                        secondary: false,
-                                        shift: false,
-                                    },
-                                    cx,
-                                );
-                            })),
-                    )
-                    .when(
-                        matches!(self.projection.run_phase, RunPhase::Streaming),
-                        |parent| {
-                            parent.child(
-                                Button::new("follow-up")
-                                    .label("Follow-up")
-                                    .disabled(!self.can_follow_up(cx))
+                                                }),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("send")
+                                    .primary()
+                                    .label("Send")
+                                    .disabled(!self.can_send())
                                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.do_follow_up(cx);
+                                        this.on_composer_event(
+                                            this.composer.clone(),
+                                            &InputEvent::PressEnter {
+                                                secondary: false,
+                                                shift: false,
+                                            },
+                                            cx,
+                                        );
                                     })),
                             )
-                        },
-                    )
-                    .when(self.can_abort(), |parent| {
-                        parent.child(Button::new("abort").danger().label("Abort").on_click(
-                            cx.listener(|this, _: &ClickEvent, _window, cx| this.do_abort(cx)),
-                        ))
-                    })
-                    .when(self.can_restart(), |parent| {
-                        parent.child(Button::new("restart").primary().label("Restart").on_click(
-                            cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.do_restart(window, cx);
+                            .when(
+                                matches!(self.projection.run_phase, RunPhase::Streaming),
+                                |parent| {
+                                    parent.child(
+                                        Button::new("follow-up")
+                                            .label("Follow-up")
+                                            .disabled(!self.can_follow_up(cx))
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.do_follow_up(cx);
+                                                },
+                                            )),
+                                    )
+                                },
+                            )
+                            .when(self.can_abort(), |parent| {
+                                parent.child(Button::new("abort").danger().label("Abort").on_click(
+                                    cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.do_abort(cx);
+                                    }),
+                                ))
+                            })
+                            .when(self.can_restart(), |parent| {
+                                parent.child(
+                                    Button::new("restart").primary().label("Restart").on_click(
+                                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                                            this.do_restart(window, cx);
+                                        }),
+                                    ),
+                                )
                             }),
-                        ))
-                    }),
+                    ),
             )
+            .when(self.palette_open, |parent| {
+                parent.child(
+                    div()
+                        .id("command-palette-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt_16()
+                        .bg(gpui::rgba(0x0000_0080))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_palette(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("command-palette-panel")
+                                .w(px(480.))
+                                .max_h(px(420.))
+                                .gap_1()
+                                .p_3()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Command palette (Esc closes)")
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    Label::new(format!("> {palette_query_label}"))
+                                        .text_sm()
+                                        .font_family(theme.mono_font_family.clone()),
+                                )
+                                .children(palette_matches.iter().enumerate().map(|(ix, entry)| {
+                                    let id = entry.id;
+                                    let selected = ix == palette_selected;
+                                    Button::new(("palette-entry", ix))
+                                        .label(format!("{} · {}", entry.label, entry.hint))
+                                        .small()
+                                        .w_full()
+                                        .when(selected, Button::primary)
+                                        .when(!selected, Button::ghost)
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.run_palette_action(id, window, cx);
+                                            },
+                                        ))
+                                }))
+                                .when(palette_matches.is_empty(), |panel| {
+                                    panel.child(
+                                        Label::new("(no matches)")
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                }),
+                        ),
+                )
+            })
             .into_any_element()
     }
 }
@@ -2728,12 +3307,9 @@ fn render_tool_card(
     };
     let output_text = tc.output.to_string();
     let has_output = !tc.output.is_empty();
-    let edit_diff = parse_edit_diff(
-        &tc.name,
-        &tc.args_json,
-        &serde_json::Value::String(output_text.clone()),
-    )
-    .or_else(|| {
+    let output_value = serde_json::from_str::<serde_json::Value>(&output_text)
+        .unwrap_or_else(|_| serde_json::Value::String(output_text.clone()));
+    let edit_diff = parse_edit_diff(&tc.name, &tc.args_json, &output_value).or_else(|| {
         // Fallback: treat plain tool output as a unified/compact diff body.
         let lines = parse_unified_diff_lines(&output_text);
         lines
@@ -2771,6 +3347,8 @@ fn render_tool_card(
         .unwrap_or_default();
     let tc_id = tc.tool_call_id.clone();
     let view = cx.entity().downgrade();
+    let view_for_toggle = view.clone();
+    let view_for_revert = view.clone();
 
     v_flex()
         .w_full()
@@ -2868,13 +3446,13 @@ fn render_tool_card(
                             .small()
                             .ghost()
                             .on_click(move |_, _, cx| {
-                                let _ = view
+                                let _ = view_for_toggle
                                     .update(cx, |this, cx| this.toggle_tool_expanded(&tc_id, cx));
                             })
                     })
                     .child(
                         Button::new(format!("copy-tool-{tc_id}"))
-                            .label("📋 copy")
+                            .label("copy")
                             .small()
                             .ghost()
                             .on_click({
@@ -2885,7 +3463,31 @@ fn render_tool_card(
                                     ));
                                 }
                             }),
-                    ),
+                    )
+                    .children({
+                        let revert_path =
+                            edit_diff.as_ref().and_then(|d| d.path.clone()).or_else(|| {
+                                tc.args_json
+                                    .get("path")
+                                    .or_else(|| tc.args_json.pointer("/input/path"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            });
+                        revert_path.map(|path| {
+                            let tc_id = tc_id.clone();
+                            Button::new(format!("revert-tool-{tc_id}"))
+                                .label("Revert file…")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let path = path.clone();
+                                    let tc_id = tc_id.clone();
+                                    let _ = view_for_revert.update(cx, |this, cx| {
+                                        this.request_file_revert(path, tc_id, cx);
+                                    });
+                                })
+                        })
+                    }),
             )
         })
         .into_any_element()
@@ -4153,6 +4755,29 @@ mod tests {
             Some(DialogKeyAction::Cancel)
         );
         assert_eq!(dialog_key_action("y", "select", 3), None);
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quotes() {
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+        let quoted = shell_single_quote("a'b");
+        assert_eq!(quoted.len(), 8);
+        assert_eq!(&quoted[..2], "'a");
+        assert_eq!(&quoted[2..6], "'\\''");
+        assert_eq!(&quoted[6..], "b'");
+        assert_eq!(
+            revert_command_for_path("crates/x.rs"),
+            "git restore --worktree -- 'crates/x.rs'"
+        );
+    }
+
+    #[test]
+    fn filter_palette_entries_matches_label_and_hint() {
+        let hits = filter_palette_entries("theme");
+        assert!(hits.iter().any(|e| e.id == PaletteActionId::ToggleTheme));
+        let hits = filter_palette_entries("rail");
+        assert!(hits.iter().any(|e| e.id == PaletteActionId::ToggleRail));
+        assert!(filter_palette_entries("zzzz-nope").is_empty());
     }
 
     #[test]
