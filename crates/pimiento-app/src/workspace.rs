@@ -109,9 +109,9 @@ impl WorkspaceView {
             session_subscriptions: vec![first_subscription],
             active: 0,
             inspector_open: persistence.load_inspector_open(),
+            rail_collapsed: persistence.load_rail_collapsed(),
             persistence,
             initial_cwd,
-            rail_collapsed: false,
             inspector_focus: InspectorFocus::Session,
             tools_expanded: false,
             pending_quit_confirm: false,
@@ -281,6 +281,7 @@ impl WorkspaceView {
 
     pub(crate) fn toggle_rail(&mut self, cx: &mut Context<Self>) {
         self.rail_collapsed = !self.rail_collapsed;
+        self.persistence.save_rail_collapsed(self.rail_collapsed);
         cx.notify();
     }
 

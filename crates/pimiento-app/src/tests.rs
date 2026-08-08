@@ -339,17 +339,21 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
     let parsed: PersistedUi =
         serde_json::from_str(r#"{"inspector_open":false,"theme":"dark"}"#).expect("parse ui");
     assert_eq!(parsed.theme, ThemePreference::Dark);
+    assert!(!parsed.rail_collapsed);
 
     let legacy: PersistedUi =
         serde_json::from_str(r#"{"inspector_open":true}"#).expect("parse legacy ui");
     assert_eq!(legacy.theme, ThemePreference::System);
+    assert!(!legacy.rail_collapsed);
 
     let value = serde_json::to_value(PersistedUi {
         inspector_open: true,
+        rail_collapsed: true,
         theme: ThemePreference::Light,
     })
     .expect("serialize ui");
     assert_eq!(value["theme"], "light");
+    assert_eq!(value["rail_collapsed"], true);
 }
 
 #[test]
@@ -784,6 +788,12 @@ fn ui_preferences_default_and_roundtrip_without_overwriting_each_other() {
     let _ = std::fs::remove_dir_all(&root);
     let persistence = SessionPersistence::from_root(root.clone());
     assert!(persistence.load_inspector_open());
+    assert!(!persistence.load_rail_collapsed());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::System);
+
+    persistence.save_rail_collapsed(true);
+    assert!(persistence.load_rail_collapsed());
+    assert!(persistence.load_inspector_open());
     assert_eq!(persistence.load_theme_preference(), ThemePreference::System);
 
     persistence.save_theme_preference(ThemePreference::Dark);
@@ -799,14 +809,22 @@ fn ui_preferences_default_and_roundtrip_without_overwriting_each_other() {
 
     persistence.save_inspector_open(false);
     assert!(!persistence.load_inspector_open());
+    assert!(persistence.load_rail_collapsed());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
+
+    persistence.save_rail_collapsed(false);
+    assert!(!persistence.load_inspector_open());
+    assert!(!persistence.load_rail_collapsed());
     assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
 
     persistence.save_theme_preference(ThemePreference::Light);
     assert!(!persistence.load_inspector_open());
+    assert!(!persistence.load_rail_collapsed());
     assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
 
     persistence.save_inspector_open(true);
     assert!(persistence.load_inspector_open());
+    assert!(!persistence.load_rail_collapsed());
     assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
 
     let _ = std::fs::remove_dir_all(&root);
