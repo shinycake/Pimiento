@@ -21,6 +21,7 @@ use gpui_component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     label::Label,
+    progress::Progress,
     scroll::ScrollableElement as _,
     separator::Separator,
     switch::Switch,
@@ -2128,6 +2129,13 @@ impl SessionView {
             PaletteActionId::RenameSession => self.rename_session(cx),
             PaletteActionId::AbortRun => self.do_abort(cx),
             PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
+            PaletteActionId::RevealLogs => {
+                if reveal_in_file_manager(&self.persistence.root).is_err() {
+                    "Could not reveal the Pimiento home folder"
+                        .clone_into(&mut self.status_message);
+                    cx.notify();
+                }
+            }
             PaletteActionId::NewSession
             | PaletteActionId::CloseSession
             | PaletteActionId::ToggleRail
@@ -2342,6 +2350,7 @@ enum PaletteActionId {
     RenameSession,
     AbortRun,
     SessionsLauncher,
+    RevealLogs,
     NewSession,
     CloseSession,
     ToggleRail,
@@ -2406,6 +2415,11 @@ fn palette_catalog() -> &'static [PaletteEntry] {
             id: PaletteActionId::SessionsLauncher,
             label: "Sessions launcher",
             hint: "back",
+        },
+        PaletteEntry {
+            id: PaletteActionId::RevealLogs,
+            label: "Reveal logs",
+            hint: "pimiento home folder",
         },
         PaletteEntry {
             id: PaletteActionId::NewSession,
@@ -2657,6 +2671,7 @@ struct WorkspaceView {
     rail_collapsed: bool,
     inspector_open: bool,
     inspector_focus: InspectorFocus,
+    tools_expanded: bool,
     pending_quit_confirm: bool,
     quit_in_progress: bool,
 }
@@ -2675,6 +2690,7 @@ impl WorkspaceView {
             initial_cwd,
             rail_collapsed: false,
             inspector_focus: InspectorFocus::Session,
+            tools_expanded: false,
             pending_quit_confirm: false,
             quit_in_progress: false,
         }
@@ -2971,6 +2987,7 @@ fn tool_names_from_state(state: Option<&serde_json::Value>) -> Vec<String> {
 fn render_inspector(
     session: &gpui::Entity<SessionView>,
     focus: InspectorFocus,
+    tools_expanded: bool,
     window: &mut Window,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::AnyElement {
@@ -3020,7 +3037,7 @@ fn render_inspector(
                 .unwrap_or_else(|| "Unknown model".to_owned()),
             thinking_label(state.thinking.as_ref()).unwrap_or_else(|| "unknown".to_owned()),
             phase,
-            context_percent_label(state.context.as_ref()),
+            context_percent(state.context.as_ref()),
             tokens_per_second_label(state.tokens.as_ref()),
             state.fast_mode_enabled,
             state.fast_mode_active,
@@ -3123,9 +3140,19 @@ fn render_inspector(
                 )
                 .when_some(context, |section, value| {
                     section.child(
-                        Label::new(format!("Context: {value}"))
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                Label::new(format!("ctx:{value:.0}%"))
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(
+                                Progress::new("inspector-context-progress")
+                                    .value(value)
+                                    .xsmall(),
+                            ),
                     )
                 })
                 .when_some(tokens, |section, value| {
@@ -3299,30 +3326,45 @@ fn render_inspector(
             v_flex()
                 .w_full()
                 .gap_1()
-                .child(
-                    Label::new("Tools")
+                .child(if tool_names.len() > 8 {
+                    Button::new("inspector-tools-toggle")
+                        .label(format!("Tools ({})", tool_names.len()))
+                        .small()
+                        .ghost()
+                        .w_full()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.tools_expanded = !this.tools_expanded;
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                } else {
+                    Label::new(format!("Tools ({})", tool_names.len()))
                         .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
-                )
-                .when(!tool_names.is_empty(), |section| {
-                    let hidden = tool_names.len().saturating_sub(12);
-                    section
-                        .child(
-                            h_flex().w_full().flex_wrap().gap_1().children(
-                                tool_names
-                                    .iter()
-                                    .take(12)
-                                    .map(|name| Tag::secondary().small().child(name.clone())),
-                            ),
-                        )
-                        .when(hidden > 0, |section| {
-                            section.child(
-                                Label::new(format!("+{hidden} more"))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground),
-                            )
-                        })
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .into_any_element()
                 })
+                .when(
+                    !tool_names.is_empty() && (tool_names.len() <= 8 || tools_expanded),
+                    |section| {
+                        let hidden = tool_names.len().saturating_sub(12);
+                        section
+                            .child(
+                                h_flex().w_full().flex_wrap().gap_1().children(
+                                    tool_names
+                                        .iter()
+                                        .take(12)
+                                        .map(|name| Tag::secondary().small().child(name.clone())),
+                                ),
+                            )
+                            .when(hidden > 0, |section| {
+                                section.child(
+                                    Label::new(format!("+{hidden} more"))
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                            })
+                    },
+                )
                 .when(tool_names.is_empty(), |section| {
                     section.child(
                         Label::new(if has_tool_state {
@@ -3519,7 +3561,13 @@ impl Render for WorkspaceView {
             .when_some(
                 inspector_open.then_some(active_session).flatten(),
                 |parent, session| {
-                    parent.child(render_inspector(&session, inspector_focus, window, cx))
+                    parent.child(render_inspector(
+                        &session,
+                        inspector_focus,
+                        self.tools_expanded,
+                        window,
+                        cx,
+                    ))
                 },
             )
             .when(self.pending_quit_confirm, |parent| {
@@ -5993,12 +6041,43 @@ fn try_connect_omp(
 }
 
 fn context_percent_label(v: Option<&serde_json::Value>) -> Option<String> {
+    context_percent(v).map(|pct| format!("{pct:.0}%"))
+}
+
+// The value is clamped to 0–100 before conversion; progress rendering needs f32.
+#[allow(clippy::cast_possible_truncation)]
+fn context_percent(v: Option<&serde_json::Value>) -> Option<f32> {
     let v = v?;
-    let pct = v
-        .get("percent")
+    v.get("percent")
         .and_then(serde_json::Value::as_f64)
-        .or_else(|| v.as_f64())?;
-    Some(format!("{pct:.0}%"))
+        .or_else(|| v.as_f64())
+        .filter(|pct| pct.is_finite())
+        .map(|pct| pct.clamp(0.0, 100.0) as f32)
+}
+
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(path).spawn()?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "revealing the Pimiento home folder is unsupported on this platform",
+        ))
+    }
 }
 
 fn tokens_per_second_label(v: Option<&serde_json::Value>) -> Option<String> {
@@ -6329,6 +6408,14 @@ mod tests {
             Some("8%")
         );
         assert_eq!(
+            context_percent(Some(&serde_json::json!({"percent": 120.0}))),
+            Some(100.0)
+        );
+        assert_eq!(
+            context_percent(Some(&serde_json::json!({"percent": -1.0}))),
+            Some(0.0)
+        );
+        assert_eq!(
             tokens_per_second_label(Some(&serde_json::json!({"tokensPerSecond": 12.34})))
                 .as_deref(),
             Some("12.3")
@@ -6424,6 +6511,8 @@ mod tests {
             hits.iter()
                 .any(|e| e.id == PaletteActionId::ToggleInspector)
         );
+        let hits = filter_palette_entries("home folder");
+        assert!(hits.iter().any(|e| e.id == PaletteActionId::RevealLogs));
         assert!(filter_palette_entries("zzzz-nope").is_empty());
     }
 

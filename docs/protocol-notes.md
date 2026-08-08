@@ -219,3 +219,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The toolbar shortens `cursor/<model-id>` to `<model-id>`, while the inspector keeps the full OMP-published provider/model string.
 - Running tool elapsed time is disposable display state keyed by the OMP tool-call ID. A foreground GPUI task repaints once per second while any projected tool is running; completion duration remains OMP-authoritative when published.
 - Inspector visibility is stored as `{ "inspector_open": bool }` in `ui.json` under the existing Pimiento persistence root. Missing or malformed state defaults to open.
+
+## Reveal logs + inspector density — 2026-08-08
+
+- Command-palette **Reveal logs** opens the existing Pimiento persistence root (`~/.pimiento` or `PIMIENTO_HOME`) with `open` on macOS or `xdg-open` on Linux; `scripts/reveal_logs.sh` provides the same terminal dogfood action without reading or printing stored data.
+- The inspector keeps the authoritative `ctx:N%` text and adds a thin progress bar for the same clamped `contextUsage.percent` value.
+- Inspector tool chips default collapsed when OMP reports more than eight tools; **Tools (N)** expands the existing capped chip list.
