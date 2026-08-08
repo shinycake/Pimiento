@@ -314,6 +314,27 @@ fn theme_preference_cycles_system_light_dark() {
 }
 
 #[test]
+fn theme_preference_from_env_parses_known_values() {
+    assert_eq!(
+        theme_preference_from_env(Some("light")),
+        ThemePreference::Light
+    );
+    assert_eq!(
+        theme_preference_from_env(Some("DARK")),
+        ThemePreference::Dark
+    );
+    assert_eq!(
+        theme_preference_from_env(Some("system")),
+        ThemePreference::System
+    );
+    assert_eq!(theme_preference_from_env(None), ThemePreference::System);
+    assert_eq!(
+        theme_preference_from_env(Some("nope")),
+        ThemePreference::System
+    );
+}
+
+#[test]
 fn workspace_blocks_close_for_every_abortable_phase() {
     for phase in [
         RunPhase::Streaming,

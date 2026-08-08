@@ -21,6 +21,15 @@ pub(crate) fn next_theme_preference(current: ThemePreference) -> ThemePreference
     }
 }
 
+/// Parse `PIMIENTO_THEME` (`system` / `light` / `dark`). Unknown or empty → System.
+pub(crate) fn theme_preference_from_env(raw: Option<&str>) -> ThemePreference {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("light") => ThemePreference::Light,
+        Some("dark") => ThemePreference::Dark,
+        _ => ThemePreference::System,
+    }
+}
+
 pub(crate) fn apply_theme_preference(
     preference: ThemePreference,
     window: &mut Window,
