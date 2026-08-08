@@ -212,3 +212,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `get_available_models` returns `ModelInfo` entries whose optional `thinking.efforts` array is the authority for each model's controllable effort levels. Pimiento preserves catalog order and offers only `off` + advertised efforts + `auto`, with duplicates removed.
 - Missing/null `thinking` or an empty `efforts` array means the model has no controllable thinking surface, so Pimiento hides the thinking picker. OMP still exposes `set_thinking_level` / `cycle_thinking_level` and remains responsible for clamping wire commands.
 - The status strip keeps `status_message` for the OMP version, connection state, errors, and transient notices only. Model/thinking controls and the quiet context/tokens readouts render separately, so runtime facts are not duplicated.
+
+## Pristine UI polish — 2026-08-08
+
+- Transcript-level `Copy` actions are hidden until their semantic row is hovered; Markdown code-block copy remains visible because it is contextual to the block.
+- The toolbar shortens `cursor/<model-id>` to `<model-id>`, while the inspector keeps the full OMP-published provider/model string.
+- Running tool elapsed time is disposable display state keyed by the OMP tool-call ID. A foreground GPUI task repaints once per second while any projected tool is running; completion duration remains OMP-authoritative when published.
+- Inspector visibility is stored as `{ "inspector_open": bool }` in `ui.json` under the existing Pimiento persistence root. Missing or malformed state defaults to open.
