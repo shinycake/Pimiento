@@ -32,3 +32,15 @@ installation directory.
 
 Because the bundle is unsigned and intended only for local use, macOS may show
 a Gatekeeper warning when it is moved to another machine.
+
+## Linux
+
+AppImage / `.deb` packaging is deferred. On Linux, dogfood with:
+
+```sh
+cargo build -p pimiento-app
+./scripts/run_app.sh
+```
+
+Pimiento still discovers `omp` via the login-shell PATH and never bundles or
+installs it.

@@ -41,7 +41,7 @@ For the self-hosting workflow, follow the dogfood ritual in [PLAN.md §7](PLAN.m
 
 ## macOS packaging
 
-See [docs/packaging.md](docs/packaging.md) for the unsigned local `.app` bundle. Use `scripts/package_macos_app.sh` to build it, or `scripts/install_macos_app.sh` to install it for the current user.
+See [docs/packaging.md](docs/packaging.md) for the unsigned local `.app` bundle. Use `scripts/package_macos_app.sh` to build it, or `scripts/install_macos_app.sh` to install it for the current user. Linux AppImage/`.deb` packaging is deferred — run via `cargo build` / `scripts/run_app.sh` for now (same doc).
 
 ## Architecture and doctrine
 

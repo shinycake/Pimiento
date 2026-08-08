@@ -3040,7 +3040,7 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("about-panel")
-                                .w(px(360.))
+                                .w(px(420.))
                                 .gap_3()
                                 .p_5()
                                 .rounded_md()
@@ -3051,19 +3051,28 @@ impl Render for SessionView {
                                     cx.stop_propagation();
                                 }))
                                 .child(
-                                    Label::new("Pimiento")
+                                    Label::new("About Pimiento")
                                         .text_lg()
                                         .font_weight(gpui::FontWeight::SEMIBOLD),
                                 )
                                 .child(
-                                    Label::new("A native client for OMP rpc-ui.")
-                                        .text_sm()
-                                        .text_color(theme.muted_foreground),
+                                    Label::new(
+                                        "Native GPUI client for your existing omp install.",
+                                    )
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground),
                                 )
                                 .child(Label::new(version).text_sm())
                                 .child(
+                                    Label::new(
+                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort",
+                                    )
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                                )
+                                .child(
                                     Label::new("Local-only · no telemetry")
-                                        .text_sm()
+                                        .text_xs()
                                         .text_color(theme.muted_foreground),
                                 )
                                 .child(h_flex().w_full().justify_end().child(
