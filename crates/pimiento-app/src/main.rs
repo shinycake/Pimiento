@@ -57,6 +57,9 @@ type ModelChoice = (String, String);
 
 const MODEL_PICKER_VISIBLE_CAP: usize = 200;
 const SLASH_COMMAND_VISIBLE_CAP: usize = 12;
+const THINKING_LEVELS: &[&str] = &[
+    "off", "minimal", "low", "medium", "high", "xhigh", "max", "auto",
+];
 const MAX_RECENT_SESSIONS: usize = 12;
 const MAX_DISCOVERED_SESSIONS: usize = 24;
 const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
@@ -197,12 +200,14 @@ struct LauncherBootstrap {
     last_session: Option<PathBuf>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct SessionView {
     projection: SessionProjection,
     client: Option<RpcClient>,
     composer: gpui::Entity<InputState>,
     model_search: gpui::Entity<InputState>,
     model_picker_open: bool,
+    thinking_picker_open: bool,
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
@@ -287,6 +292,7 @@ impl SessionView {
             composer,
             model_search,
             model_picker_open: false,
+            thinking_picker_open: false,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
@@ -326,7 +332,7 @@ impl SessionView {
                                 == Some("model_changed");
                             this.projection.apply(frame);
                             if is_model_changed {
-                                this.refresh_state_after_model_change(cx);
+                                this.refresh_state(cx);
                             }
                         }
                         ClientEvent::Closed(info) => {
@@ -368,6 +374,8 @@ impl SessionView {
             self.session_cwd = None;
             self.projection = SessionProjection::new();
             self.available_models.clear();
+            self.model_picker_open = false;
+            self.thinking_picker_open = false;
             self.expanded_tools.clear();
             self.slash_menu = SlashMenuState::Closed;
             self.slash_selected = 0;
@@ -496,6 +504,7 @@ impl SessionView {
         self.client.take();
         self.pump.take();
         self.model_picker_open = false;
+        self.thinking_picker_open = false;
         self.close_slash_menu();
         self.clear_composer = true;
         if let Some(cwd) = self.session_cwd.take() {
@@ -581,7 +590,23 @@ impl SessionView {
 
     fn toggle_model_picker(&mut self, cx: &mut Context<Self>) {
         self.model_picker_open = !self.model_picker_open;
+        if self.model_picker_open {
+            self.thinking_picker_open = false;
+        }
         if !self.model_picker_open {
+            self.clear_model_search = true;
+        }
+        cx.notify();
+    }
+
+    fn close_thinking_picker(&mut self) {
+        self.thinking_picker_open = false;
+    }
+
+    fn toggle_thinking_picker(&mut self, cx: &mut Context<Self>) {
+        self.thinking_picker_open = !self.thinking_picker_open;
+        if self.thinking_picker_open {
+            self.model_picker_open = false;
             self.clear_model_search = true;
         }
         cx.notify();
@@ -602,7 +627,7 @@ impl SessionView {
         self.set_model(provider, id, cx);
     }
 
-    fn refresh_state_after_model_change(&mut self, cx: &mut Context<Self>) {
+    fn refresh_state(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -696,6 +721,114 @@ impl SessionView {
                             message: format!("set_model: {e}"),
                             code: Some("set_model".into()),
                         });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn set_thinking_level(&mut self, level: &'static str, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.close_thinking_picker();
+        // Optimistic display; corrected by the post-command get_state refresh.
+        self.projection.state.thinking = Some(serde_json::json!(level));
+        self.sync_status_model();
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::SetThinkingLevel {
+                    level: serde_json::json!(level),
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "set_thinking_level failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("set_thinking_level".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_thinking_level: {error}"),
+                            code: Some("set_thinking_level".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn toggle_fast_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let enabled = !self.projection.state.fast_mode_enabled.unwrap_or(false);
+        // Optimistic display; the command response and get_state are authoritative.
+        self.projection.state.fast_mode_enabled = Some(enabled);
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetFastMode { enabled }).await {
+                Ok(resp) if resp.success => {
+                    let response_state = resp.data;
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(data) = response_state.as_ref() {
+                            if let Some(value) =
+                                data.get("enabled").and_then(serde_json::Value::as_bool)
+                            {
+                                this.projection.state.fast_mode_enabled = Some(value);
+                            }
+                            if let Some(value) =
+                                data.get("active").and_then(serde_json::Value::as_bool)
+                            {
+                                this.projection.state.fast_mode_active = Some(value);
+                            }
+                        }
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "set_fast_mode failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("set_fast_mode".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_fast_mode: {error}"),
+                            code: Some("set_fast_mode".into()),
+                        });
+                        this.refresh_state(cx);
                         cx.notify();
                     });
                 }
@@ -1406,6 +1539,12 @@ impl Render for SessionView {
             .model
             .clone()
             .unwrap_or_else(|| "(no model)".to_owned());
+        let thinking_button_label = thinking_label(self.projection.state.thinking.as_ref())
+            .map_or_else(|| "think:?".to_owned(), |level| format!("think:{level}"));
+        let fast_button_label = fast_mode_label(
+            self.projection.state.fast_mode_enabled,
+            self.projection.state.fast_mode_active,
+        );
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -1476,6 +1615,30 @@ impl Render for SessionView {
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, _window, cx| {
                                                     this.toggle_model_picker(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new("thinking-picker")
+                                            .label(thinking_button_label)
+                                            .small()
+                                            .ghost()
+                                            .disabled(!can_pick)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.toggle_thinking_picker(cx);
+                                                },
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new("fast-mode")
+                                            .label(fast_button_label)
+                                            .small()
+                                            .ghost()
+                                            .disabled(!can_pick)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.toggle_fast_mode(cx);
                                                 },
                                             )),
                                     ),
@@ -1562,6 +1725,30 @@ impl Render for SessionView {
                                             .text_color(theme.muted_foreground),
                                     )
                                 }),
+                        )
+                    })
+                    .when(self.thinking_picker_open, |parent| {
+                        parent.child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .pb_2()
+                                .gap_1()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .children(THINKING_LEVELS.iter().enumerate().map(|(ix, level)| {
+                                    let level = *level;
+                                    Button::new(("thinking-choice", ix))
+                                        .label(level)
+                                        .ghost()
+                                        .small()
+                                        .on_click(window.listener_for(
+                                            &view,
+                                            move |this, _, _window, cx| {
+                                                this.set_thinking_level(level, cx);
+                                            },
+                                        ))
+                                })),
                         )
                     }),
             )
@@ -2866,6 +3053,15 @@ fn tokens_per_second_label(v: Option<&serde_json::Value>) -> Option<String> {
     Some(format!("{tps:.1}"))
 }
 
+fn fast_mode_label(enabled: Option<bool>, active: Option<bool>) -> &'static str {
+    match (enabled, active) {
+        (_, Some(true)) => "fast:active",
+        (Some(true), _) => "fast:on",
+        (Some(false), _) => "fast:off",
+        (None, _) => "fast:?",
+    }
+}
+
 fn thinking_label(v: Option<&serde_json::Value>) -> Option<String> {
     let v = v?;
     if let Some(s) = v.as_str() {
@@ -3016,6 +3212,22 @@ mod tests {
         assert!(!composer_uses_steer(&RunPhase::Idle));
         assert!(!composer_uses_steer(&RunPhase::Dead));
     }
+    #[test]
+    fn thinking_levels_are_non_empty_and_include_auto() {
+        assert!(!THINKING_LEVELS.is_empty());
+        assert!(THINKING_LEVELS.contains(&"auto"));
+        assert!(THINKING_LEVELS.contains(&"max"));
+    }
+
+    #[test]
+    fn fast_mode_label_distinguishes_off_on_and_active() {
+        assert_eq!(fast_mode_label(Some(false), Some(false)), "fast:off");
+        assert_eq!(fast_mode_label(Some(true), Some(false)), "fast:on");
+        assert_eq!(fast_mode_label(Some(true), Some(true)), "fast:active");
+        assert_eq!(fast_mode_label(Some(false), Some(true)), "fast:active");
+        assert_eq!(fast_mode_label(None, None), "fast:?");
+    }
+
     #[test]
     fn thinking_label_reads_string_or_level_object() {
         assert_eq!(

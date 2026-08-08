@@ -113,3 +113,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Pimiento parses `available_commands_raw` as either a command array or `{commands: []}`. Slash names and aliases are normalized with a leading `/`; aliases filter to and complete the primary command name.
 - The composer opens a capped, prefix-filtered slash menu for slash-only drafts; Enter or a click completes locally, while Enter sends only when there are no menu matches.
+
+## Interactive model controls — 2026-08-08
+
+- The status strip exposes `set_thinking_level {level}` for the configured levels `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `auto`; Pimiento refreshes `get_state` after the command so the rendered selector remains OMP-authoritative.
+- `set_fast_mode {enabled}` returns `{enabled, active}`. These values describe configured and currently active fast mode and may diverge, so the status strip labels `fast:off`, `fast:on`, or `fast:active` rather than collapsing them into one boolean.
