@@ -15,13 +15,14 @@ pub(crate) fn render_entry(
             h_flex()
                 .w_full()
                 .gap_2()
-                .py_1()
+                .py_2()
                 .child(
                     div()
                         .flex_1()
                         .border_l_2()
                         .border_color(theme.accent)
-                        .px_3()
+                        .pl_4()
+                        .pr_3()
                         .py_1p5()
                         .child(text.clone()),
                 )
@@ -43,7 +44,7 @@ pub(crate) fn render_entry(
             h_flex()
                 .w_full()
                 .gap_2()
-                .py_1()
+                .py_2()
                 .child(
                     div().flex_1().child(
                         TextView::markdown(("assistant", row_ix), markdown.as_str())
@@ -88,7 +89,7 @@ pub(crate) fn render_entry(
             h_flex()
                 .w_full()
                 .gap_2()
-                .py_1()
+                .py_2()
                 .child(
                     div()
                         .id(("thinking-collapsed", row_ix))
@@ -105,7 +106,7 @@ pub(crate) fn render_entry(
                                 .text_color(theme.muted_foreground)
                                 .text_xs()
                                 .italic()
-                                .child("thinking… (click to expand)"),
+                                .child("Thinking · click to expand"),
                         ),
                 )
                 .child(
@@ -127,7 +128,7 @@ pub(crate) fn render_entry(
             div()
                 .id(("thinking-expanded", row_ix))
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     v_flex()
                         .gap_1()
@@ -183,7 +184,7 @@ pub(crate) fn render_entry(
             let text_for_copy = text.clone();
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     h_flex()
                         .w_full()
@@ -218,7 +219,7 @@ pub(crate) fn render_entry(
             };
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     h_flex()
                         .w_full()
@@ -248,7 +249,7 @@ pub(crate) fn render_entry(
             let text_for_copy = text.clone();
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     h_flex()
                         .w_full()
@@ -287,7 +288,7 @@ pub(crate) fn render_entry(
             let label_for_copy = label.to_owned();
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     div()
                         .px_2()
@@ -331,7 +332,7 @@ pub(crate) fn render_entry(
             };
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     div()
                         .px_2()
@@ -366,7 +367,7 @@ pub(crate) fn render_entry(
             let raw_for_copy = compact_json(raw);
             div()
                 .w_full()
-                .py_1()
+                .py_2()
                 .child(
                     h_flex()
                         .w_full()
@@ -479,7 +480,7 @@ pub(crate) fn render_tool_card(
 
     v_flex()
         .w_full()
-        .py_1()
+        .py_2()
         .gap_0p5()
         .child(
             h_flex()

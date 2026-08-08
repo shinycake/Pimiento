@@ -516,7 +516,7 @@ pub(crate) fn render_inspector(
         .h_full()
         .flex_shrink_0()
         .overflow_y_scrollbar()
-        .gap_3()
+        .gap_4()
         .p_3()
         .border_l_1()
         .border_color(theme.border)
@@ -551,7 +551,8 @@ pub(crate) fn render_inspector(
                         .child(
                             Label::new("Session")
                                 .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground),
                         )
                         .child(phase_tag(&phase).small().child(phase)),
                 )
@@ -600,7 +601,8 @@ pub(crate) fn render_inspector(
                 .child(
                     Label::new("Fast")
                         .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground),
                 )
                 .child(
                     Switch::new("inspector-fast-mode")
@@ -638,7 +640,8 @@ pub(crate) fn render_inspector(
                         .child(
                             Label::new("Checklist")
                                 .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground),
                         )
                         .child(Tag::secondary().small().child(todo_count.to_string())),
                 )
@@ -681,7 +684,8 @@ pub(crate) fn render_inspector(
                         .child(
                             Label::new("Agents")
                                 .text_xs()
-                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground),
                         )
                         .child(
                             Button::new("inspector-agents-refresh")
@@ -757,7 +761,11 @@ pub(crate) fn render_inspector(
                 .gap_1()
                 .child(if tool_names.len() > 8 {
                     Button::new("inspector-tools-toggle")
-                        .label(format!("Tools ({})", tool_names.len()))
+                        .label(format!(
+                            "{} Tools ({})",
+                            if tools_expanded { "▾" } else { "▸" },
+                            tool_names.len()
+                        ))
                         .small()
                         .ghost()
                         .w_full()
@@ -769,7 +777,8 @@ pub(crate) fn render_inspector(
                 } else {
                     Label::new(format!("Tools ({})", tool_names.len()))
                         .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(theme.muted_foreground)
                         .into_any_element()
                 })
                 .when(
@@ -808,19 +817,9 @@ pub(crate) fn render_inspector(
         )
         .child(Separator::horizontal())
         .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    Label::new("LSP / MCP")
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
-                )
-                .child(
-                    Label::new("LSP/MCP status is not published on OMP rpc-ui.")
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
-                ),
+            Label::new("LSP/MCP status is not published on OMP rpc-ui.")
+                .text_xs()
+                .text_color(theme.muted_foreground),
         )
         .into_any_element()
 }
@@ -990,21 +989,30 @@ impl Render for WorkspaceView {
             .when(self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()
-                        .w(px(36.))
+                        .id("workspace-show-rail")
+                        .w(px(64.))
                         .h_full()
-                        .p_1()
+                        .items_center()
+                        .gap_1()
+                        .pt_2()
                         .border_r_1()
                         .border_color(theme.border)
                         .bg(theme.muted)
+                        .cursor_pointer()
+                        .hover(|rail| rail.bg(theme.secondary))
                         .child(
-                            Button::new("workspace-show-rail")
-                                .label("»")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                                    this.toggle_rail(cx);
-                                })),
-                        ),
+                            Label::new("☰")
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM),
+                        )
+                        .child(
+                            Label::new("Sessions")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.toggle_rail(cx);
+                        })),
                 )
             })
             .child(div().flex_1().min_w(px(480.)).h_full().child(
