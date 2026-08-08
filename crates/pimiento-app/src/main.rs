@@ -3704,33 +3704,51 @@ fn render_entry(
                 .into_any_element()
         }
         TranscriptEntry::Thinking {
-            collapsed: true, ..
+            collapsed: true,
+            text,
+            ..
         } => {
             let view = cx.entity().downgrade();
-            div()
-                .id(("thinking-collapsed", row_ix))
+            let text_for_copy = text.clone();
+            h_flex()
                 .w_full()
+                .gap_2()
                 .py_1()
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    let _ = view.update(cx, |this, cx| {
-                        this.toggle_thinking_row(row_ix, cx);
-                    });
-                })
                 .child(
                     div()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(theme.muted)
-                        .text_color(theme.muted_foreground)
-                        .text_xs()
-                        .child("thinking… (click to expand)"),
+                        .id(("thinking-collapsed", row_ix))
+                        .flex_1()
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.toggle_thinking_row(row_ix, cx);
+                            });
+                        })
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .bg(theme.muted)
+                                .text_color(theme.muted_foreground)
+                                .text_xs()
+                                .child("thinking… (click to expand)"),
+                        ),
+                )
+                .child(
+                    Button::new(("copy-thinking", row_ix))
+                        .label("Copy")
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
+                        }),
                 )
                 .into_any_element()
         }
         TranscriptEntry::Thinking { text, .. } => {
             let view = cx.entity().downgrade();
+            let text_for_copy = text.clone();
             div()
                 .id(("thinking-expanded", row_ix))
                 .w_full()
@@ -3739,15 +3757,30 @@ fn render_entry(
                     v_flex()
                         .gap_1()
                         .child(
-                            Button::new(("thinking-collapse", row_ix))
-                                .label("collapse thinking")
-                                .small()
-                                .ghost()
-                                .on_click(move |_, _, cx| {
-                                    let _ = view.update(cx, |this, cx| {
-                                        this.toggle_thinking_row(row_ix, cx);
-                                    });
-                                }),
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new(("thinking-collapse", row_ix))
+                                        .label("collapse thinking")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            let _ = view.update(cx, |this, cx| {
+                                                this.toggle_thinking_row(row_ix, cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new(("copy-thinking", row_ix))
+                                        .label("Copy")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                text_for_copy.clone(),
+                                            ));
+                                        }),
+                                ),
                         )
                         .child(
                             div()
