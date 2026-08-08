@@ -271,6 +271,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - An empty projected assistant row renders a quiet muted ellipsis only while its wire-derived `streaming` flag is true. The cue contains no inferred assistant content and does not duplicate the toolbar phase.
 - The empty transcript presents one short sentence without key-command tips.
 - Completed thinking rows with empty text render as zero-height placeholders so list indices stay stable without showing a hollow "Thinking · expand" control.
+- Info notices that look like tool/MCP mount chatter stay fully visible but drop the `Notice` label and render slightly quieter — text remains OMP-authoritative.
 
 ## Palette theme label — 2026-08-08
 

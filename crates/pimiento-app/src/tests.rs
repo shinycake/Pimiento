@@ -275,6 +275,14 @@ fn palette_theme_entry_shows_current_preference() {
 }
 
 #[test]
+fn mount_notices_are_detected_without_inventing_content() {
+    assert!(notice_looks_like_mount_event(
+        "cli_8: mounted mcp_node_repl_js, mcp_node_repl_js.reset"
+    ));
+    assert!(!notice_looks_like_mount_event("compaction finished"));
+}
+
+#[test]
 fn groups_sessions_by_workspace_name_and_preserves_session_order() {
     let entries = vec![
         RailEntry {
