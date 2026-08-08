@@ -2041,7 +2041,8 @@ pub(crate) fn short_model_label(full: &str) -> String {
 }
 
 pub(crate) fn phase_tag(phase: &str) -> Tag {
-    match phase {
+    let key = phase.trim_end_matches('…').trim_end_matches('.');
+    match key {
         "stream" | "streaming" | "await" | "awaiting" => Tag::info(),
         "compact" | "compacting" | "retry" | "retrying" | "restart" | "restarting" => {
             Tag::warning()
@@ -2435,11 +2436,7 @@ impl Render for SessionView {
                                                         |label| label.text_color(theme.warning),
                                                     ),
                                             )
-                                            .child(
-                                                Label::new(phase_label)
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground),
-                                            ),
+                                            .child(phase_tag(phase_label).small().child(phase_label)),
                                     )
                                     .child(
                                         h_flex()
