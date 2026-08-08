@@ -2231,7 +2231,26 @@ impl SessionView {
             label,
             phase: phase.to_owned(),
             cwd: cwd.to_owned(),
+            attention: self.rail_attention(),
         }
+    }
+
+    fn rail_attention(&self) -> RailAttention {
+        classify_rail_attention(&self.projection.run_phase, self.unread_below)
+    }
+
+    fn window_title(&self) -> String {
+        if self.launcher_phase != LauncherPhase::Hidden {
+            return "Pimiento".to_owned();
+        }
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.launcher_cwd.as_path());
+        workspace_window_title(
+            &projection_session_name(&self.projection, cwd),
+            &self.projection.run_phase,
+        )
     }
 
     fn shutdown_session(&mut self, cx: &mut Context<Self>) {
@@ -2290,12 +2309,43 @@ fn workspace_should_block_close(phases: &[RunPhase]) -> bool {
     phases.iter().any(phase_allows_abort)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailAttention {
+    Quiet,
+    Active,
+    Unread,
+}
+
+fn classify_rail_attention(phase: &RunPhase, unread_below: usize) -> RailAttention {
+    if phase_allows_abort(phase) {
+        RailAttention::Active
+    } else if unread_below > 0 {
+        RailAttention::Unread
+    } else {
+        RailAttention::Quiet
+    }
+}
+
+fn workspace_window_title(session_name: &str, phase: &RunPhase) -> String {
+    let phase = match phase {
+        RunPhase::Idle => "idle",
+        RunPhase::Streaming => "streaming",
+        RunPhase::AwaitingResume => "awaiting",
+        RunPhase::Compacting => "compacting",
+        RunPhase::Retrying => "retrying",
+        RunPhase::Restarting => "restarting",
+        RunPhase::Dead => "dead",
+    };
+    format!("Pimiento — {session_name} · {phase}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RailEntry {
     ix: usize,
     label: String,
     phase: String,
     cwd: PathBuf,
+    attention: RailAttention,
 }
 
 fn workspace_display_name(path: &Path) -> String {
@@ -2665,6 +2715,7 @@ fn render_todo_task(task: &TodoTaskView, theme: &Theme) -> gpui::AnyElement {
 #[allow(clippy::struct_excessive_bools)]
 struct WorkspaceView {
     sessions: Vec<gpui::Entity<SessionView>>,
+    session_subscriptions: Vec<gpui::Subscription>,
     active: usize,
     persistence: SessionPersistence,
     initial_cwd: PathBuf,
@@ -2674,6 +2725,7 @@ struct WorkspaceView {
     tools_expanded: bool,
     pending_quit_confirm: bool,
     quit_in_progress: bool,
+    last_window_title: String,
 }
 
 impl WorkspaceView {
@@ -2681,9 +2733,14 @@ impl WorkspaceView {
         first: gpui::Entity<SessionView>,
         persistence: SessionPersistence,
         initial_cwd: PathBuf,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let first_subscription = cx.observe(&first, |_this, _session, cx| {
+            cx.notify();
+        });
         Self {
             sessions: vec![first],
+            session_subscriptions: vec![first_subscription],
             active: 0,
             inspector_open: persistence.load_inspector_open(),
             persistence,
@@ -2693,6 +2750,7 @@ impl WorkspaceView {
             tools_expanded: false,
             pending_quit_confirm: false,
             quit_in_progress: false,
+            last_window_title: String::new(),
         }
     }
 
@@ -2824,7 +2882,11 @@ impl WorkspaceView {
                 },
             )
         });
+        let subscription = cx.observe(&session, |_this, _session, cx| {
+            cx.notify();
+        });
         self.sessions.push(session);
+        self.session_subscriptions.push(subscription);
         self.active = self.sessions.len() - 1;
         cx.notify();
     }
@@ -2838,6 +2900,7 @@ impl WorkspaceView {
             session.update(cx, SessionView::shutdown_session);
         }
         self.sessions.remove(idx);
+        drop(self.session_subscriptions.remove(idx));
         if self.sessions.is_empty() {
             self.add_session(window, cx);
         } else {
@@ -3420,6 +3483,14 @@ impl Render for WorkspaceView {
                 .collect(),
         );
         let active_session = self.sessions.get(active).cloned();
+        let window_title = active_session.as_ref().map_or_else(
+            || "Pimiento".to_owned(),
+            |session| session.read(cx).window_title(),
+        );
+        if self.last_window_title != window_title {
+            window.set_window_title(&window_title);
+            self.last_window_title = window_title;
+        }
         if inspector_open
             && let Some(session) = active_session.clone()
             && session.read(cx).subagent_snapshots.is_empty()
@@ -3497,6 +3568,11 @@ impl Render for WorkspaceView {
                                     .children(entries.into_iter().map(|entry| {
                                         let selected = entry.ix == active;
                                         let ix = entry.ix;
+                                        let attention_color = match entry.attention {
+                                            RailAttention::Quiet => None,
+                                            RailAttention::Active => Some(theme.info),
+                                            RailAttention::Unread => Some(theme.warning),
+                                        };
                                         h_flex()
                                             .id(("workspace-session", ix))
                                             .w_full()
@@ -3514,10 +3590,23 @@ impl Render for WorkspaceView {
                                                 row.hover(|row| row.bg(theme.secondary))
                                             })
                                             .child(
-                                                Label::new(entry.label)
-                                                    .text_sm()
+                                                h_flex()
                                                     .flex_1()
-                                                    .truncate(),
+                                                    .gap_2()
+                                                    .when_some(attention_color, |label, color| {
+                                                        label.child(
+                                                            div()
+                                                                .size(px(7.))
+                                                                .rounded_full()
+                                                                .bg(color),
+                                                        )
+                                                    })
+                                                    .child(
+                                                        Label::new(entry.label)
+                                                            .text_sm()
+                                                            .flex_1()
+                                                            .truncate(),
+                                                    ),
                                             )
                                             .child(
                                                 phase_tag(&entry.phase).small().child(entry.phase),
@@ -6286,8 +6375,8 @@ fn main() {
                         this.begin_connection(window, cwd, resume, true, cx);
                     });
                 }
-                let workspace = cx.new(|_cx| {
-                    WorkspaceView::new(session, persistence.clone(), initial_cwd.clone())
+                let workspace = cx.new(|cx| {
+                    WorkspaceView::new(session, persistence.clone(), initial_cwd.clone(), cx)
                 });
                 let weak_workspace = workspace.downgrade();
                 window.on_window_should_close(cx, move |_window, cx| {
@@ -6443,6 +6532,43 @@ mod tests {
     fn phase_disallows_abort_dead() {
         assert!(!phase_allows_abort(&RunPhase::Dead));
     }
+
+    #[test]
+    fn rail_attention_prioritizes_activity_then_unread() {
+        for phase in [
+            RunPhase::Streaming,
+            RunPhase::AwaitingResume,
+            RunPhase::Compacting,
+            RunPhase::Retrying,
+        ] {
+            assert_eq!(classify_rail_attention(&phase, 3), RailAttention::Active);
+        }
+        assert_eq!(
+            classify_rail_attention(&RunPhase::Idle, 1),
+            RailAttention::Unread
+        );
+        assert_eq!(
+            classify_rail_attention(&RunPhase::Restarting, 0),
+            RailAttention::Quiet
+        );
+        assert_eq!(
+            classify_rail_attention(&RunPhase::Dead, 0),
+            RailAttention::Quiet
+        );
+    }
+
+    #[test]
+    fn workspace_title_includes_authoritative_name_and_phase() {
+        assert_eq!(
+            workspace_window_title("Fix renderer", &RunPhase::Streaming),
+            "Pimiento — Fix renderer · streaming"
+        );
+        assert_eq!(
+            workspace_window_title("Pimiento", &RunPhase::Idle),
+            "Pimiento — Pimiento · idle"
+        );
+    }
+
     #[test]
     fn dialog_key_confirm_yes_no_escape() {
         assert_eq!(
@@ -6524,18 +6650,21 @@ mod tests {
                 label: "later".to_owned(),
                 phase: "idle".to_owned(),
                 cwd: PathBuf::from("/tmp/zulu"),
+                attention: RailAttention::Quiet,
             },
             RailEntry {
                 ix: 1,
                 label: "second".to_owned(),
                 phase: "stream".to_owned(),
                 cwd: PathBuf::from("/tmp/alpha"),
+                attention: RailAttention::Active,
             },
             RailEntry {
                 ix: 0,
                 label: "first".to_owned(),
                 phase: "idle".to_owned(),
                 cwd: PathBuf::from("/tmp/alpha"),
+                attention: RailAttention::Unread,
             },
         ];
 
