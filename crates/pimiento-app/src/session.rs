@@ -1146,6 +1146,9 @@ impl SessionView {
         if text.trim().is_empty() {
             return;
         }
+        if !self.can_send() {
+            return;
+        }
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1270,7 +1273,25 @@ impl SessionView {
     }
 
     pub(crate) fn can_send(&self) -> bool {
-        self.client.is_some() && phase_allows_send(&self.projection.run_phase)
+        self.client.is_some()
+            && phase_allows_send(&self.projection.run_phase)
+            && self.projection.pending_dialogs.is_empty()
+    }
+
+    /// Honest reason when Send/Steer is disabled (Doctrine: disabled-with-reason).
+    pub(crate) fn send_disabled_reason(&self) -> Option<&'static str> {
+        if !self.projection.pending_dialogs.is_empty() {
+            return Some("Answer the dialog above first");
+        }
+        if self.client.is_none() {
+            return Some("Not connected to omp");
+        }
+        match self.projection.run_phase {
+            RunPhase::Dead => Some("Session dead — Restart from the crash card"),
+            RunPhase::Restarting => Some("Restarting omp…"),
+            RunPhase::Compacting => Some("Compacting — wait or abort"),
+            _ => None,
+        }
     }
 
     pub(crate) fn can_restart(&self) -> bool {
@@ -1457,6 +1478,7 @@ impl SessionView {
     pub(crate) fn can_follow_up(&self, cx: &Context<Self>) -> bool {
         self.client.is_some()
             && matches!(self.projection.run_phase, RunPhase::Streaming)
+            && self.projection.pending_dialogs.is_empty()
             && !self.composer.read(cx).value().trim().is_empty()
     }
 
@@ -2845,6 +2867,9 @@ impl Render for SessionView {
                             .bg(theme.secondary)
                             .border_t_1()
                             .border_color(theme.border)
+                            .when(!self.projection.pending_dialogs.is_empty(), |row| {
+                                row.opacity(0.55)
+                            })
                             .child(
                                 div()
                                     .relative()
@@ -2956,6 +2981,13 @@ impl Render for SessionView {
                                         });
                                     })),
                             )
+                            .when_some(self.send_disabled_reason(), |row, reason| {
+                                row.child(
+                                    Label::new(reason)
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                            })
                             .when(
                                 matches!(self.projection.run_phase, RunPhase::Streaming),
                                 |parent| {
@@ -2978,15 +3010,6 @@ impl Render for SessionView {
                                         this.do_abort(cx);
                                     }),
                                 ))
-                            })
-                            .when(self.can_restart(), |parent| {
-                                parent.child(
-                                    Button::new("restart").primary().label("Restart").on_click(
-                                        cx.listener(|this, _: &ClickEvent, window, cx| {
-                                            this.do_restart(window, cx);
-                                        }),
-                                    ),
-                                )
                             }),
                     ),
             )
@@ -3101,7 +3124,7 @@ impl Render for SessionView {
                                 .child(Label::new(version).text_sm())
                                 .child(
                                     Label::new(
-                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort",
+                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript",
                                     )
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
