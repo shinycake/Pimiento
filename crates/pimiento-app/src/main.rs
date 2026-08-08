@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, KeyDownEvent,
-    ListAlignment, ListOffset, ListState, PathPromptOptions, Render, Task, Window, WindowOptions,
-    div, list, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, Global,
+    KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions, Render, Task, Window,
+    WindowOptions, div, list, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -38,23 +38,53 @@ use pimiento_core::{
 };
 use serde::{Deserialize, Serialize};
 
-// ── theme toggle ──────────────────────────────────────────────────────────
+// ── theme preference ──────────────────────────────────────────────────────
 
-fn next_theme_mode(current: ThemeMode) -> ThemeMode {
-    if current.is_dark() {
-        ThemeMode::Light
-    } else {
-        ThemeMode::Dark
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThemePreference {
+    System,
+    Light,
+    Dark,
+}
+
+struct ThemePreferenceState(ThemePreference);
+
+impl Global for ThemePreferenceState {}
+
+fn next_theme_preference(current: ThemePreference) -> ThemePreference {
+    match current {
+        ThemePreference::System => ThemePreference::Light,
+        ThemePreference::Light => ThemePreference::Dark,
+        ThemePreference::Dark => ThemePreference::System,
     }
 }
 
-fn toggle_theme_mode(window: &mut Window, cx: &mut App) {
-    let next = next_theme_mode(cx.theme().mode);
-    Theme::change(next, Some(window), cx);
+fn theme_preference_label(preference: ThemePreference) -> &'static str {
+    match preference {
+        ThemePreference::System => "Theme: System",
+        ThemePreference::Light => "Theme: Light",
+        ThemePreference::Dark => "Theme: Dark",
+    }
+}
+
+fn apply_theme_preference(preference: ThemePreference, window: &mut Window, cx: &mut App) {
+    cx.set_global(ThemePreferenceState(preference));
+    match preference {
+        ThemePreference::System => Theme::sync_system_appearance(Some(window), cx),
+        ThemePreference::Light => Theme::change(ThemeMode::Light, Some(window), cx),
+        ThemePreference::Dark => Theme::change(ThemeMode::Dark, Some(window), cx),
+    }
+    // The label changes even when returning to System keeps the same concrete mode.
+    window.refresh();
+}
+
+fn cycle_theme_preference(window: &mut Window, cx: &mut App) {
+    let next = next_theme_preference(cx.global::<ThemePreferenceState>().0);
+    apply_theme_preference(next, window, cx);
 }
 
 fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
-    toggle_theme_mode(window, cx);
+    cycle_theme_preference(window, cx);
 }
 
 // ── SessionView ───────────────────────────────────────────────────────────
@@ -1931,7 +1961,7 @@ impl SessionView {
     ) {
         self.close_palette(cx);
         match id {
-            PaletteActionId::ToggleTheme => toggle_theme_mode(window, cx),
+            PaletteActionId::ToggleTheme => cycle_theme_preference(window, cx),
             PaletteActionId::ToggleTodos => self.toggle_todo_panel(cx),
             PaletteActionId::ToggleAgents => self.toggle_subagent_drawer(cx),
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
@@ -2054,6 +2084,10 @@ fn phase_allows_abort(phase: &RunPhase) -> bool {
         phase,
         RunPhase::Streaming | RunPhase::AwaitingResume | RunPhase::Compacting | RunPhase::Retrying
     )
+}
+
+fn workspace_should_block_close(phases: &[RunPhase]) -> bool {
+    phases.iter().any(phase_allows_abort)
 }
 
 #[derive(Debug, Clone)]
@@ -2412,6 +2446,8 @@ struct WorkspaceView {
     persistence: SessionPersistence,
     initial_cwd: PathBuf,
     rail_collapsed: bool,
+    pending_quit_confirm: bool,
+    quit_in_progress: bool,
 }
 
 impl WorkspaceView {
@@ -2426,7 +2462,82 @@ impl WorkspaceView {
             persistence,
             initial_cwd,
             rail_collapsed: false,
+            pending_quit_confirm: false,
+            quit_in_progress: false,
         }
+    }
+
+    fn should_close_window(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.quit_in_progress {
+            return true;
+        }
+        let phases = self
+            .sessions
+            .iter()
+            .map(|session| session.read(cx).projection.run_phase.clone())
+            .collect::<Vec<_>>();
+        if workspace_should_block_close(&phases) {
+            self.pending_quit_confirm = true;
+            cx.notify();
+            false
+        } else {
+            true
+        }
+    }
+
+    fn cancel_pending_quit(&mut self, cx: &mut Context<Self>) {
+        if !self.quit_in_progress {
+            self.pending_quit_confirm = false;
+            cx.notify();
+        }
+    }
+
+    fn confirm_pending_quit(&mut self, cx: &mut Context<Self>) {
+        if !self.pending_quit_confirm || self.quit_in_progress {
+            return;
+        }
+        self.quit_in_progress = true;
+        cx.notify();
+
+        let clients = self
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                let session = session.read(cx);
+                session
+                    .client
+                    .clone()
+                    .map(|client| (client, phase_allows_abort(&session.projection.run_phase)))
+            })
+            .collect::<Vec<_>>();
+
+        cx.spawn(async move |_, cx| {
+            for (client, should_abort) in clients {
+                if should_abort {
+                    let _ = client
+                        .send_with_timeout(RpcCommandBody::Abort, Duration::from_secs(1))
+                        .await;
+                }
+                client.close_stdin().await;
+            }
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+    }
+
+    fn handle_pending_quit_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.pending_quit_confirm {
+            return false;
+        }
+        if self.quit_in_progress || event.keystroke.modifiers.modified() {
+            return true;
+        }
+        match event.keystroke.key.as_str() {
+            "y" | "Y" => self.confirm_pending_quit(cx),
+            "n" | "N" | "escape" | "esc" => self.cancel_pending_quit(cx),
+            _ => {}
+        }
+        true
     }
 
     fn clamp_active(&mut self) {
@@ -2512,6 +2623,9 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.handle_pending_quit_key(event, cx) {
+            return true;
+        }
         let mods = &event.keystroke.modifiers;
         if !(mods.platform || mods.control) {
             return false;
@@ -2589,6 +2703,7 @@ impl Render for WorkspaceView {
         }
         let theme = cx.theme().clone();
         let active = self.active;
+        let quit_in_progress = self.quit_in_progress;
         let labels: Vec<(String, String, usize)> = self
             .sessions
             .iter()
@@ -2601,6 +2716,7 @@ impl Render for WorkspaceView {
 
         h_flex()
             .size_full()
+            .relative()
             .bg(theme.background)
             .text_color(theme.foreground)
             .capture_key_down(cx.listener(|this, event, window, cx| {
@@ -2698,6 +2814,70 @@ impl Render for WorkspaceView {
                         gpui::IntoElement::into_any_element,
                     )),
             )
+            .when(self.pending_quit_confirm, |parent| {
+                parent.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x0000_0080))
+                        .child(
+                            v_flex()
+                                .w(px(360.))
+                                .gap_3()
+                                .p_4()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .child(
+                                    Label::new(if quit_in_progress {
+                                        "Aborting runs and quitting…"
+                                    } else {
+                                        "Abort run and quit?"
+                                    })
+                                    .font_weight(gpui::FontWeight::MEDIUM),
+                                )
+                                .when(!quit_in_progress, |card| {
+                                    card.child(
+                                        Label::new("Yes / No · y / n · Esc = No")
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                })
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("confirm-quit-yes")
+                                                .label("Yes")
+                                                .small()
+                                                .danger()
+                                                .disabled(quit_in_progress)
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _window, cx| {
+                                                        this.confirm_pending_quit(cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new("confirm-quit-no")
+                                                .label("No")
+                                                .small()
+                                                .ghost()
+                                                .disabled(quit_in_progress)
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _window, cx| {
+                                                        this.cancel_pending_quit(cx);
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        ),
+                )
+            })
     }
 }
 
@@ -2726,12 +2906,7 @@ impl Render for SessionView {
         }
 
         let theme = cx.theme().clone();
-        let is_dark = theme.mode.is_dark();
-        let toggle_label = if is_dark {
-            "Theme: Dark"
-        } else {
-            "Theme: Light"
-        };
+        let toggle_label = theme_preference_label(cx.global::<ThemePreferenceState>().0);
         let phase_label = match self.projection.run_phase {
             RunPhase::Idle => "idle",
             RunPhase::Streaming => "streaming",
@@ -5322,11 +5497,19 @@ fn main() {
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
+        cx.set_global(ThemePreferenceState(ThemePreference::System));
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                // Start in the host window's current appearance; later user toggles are explicit
-                // overrides, so system appearance changes do not unexpectedly replace them.
                 Theme::sync_system_appearance(Some(window), cx);
+                window
+                    .observe_window_appearance(|window, cx| {
+                        let follows_system =
+                            cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
+                        if follows_system {
+                            Theme::sync_system_appearance(Some(window), cx);
+                        }
+                    })
+                    .detach();
                 let session = cx.new(|cx| {
                     SessionView::new(
                         window,
@@ -5352,6 +5535,12 @@ fn main() {
                 }
                 let workspace = cx.new(|_cx| {
                     WorkspaceView::new(session, persistence.clone(), initial_cwd.clone())
+                });
+                let weak_workspace = workspace.downgrade();
+                window.on_window_should_close(cx, move |_window, cx| {
+                    weak_workspace
+                        .update(cx, WorkspaceView::should_close_window)
+                        .unwrap_or(true)
                 });
                 cx.new(|cx| Root::new(workspace, window, cx))
             })
@@ -5550,13 +5739,36 @@ mod tests {
     }
 
     #[test]
-    fn next_theme_mode_flips_both_ways() {
-        assert_eq!(next_theme_mode(ThemeMode::Light), ThemeMode::Dark);
-        assert_eq!(next_theme_mode(ThemeMode::Dark), ThemeMode::Light);
+    fn theme_preference_cycles_system_light_dark() {
         assert_eq!(
-            next_theme_mode(next_theme_mode(ThemeMode::Light)),
-            ThemeMode::Light
+            next_theme_preference(ThemePreference::System),
+            ThemePreference::Light
         );
+        assert_eq!(
+            next_theme_preference(ThemePreference::Light),
+            ThemePreference::Dark
+        );
+        assert_eq!(
+            next_theme_preference(ThemePreference::Dark),
+            ThemePreference::System
+        );
+    }
+
+    #[test]
+    fn workspace_blocks_close_for_every_abortable_phase() {
+        for phase in [
+            RunPhase::Streaming,
+            RunPhase::AwaitingResume,
+            RunPhase::Compacting,
+            RunPhase::Retrying,
+        ] {
+            assert!(workspace_should_block_close(&[RunPhase::Idle, phase]));
+        }
+        assert!(!workspace_should_block_close(&[
+            RunPhase::Idle,
+            RunPhase::Restarting,
+            RunPhase::Dead,
+        ]));
     }
 
     #[test]
