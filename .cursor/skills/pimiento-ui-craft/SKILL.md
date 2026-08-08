@@ -39,10 +39,26 @@ From `PLAN.md` §8 / `AGENTS.md`:
 - Thinking control shows **only levels the active model supports** from `get_available_models[].thinking.efforts`, plus agent selectors `off` and `auto` when the model has a thinking config. If `thinking` is absent/`null`, hide or disable with reason ("no controllable thinking").
 - Fast / Todos / Agents / Export / Rename / Sessions / Theme: trailing actions; collapse rarely used into palette (Cmd+K) when the bar overcrowds.
 
-## Session rail
+## Session rail (left)
 
-- Compact list: name · phase badge; active row uses `primary` / selected style.
+- Group sessions by **workspace** (`session_cwd`); section headers use the directory basename (full path in tooltip/muted subtitle if needed).
+- Within a workspace: compact rows with name + phase `Tag`/badge; active row selected style.
 - New / Close / Hide are rail chrome, not a second title bar of prose buttons.
+- Prefer gpui-component `Separator`, `Tag`, `Switch` over walls of ghost text buttons.
+
+## Context inspector (right, on demand)
+
+PLAN §8: `[rail] [transcript] [right pane — Todos | Subagents | Session info]`.
+
+- Collapsible; Cmd+B = left rail, palette/More also toggles inspector (add Cmd+] if easy).
+- OpenCode-inspired sections, **OMP-honest only**:
+  - **Session / Context** — cwd, model, thinking, ctx%, tps, phase
+  - **Fast** — `Switch` bound to `set_fast_mode` (show enabled vs active divergence in muted text)
+  - **Checklist** — `todoPhases`
+  - **Agents** — subagent snapshots / subscription data
+  - **Tools** — `dumpTools` names if present in `get_state`; otherwise omit
+  - **LSP / MCP** — only if the wire exposes them; otherwise a single muted note that rpc-ui does not publish status (do not invent)
+- Prefer `Accordion` / collapsible section headers; keep transcript the hero (inspector ~240–280px).
 
 ## Composer
 

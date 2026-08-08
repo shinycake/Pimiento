@@ -3,7 +3,7 @@
 
 //! Pimiento — first live OMP session workspace.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,9 @@ use gpui_component::{
     input::{Input, InputEvent, InputState},
     label::Label,
     scroll::ScrollableElement as _,
+    separator::Separator,
+    switch::Switch,
+    tag::Tag,
     text::TextView,
     v_flex,
 };
@@ -329,8 +332,6 @@ struct SessionView {
     model_search: gpui::Entity<InputState>,
     model_picker_open: bool,
     thinking_picker_open: bool,
-    todo_panel_open: bool,
-    subagent_drawer_open: bool,
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     subagent_snapshots: Vec<serde_json::Value>,
     selected_subagent_id: Option<String>,
@@ -402,7 +403,6 @@ impl SessionView {
             cx.subscribe(&model_search, Self::on_model_search_event),
         ];
 
-        let todo_panel_open = !parse_todo_phases(initial_projection.todos_raw.as_ref()).is_empty();
         let initial_len = initial_projection.transcript.len();
         let transcript_list = ListState::new(initial_len, ListAlignment::Bottom, px(400.));
         transcript_list.set_follow_mode(FollowMode::Tail);
@@ -430,8 +430,6 @@ impl SessionView {
             model_search,
             model_picker_open: false,
             thinking_picker_open: false,
-            todo_panel_open,
-            subagent_drawer_open: false,
             subagent_snapshots: Vec::new(),
             selected_subagent_id: None,
             subagent_tail_next_byte: None,
@@ -528,7 +526,6 @@ impl SessionView {
             self.launcher_error = None;
             self.session_cwd = None;
             self.projection = SessionProjection::new();
-            self.todo_panel_open = false;
             self.clear_subagent_drawer_state();
             self.available_models.clear();
             self.model_picker_open = false;
@@ -582,7 +579,6 @@ impl SessionView {
         match result {
             Ok((client, projection, status, models)) => {
                 self.available_models = models;
-                self.todo_panel_open = !parse_todo_phases(projection.todos_raw.as_ref()).is_empty();
                 self.projection = projection;
                 self.status_message = status;
                 self.client = Some(client.clone());
@@ -670,7 +666,6 @@ impl SessionView {
             self.launcher_cwd = cwd;
         }
         self.projection = SessionProjection::new();
-        self.todo_panel_open = false;
         self.clear_subagent_drawer_state();
         self.available_models.clear();
         self.expanded_tools.clear();
@@ -812,25 +807,18 @@ impl SessionView {
         self.thinking_picker_open = false;
     }
 
-    fn toggle_todo_panel(&mut self, cx: &mut Context<Self>) {
-        if parse_todo_phases(self.projection.todos_raw.as_ref()).is_empty() {
-            self.todo_panel_open = false;
-        } else {
-            self.todo_panel_open = !self.todo_panel_open;
-        }
+    fn request_inspector_focus(&mut self, action: PaletteActionId, cx: &mut Context<Self>) {
+        self.pending_workspace_palette = Some(action);
         cx.notify();
     }
 
-    fn toggle_subagent_drawer(&mut self, cx: &mut Context<Self>) {
-        self.subagent_drawer_open = !self.subagent_drawer_open;
-        if self.subagent_drawer_open {
+    fn ensure_subagent_snapshots(&mut self, cx: &mut Context<Self>) {
+        if self.subagent_snapshots.is_empty() && self.client.is_some() {
             self.refresh_subagents(cx);
         }
-        cx.notify();
     }
 
     fn clear_subagent_drawer_state(&mut self) {
-        self.subagent_drawer_open = false;
         self.subagent_snapshots.clear();
         self.selected_subagent_id = None;
         self.subagent_tail_next_byte = None;
@@ -2033,8 +2021,6 @@ impl SessionView {
         self.close_palette(cx);
         match id {
             PaletteActionId::ToggleTheme => cycle_theme_preference(window, cx),
-            PaletteActionId::ToggleTodos => self.toggle_todo_panel(cx),
-            PaletteActionId::ToggleAgents => self.toggle_subagent_drawer(cx),
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
             PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
             PaletteActionId::ToggleFast => self.toggle_fast_mode(cx),
@@ -2044,7 +2030,10 @@ impl SessionView {
             PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
             PaletteActionId::NewSession
             | PaletteActionId::CloseSession
-            | PaletteActionId::ToggleRail => {
+            | PaletteActionId::ToggleRail
+            | PaletteActionId::ToggleTodos
+            | PaletteActionId::ToggleAgents
+            | PaletteActionId::ToggleInspector => {
                 self.pending_workspace_palette = Some(id);
             }
         }
@@ -2114,7 +2103,7 @@ impl SessionView {
         }
     }
 
-    fn rail_label_and_phase(&self) -> (String, String) {
+    fn rail_entry(&self, ix: usize) -> RailEntry {
         let cwd = self
             .session_cwd
             .as_deref()
@@ -2129,7 +2118,12 @@ impl SessionView {
             RunPhase::Restarting => "restart",
             RunPhase::Dead => "dead",
         };
-        (label, phase.to_owned())
+        RailEntry {
+            ix,
+            label,
+            phase: phase.to_owned(),
+            cwd: cwd.to_owned(),
+        }
     }
 
     fn shutdown_session(&mut self, cx: &mut Context<Self>) {
@@ -2161,6 +2155,46 @@ fn workspace_should_block_close(phases: &[RunPhase]) -> bool {
     phases.iter().any(phase_allows_abort)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RailEntry {
+    ix: usize,
+    label: String,
+    phase: String,
+    cwd: PathBuf,
+}
+
+fn workspace_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| path.display().to_string(), str::to_owned)
+}
+
+fn group_sessions_by_workspace(entries: Vec<RailEntry>) -> Vec<(PathBuf, Vec<RailEntry>)> {
+    let mut groups = BTreeMap::<PathBuf, Vec<RailEntry>>::new();
+    for entry in entries {
+        groups.entry(entry.cwd.clone()).or_default().push(entry);
+    }
+    let mut groups = groups.into_iter().collect::<Vec<_>>();
+    groups.sort_by(|(left, _), (right, _)| {
+        workspace_display_name(left)
+            .to_ascii_lowercase()
+            .cmp(&workspace_display_name(right).to_ascii_lowercase())
+            .then_with(|| left.cmp(right))
+    });
+    for (_, entries) in &mut groups {
+        entries.sort_by_key(|entry| entry.ix);
+    }
+    groups
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorFocus {
+    Session,
+    Checklist,
+    Agents,
+}
+
 #[derive(Debug, Clone)]
 struct PendingRevert {
     path: String,
@@ -2184,6 +2218,7 @@ enum PaletteActionId {
     NewSession,
     CloseSession,
     ToggleRail,
+    ToggleInspector,
 }
 
 #[derive(Debug, Clone)]
@@ -2202,13 +2237,13 @@ fn palette_catalog() -> &'static [PaletteEntry] {
         },
         PaletteEntry {
             id: PaletteActionId::ToggleTodos,
-            label: "Toggle todo panel",
-            hint: "todos",
+            label: "Show checklist in inspector",
+            hint: "todos checklist",
         },
         PaletteEntry {
             id: PaletteActionId::ToggleAgents,
-            label: "Toggle agents drawer",
-            hint: "subagents",
+            label: "Show agents in inspector",
+            hint: "subagents inspector",
         },
         PaletteEntry {
             id: PaletteActionId::ToggleModels,
@@ -2259,6 +2294,11 @@ fn palette_catalog() -> &'static [PaletteEntry] {
             id: PaletteActionId::ToggleRail,
             label: "Toggle session rail",
             hint: "rail",
+        },
+        PaletteEntry {
+            id: PaletteActionId::ToggleInspector,
+            label: "Toggle context inspector",
+            hint: "inspector sidebar context",
         },
     ]
 }
@@ -2478,45 +2518,18 @@ fn render_todo_task(task: &TodoTaskView, theme: &Theme) -> gpui::AnyElement {
         .into_any_element()
 }
 
-fn render_todo_panel(phases: &[TodoPhaseView], cx: &mut Context<SessionView>) -> gpui::AnyElement {
-    let theme = cx.theme().clone();
-    v_flex()
-        .w_full()
-        .px_3()
-        .py_2()
-        .gap_2()
-        .bg(theme.secondary)
-        .border_t_1()
-        .border_color(theme.border)
-        .max_h(px(220.))
-        .overflow_y_scrollbar()
-        .children(phases.iter().map(|phase| {
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    Label::new(phase.name.clone())
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
-                )
-                .children(
-                    phase
-                        .tasks
-                        .iter()
-                        .map(|task| render_todo_task(task, &theme)),
-                )
-        }))
-        .into_any_element()
-}
-
 // ── render ────────────────────────────────────────────────────────────────
 
+// Layout visibility and quit confirmation are independent UI concerns.
+#[allow(clippy::struct_excessive_bools)]
 struct WorkspaceView {
     sessions: Vec<gpui::Entity<SessionView>>,
     active: usize,
     persistence: SessionPersistence,
     initial_cwd: PathBuf,
     rail_collapsed: bool,
+    inspector_open: bool,
+    inspector_focus: InspectorFocus,
     pending_quit_confirm: bool,
     quit_in_progress: bool,
 }
@@ -2533,6 +2546,8 @@ impl WorkspaceView {
             persistence,
             initial_cwd,
             rail_collapsed: false,
+            inspector_open: true,
+            inspector_focus: InspectorFocus::Session,
             pending_quit_confirm: false,
             quit_in_progress: false,
         }
@@ -2622,6 +2637,11 @@ impl WorkspaceView {
     fn select_session(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.sessions.len() {
             self.active = index;
+            if self.inspector_open
+                && let Some(session) = self.sessions.get(index).cloned()
+            {
+                session.update(cx, SessionView::ensure_subagent_snapshots);
+            }
             cx.notify();
         }
     }
@@ -2688,6 +2708,25 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn open_inspector(&mut self, focus: InspectorFocus, cx: &mut Context<Self>) {
+        self.inspector_open = true;
+        self.inspector_focus = focus;
+        if let Some(session) = self.sessions.get(self.active).cloned() {
+            session.update(cx, SessionView::ensure_subagent_snapshots);
+        }
+        cx.notify();
+    }
+
+    fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector_open = !self.inspector_open;
+        if self.inspector_open
+            && let Some(session) = self.sessions.get(self.active).cloned()
+        {
+            session.update(cx, SessionView::ensure_subagent_snapshots);
+        }
+        cx.notify();
+    }
+
     fn handle_workspace_key(
         &mut self,
         event: &KeyDownEvent,
@@ -2723,6 +2762,10 @@ impl WorkspaceView {
                 self.toggle_rail(cx);
                 true
             }
+            "j" | "J" => {
+                self.toggle_inspector(cx);
+                true
+            }
             "k" | "K" => {
                 if let Some(session) = self.sessions.get(self.active).cloned() {
                     session.update(cx, SessionView::toggle_palette);
@@ -2743,6 +2786,9 @@ impl WorkspaceView {
             PaletteActionId::NewSession => self.add_session(window, cx),
             PaletteActionId::CloseSession => self.close_active(window, cx),
             PaletteActionId::ToggleRail => self.toggle_rail(cx),
+            PaletteActionId::ToggleInspector => self.toggle_inspector(cx),
+            PaletteActionId::ToggleTodos => self.open_inspector(InspectorFocus::Checklist, cx),
+            PaletteActionId::ToggleAgents => self.open_inspector(InspectorFocus::Agents, cx),
             other => {
                 if let Some(session) = self.sessions.get(self.active).cloned() {
                     session.update(cx, |session, cx| {
@@ -2761,6 +2807,421 @@ fn workspace_digit_key(key: &str) -> Option<usize> {
     }
 }
 
+fn tool_names_from_state(state: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(tools) = state.and_then(|state| state.get("dumpTools")) else {
+        return Vec::new();
+    };
+    let values = tools
+        .as_array()
+        .or_else(|| tools.get("tools").and_then(serde_json::Value::as_array));
+    let mut names = values
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| {
+            tool.as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    tool.get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    tool.get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+// Keeping the declarative pane together makes its visual section order auditable.
+#[allow(clippy::too_many_lines)]
+fn render_inspector(
+    session: &gpui::Entity<SessionView>,
+    focus: InspectorFocus,
+    window: &mut Window,
+    cx: &mut Context<WorkspaceView>,
+) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let (
+        cwd,
+        model,
+        thinking,
+        phase,
+        context,
+        tokens,
+        fast_enabled,
+        fast_active,
+        connected,
+        todo_phases,
+        subagent_rows,
+        selected_subagent_id,
+        subagent_tail_lines,
+        subagent_status,
+        fallback_subagent_events,
+        tool_names,
+        has_tool_state,
+    ) = {
+        let session_view = session.read(cx);
+        let cwd = session_view
+            .session_cwd
+            .clone()
+            .unwrap_or_else(|| session_view.launcher_cwd.clone());
+        let phase = match session_view.projection.run_phase {
+            RunPhase::Idle => "idle",
+            RunPhase::Streaming => "streaming",
+            RunPhase::AwaitingResume => "awaiting",
+            RunPhase::Compacting => "compacting",
+            RunPhase::Retrying => "retrying",
+            RunPhase::Restarting => "restarting",
+            RunPhase::Dead => "dead",
+        }
+        .to_owned();
+        let state = &session_view.projection.state;
+        let raw_state = state.state.as_ref();
+        let tool_names = tool_names_from_state(raw_state);
+        (
+            cwd,
+            state
+                .model
+                .clone()
+                .unwrap_or_else(|| "Unknown model".to_owned()),
+            thinking_label(state.thinking.as_ref()).unwrap_or_else(|| "unknown".to_owned()),
+            phase,
+            context_percent_label(state.context.as_ref()),
+            tokens_per_second_label(state.tokens.as_ref()),
+            state.fast_mode_enabled,
+            state.fast_mode_active,
+            session_view.client.is_some(),
+            parse_todo_phases(session_view.projection.todos_raw.as_ref()),
+            session_view
+                .subagent_snapshots
+                .iter()
+                .filter_map(|snapshot| {
+                    subagent_snapshot_id(snapshot)
+                        .map(|id| (id.to_owned(), subagent_snapshot_summary(snapshot)))
+                })
+                .collect::<Vec<_>>(),
+            session_view.selected_subagent_id.clone(),
+            session_view.subagent_tail_lines.clone(),
+            session_view.subagent_drawer_status.clone(),
+            session_view
+                .projection
+                .subagents_raw
+                .iter()
+                .rev()
+                .take(12)
+                .map(subagent_payload_summary)
+                .collect::<Vec<_>>(),
+            tool_names,
+            raw_state.is_some_and(|state| state.get("dumpTools").is_some()),
+        )
+    };
+    let todo_count = todo_open_count(&todo_phases);
+    let path = cwd.display().to_string();
+    let path = truncate_subagent_text(&path, 44);
+    let fast_diverges =
+        fast_enabled.is_some() && fast_active.is_some() && fast_enabled != fast_active;
+    let fast_detail = match (fast_enabled, fast_active) {
+        (Some(enabled), Some(active)) if fast_diverges => Some(format!(
+            "{} · enabled: {enabled} · active: {active}",
+            fast_mode_label(fast_enabled, fast_active)
+        )),
+        (None, _) | (_, None) => Some("Fast state is not published yet".to_owned()),
+        _ => None,
+    };
+    let switch_session = session.clone();
+    let refresh_session = session.clone();
+
+    v_flex()
+        .w(px(272.))
+        .h_full()
+        .flex_shrink_0()
+        .overflow_y_scrollbar()
+        .gap_3()
+        .p_3()
+        .border_l_1()
+        .border_color(theme.border)
+        .bg(theme.muted)
+        .child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .child(
+                    Label::new("Context")
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .child(
+                    Label::new("⌘J")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                ),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .when(focus == InspectorFocus::Session, |section| {
+                    section.border_l_2().border_color(theme.primary).pl_2()
+                })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(
+                            Label::new("Session")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                        )
+                        .child(Tag::secondary().small().child(phase)),
+                )
+                .child(Label::new(workspace_display_name(&cwd)).text_sm())
+                .child(
+                    Label::new(path)
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .child(Label::new(model).text_xs())
+                .child(
+                    Label::new(format!("Thinking: {thinking}"))
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .when_some(context, |section, value| {
+                    section.child(
+                        Label::new(format!("Context: {value}"))
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
+                .when_some(tokens, |section, value| {
+                    section.child(
+                        Label::new(format!("Speed: {value}/s"))
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                }),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    Label::new("Fast")
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .child(
+                    Switch::new("inspector-fast-mode")
+                        .label("Fast mode")
+                        .small()
+                        .checked(fast_enabled.unwrap_or(false))
+                        .disabled(!connected)
+                        .on_click(window.listener_for(
+                            &switch_session,
+                            |this, _checked: &bool, _window, cx| {
+                                this.toggle_fast_mode(cx);
+                            },
+                        )),
+                )
+                .when_some(fast_detail, |section, detail| {
+                    section.child(
+                        Label::new(detail)
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                }),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .when(focus == InspectorFocus::Checklist, |section| {
+                    section.border_l_2().border_color(theme.primary).pl_2()
+                })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(
+                            Label::new("Checklist")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                        )
+                        .child(Tag::secondary().small().child(todo_count.to_string())),
+                )
+                .when(todo_phases.is_empty(), |section| {
+                    section.child(
+                        Label::new("No checklist")
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
+                .children(todo_phases.iter().map(|phase| {
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            Label::new(phase.name.clone())
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .children(
+                            phase
+                                .tasks
+                                .iter()
+                                .map(|task| render_todo_task(task, &theme)),
+                        )
+                })),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .when(focus == InspectorFocus::Agents, |section| {
+                    section.border_l_2().border_color(theme.primary).pl_2()
+                })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(
+                            Label::new("Agents")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                        )
+                        .child(
+                            Button::new("inspector-agents-refresh")
+                                .label("Refresh")
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(window.listener_for(
+                                    &refresh_session,
+                                    |this, _: &ClickEvent, _window, cx| {
+                                        this.refresh_subagents(cx);
+                                    },
+                                )),
+                        ),
+                )
+                .when(!subagent_status.is_empty(), |section| {
+                    section.child(
+                        Label::new(subagent_status.clone())
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
+                .children(subagent_rows.iter().enumerate().map(|(ix, (id, summary))| {
+                    let id = id.clone();
+                    let selected = selected_subagent_id.as_deref() == Some(id.as_str());
+                    Button::new(("inspector-agent", ix))
+                        .label(summary.clone())
+                        .small()
+                        .w_full()
+                        .when(selected, Button::primary)
+                        .when(!selected, Button::ghost)
+                        .on_click(window.listener_for(
+                            session,
+                            move |this, _: &ClickEvent, _window, cx| {
+                                this.select_subagent(id.clone(), cx);
+                            },
+                        ))
+                }))
+                .children(subagent_tail_lines.iter().enumerate().map(|(ix, line)| {
+                    Label::new(format!("{ix}: {line}"))
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                }))
+                .when(
+                    subagent_rows.is_empty() && !fallback_subagent_events.is_empty(),
+                    |section| {
+                        section.children(fallback_subagent_events.iter().enumerate().map(
+                            |(ix, summary)| {
+                                Label::new(format!("#{ix} {summary}"))
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                            },
+                        ))
+                    },
+                )
+                .when(
+                    subagent_rows.is_empty()
+                        && fallback_subagent_events.is_empty()
+                        && subagent_status.is_empty(),
+                    |section| {
+                        section.child(
+                            Label::new("No agents")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    },
+                ),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    Label::new("Tools")
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .when(!tool_names.is_empty(), |section| {
+                    let hidden = tool_names.len().saturating_sub(12);
+                    section
+                        .children(tool_names.iter().take(12).map(|name| {
+                            Label::new(name.clone())
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                        }))
+                        .when(hidden > 0, |section| {
+                            section.child(
+                                Label::new(format!("+{hidden} more"))
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                        })
+                })
+                .when(tool_names.is_empty(), |section| {
+                    section.child(
+                        Label::new(if has_tool_state {
+                            "No tools reported"
+                        } else {
+                            "Tools not in session state"
+                        })
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                    )
+                }),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    Label::new("LSP / MCP")
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                )
+                .child(
+                    Label::new("LSP/MCP status is not published on OMP rpc-ui.")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                ),
+        )
+        .into_any_element()
+}
+
 impl Render for WorkspaceView {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2775,15 +3236,23 @@ impl Render for WorkspaceView {
         let theme = cx.theme().clone();
         let active = self.active;
         let quit_in_progress = self.quit_in_progress;
-        let labels: Vec<(String, String, usize)> = self
-            .sessions
-            .iter()
-            .enumerate()
-            .map(|(ix, session)| {
-                let (label, phase) = session.read(cx).rail_label_and_phase();
-                (label, phase, ix)
-            })
-            .collect();
+        let inspector_open = self.inspector_open;
+        let inspector_focus = self.inspector_focus;
+        let groups = group_sessions_by_workspace(
+            self.sessions
+                .iter()
+                .enumerate()
+                .map(|(ix, session)| session.read(cx).rail_entry(ix))
+                .collect(),
+        );
+        let active_session = self.sessions.get(active).cloned();
+        if inspector_open
+            && let Some(session) = active_session.clone()
+            && session.read(cx).subagent_snapshots.is_empty()
+            && session.read(cx).subagent_drawer_status.is_empty()
+        {
+            session.update(cx, SessionView::ensure_subagent_snapshots);
+        }
 
         h_flex()
             .size_full()
@@ -2798,9 +3267,8 @@ impl Render for WorkspaceView {
             .when(!self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()
-                        .w(px(220.))
+                        .w(px(252.))
                         .h_full()
-                        .gap_2()
                         .p_3()
                         .border_r_1()
                         .border_color(theme.border)
@@ -2834,7 +3302,7 @@ impl Render for WorkspaceView {
                                 )
                                 .child(
                                     Button::new("workspace-hide-rail")
-                                        .label("Hide rail")
+                                        .label("Hide")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -2842,18 +3310,50 @@ impl Render for WorkspaceView {
                                         })),
                                 ),
                         )
-                        .children(labels.into_iter().map(|(label, phase, ix)| {
-                            let selected = ix == active;
-                            Button::new(("workspace-session", ix))
-                                .label(format!("{label} · {phase}"))
-                                .small()
-                                .when(selected, Button::primary)
-                                .when(!selected, Button::ghost)
-                                .w_full()
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                                    this.select_session(ix, cx);
-                                }))
-                        })),
+                        .child(div().h(px(8.)))
+                        .children(groups.into_iter().enumerate().map(
+                            |(group_ix, (cwd, entries))| {
+                                v_flex()
+                                    .w_full()
+                                    .gap_1()
+                                    .when(group_ix > 0, gpui::Styled::mt_2)
+                                    .child(
+                                        Separator::horizontal().label(workspace_display_name(&cwd)),
+                                    )
+                                    .children(entries.into_iter().map(|entry| {
+                                        let selected = entry.ix == active;
+                                        let ix = entry.ix;
+                                        h_flex()
+                                            .id(("workspace-session", ix))
+                                            .w_full()
+                                            .justify_between()
+                                            .gap_2()
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .when(selected, |row| {
+                                                row.bg(theme.primary)
+                                                    .text_color(theme.primary_foreground)
+                                            })
+                                            .when(!selected, |row| {
+                                                row.hover(|row| row.bg(theme.secondary))
+                                            })
+                                            .child(
+                                                Label::new(entry.label)
+                                                    .text_sm()
+                                                    .flex_1()
+                                                    .truncate(),
+                                            )
+                                            .child(Tag::secondary().small().child(entry.phase))
+                                            .on_click(cx.listener(
+                                                move |this, _: &ClickEvent, _window, cx| {
+                                                    this.select_session(ix, cx);
+                                                },
+                                            ))
+                                    }))
+                            },
+                        )),
                 )
             })
             .when(self.rail_collapsed, |parent| {
@@ -2876,14 +3376,17 @@ impl Render for WorkspaceView {
                         ),
                 )
             })
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .child(self.sessions.get(active).cloned().map_or_else(
-                        || div().into_any_element(),
-                        gpui::IntoElement::into_any_element,
-                    )),
+            .child(div().flex_1().min_w(px(480.)).h_full().child(
+                active_session.clone().map_or_else(
+                    || div().into_any_element(),
+                    gpui::IntoElement::into_any_element,
+                ),
+            ))
+            .when_some(
+                inspector_open.then_some(active_session).flatten(),
+                |parent, session| {
+                    parent.child(render_inspector(&session, inspector_focus, window, cx))
+                },
             )
             .when(self.pending_quit_confirm, |parent| {
                 parent.child(
@@ -3007,45 +3510,6 @@ impl Render for SessionView {
             .map(|context| format!("ctx:{context}"));
         let tokens_label = tokens_per_second_label(self.projection.state.tokens.as_ref())
             .map(|tokens| format!("{tokens}/s"));
-        let fast_button_label = fast_mode_label(
-            self.projection.state.fast_mode_enabled,
-            self.projection.state.fast_mode_active,
-        );
-        let todo_phases = parse_todo_phases(self.projection.todos_raw.as_ref());
-        let todo_count = todo_open_count(&todo_phases);
-        let todo_button_label = format!("Todos ({todo_count})");
-        let show_todo_panel = self.todo_panel_open && !todo_phases.is_empty();
-        let subagent_count = self
-            .subagent_snapshots
-            .len()
-            .max(self.projection.subagents_raw.len());
-        let subagent_button_label = if subagent_count == 0 {
-            "Agents".to_owned()
-        } else if self.subagent_drawer_open {
-            format!("Agents ({subagent_count}) v")
-        } else {
-            format!("Agents ({subagent_count}) >")
-        };
-        let show_subagent_drawer = self.subagent_drawer_open;
-        let subagent_rows: Vec<(String, String)> = self
-            .subagent_snapshots
-            .iter()
-            .filter_map(|snapshot| {
-                subagent_snapshot_id(snapshot)
-                    .map(|id| (id.to_owned(), subagent_snapshot_summary(snapshot)))
-            })
-            .collect();
-        let selected_subagent_id = self.selected_subagent_id.clone();
-        let subagent_tail_lines = self.subagent_tail_lines.clone();
-        let subagent_drawer_status = self.subagent_drawer_status.clone();
-        let fallback_subagent_events: Vec<String> = self
-            .projection
-            .subagents_raw
-            .iter()
-            .rev()
-            .take(12)
-            .map(subagent_payload_summary)
-            .collect();
         let compacting = matches!(self.projection.run_phase, RunPhase::Compacting);
         let retrying = matches!(self.projection.run_phase, RunPhase::Retrying);
         let fallback_banner = self.projection.fallback_banner.clone();
@@ -3186,41 +3650,34 @@ impl Render for SessionView {
                                                 )
                                             })
                                             .child(
-                                                Button::new("fast-mode")
-                                                    .label(fast_button_label)
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.toggle_fast_mode(cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
                                                 div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
                                             )
                                             .child(
                                                 Button::new("todo-panel-toggle")
-                                                    .label(todo_button_label)
+                                                    .label("Checklist")
                                                     .small()
                                                     .ghost()
-                                                    .disabled(todo_phases.is_empty())
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
-                                                            this.toggle_todo_panel(cx);
+                                                            this.request_inspector_focus(
+                                                                PaletteActionId::ToggleTodos,
+                                                                cx,
+                                                            );
                                                         },
                                                     )),
                                             )
                                             .child(
                                                 Button::new("subagent-drawer-toggle")
-                                                    .label(subagent_button_label)
+                                                    .label("Agents")
                                                     .small()
                                                     .ghost()
                                                     .disabled(!can_pick)
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
-                                                            this.toggle_subagent_drawer(cx);
+                                                            this.request_inspector_focus(
+                                                                PaletteActionId::ToggleAgents,
+                                                                cx,
+                                                            );
                                                         },
                                                     )),
                                             )
@@ -3344,111 +3801,6 @@ impl Render for SessionView {
                                 } else {
                                     "Auto-retry in progress…".to_owned()
                                 }),
-                        )
-                    })
-                    .when(show_subagent_drawer, |parent| {
-                        parent.child(
-                            v_flex()
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .gap_1()
-                                .max_h(px(250.))
-                                .overflow_y_scrollbar()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .bg(theme.secondary)
-                                .child(
-                                    h_flex()
-                                        .w_full()
-                                        .justify_between()
-                                        .child(Label::new("Agents").text_sm())
-                                        .child(
-                                            Button::new("subagent-drawer-refresh")
-                                                .label("Refresh")
-                                                .small()
-                                                .ghost()
-                                                .disabled(!can_pick)
-                                                .on_click(cx.listener(
-                                                    |this, _: &ClickEvent, _window, cx| {
-                                                        this.refresh_subagents(cx);
-                                                    },
-                                                )),
-                                        ),
-                                )
-                                .child(
-                                    Label::new(subagent_drawer_status.clone())
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
-                                )
-                                .when(!subagent_rows.is_empty(), |panel| {
-                                    panel.child(
-                                        div()
-                                            .w_full()
-                                            .max_h(px(88.))
-                                            .overflow_y_scrollbar()
-                                            .children(subagent_rows.iter().enumerate().map(
-                                                |(ix, (id, summary))| {
-                                                    let id = id.clone();
-                                                    let selected = selected_subagent_id.as_deref()
-                                                        == Some(id.as_str());
-                                                    Button::new(("subagent-choice", ix))
-                                                    .label(summary.clone())
-                                                    .small()
-                                                    .w_full()
-                                                    .when(selected, Button::primary)
-                                                    .when(!selected, Button::ghost)
-                                                    .on_click(cx.listener(
-                                                        move |this, _: &ClickEvent, _window, cx| {
-                                                            this.select_subagent(id.clone(), cx);
-                                                        },
-                                                    ))
-                                                },
-                                            )),
-                                    )
-                                })
-                                .when(!subagent_tail_lines.is_empty(), |panel| {
-                                    panel.child(
-                                        div()
-                                            .w_full()
-                                            .max_h(px(108.))
-                                            .overflow_y_scrollbar()
-                                            .children(subagent_tail_lines.iter().enumerate().map(
-                                                |(ix, line)| {
-                                                    Label::new(format!("{ix}: {line}"))
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                },
-                                            )),
-                                    )
-                                })
-                                .when(
-                                    subagent_rows.is_empty()
-                                        && !fallback_subagent_events.is_empty(),
-                                    |panel| {
-                                        panel.children(
-                                            fallback_subagent_events.iter().enumerate().map(
-                                                |(ix, summary)| {
-                                                    Label::new(format!("#{ix} {summary}"))
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground)
-                                                },
-                                            ),
-                                        )
-                                    },
-                                )
-                                .when(
-                                    subagent_rows.is_empty()
-                                        && fallback_subagent_events.is_empty()
-                                        && subagent_drawer_status.is_empty(),
-                                    |panel| {
-                                        panel.child(
-                                            Label::new("No agents reported")
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                    },
-                                ),
                         )
                     })
                     .child({
@@ -3582,9 +3934,6 @@ impl Render for SessionView {
                             ))
                         },
                     )
-                    .when(show_todo_panel, |parent| {
-                        parent.child(render_todo_panel(&todo_phases, cx))
-                    })
                     .child(
                         h_flex()
                             .w_full()
@@ -5884,7 +6233,47 @@ mod tests {
         assert!(hits.iter().any(|e| e.id == PaletteActionId::ToggleTheme));
         let hits = filter_palette_entries("rail");
         assert!(hits.iter().any(|e| e.id == PaletteActionId::ToggleRail));
+        let hits = filter_palette_entries("inspector");
+        assert!(
+            hits.iter()
+                .any(|e| e.id == PaletteActionId::ToggleInspector)
+        );
         assert!(filter_palette_entries("zzzz-nope").is_empty());
+    }
+
+    #[test]
+    fn groups_sessions_by_workspace_name_and_preserves_session_order() {
+        let entries = vec![
+            RailEntry {
+                ix: 2,
+                label: "later".to_owned(),
+                phase: "idle".to_owned(),
+                cwd: PathBuf::from("/tmp/zulu"),
+            },
+            RailEntry {
+                ix: 1,
+                label: "second".to_owned(),
+                phase: "stream".to_owned(),
+                cwd: PathBuf::from("/tmp/alpha"),
+            },
+            RailEntry {
+                ix: 0,
+                label: "first".to_owned(),
+                phase: "idle".to_owned(),
+                cwd: PathBuf::from("/tmp/alpha"),
+            },
+        ];
+
+        let groups = group_sessions_by_workspace(entries);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, PathBuf::from("/tmp/alpha"));
+        assert_eq!(
+            groups[0].1.iter().map(|entry| entry.ix).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(groups[1].0, PathBuf::from("/tmp/zulu"));
+        assert_eq!(groups[1].1[0].ix, 2);
     }
 
     #[test]

@@ -130,6 +130,15 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Root UI is a workspace with a left session rail; each rail entry is its own `SessionView` + supervised OMP child.
 - **New** / **Close** manage slots; Cmd/Ctrl+1..9 switches the active session without pausing inactive pumps.
+- The rail groups live sessions by their OMP launch cwd (directory basename as the visible workspace heading); ordering is presentation-only and does not alter session authority.
+
+## Workspace context inspector — 2026-08-08
+
+- Cmd/Ctrl+J toggles the right inspector; Cmd/Ctrl+B remains the left session rail shortcut. Toolbar Checklist/Agents actions open and focus their inspector sections.
+- Session, model, thinking, context, token speed, fast-mode `{enabled, active}`, todos, subagents, and `dumpTools` names render only from the active session's retained `get_state`/RPC projection.
+- `dumpTools` is optional and open-ended; Pimiento tolerantly accepts string entries or object `name`/`id` fields and caps the visible list.
+- OMP rpc-ui 17.2.10 does not publish authoritative LSP or MCP connection status, so the inspector explicitly says that status is unavailable rather than inferring it.
+- The previous transcript-column todo panel and large agent drawer are no longer rendered; their content now lives in the right inspector.
 
 ## Diff review — 2026-08-08
 
