@@ -6,7 +6,9 @@
 //! reordered lifecycle tolerance, and the Unknown-visibility rule.
 
 use omp_rpc_client::frames::{IncomingFrame, decode_frame};
-use pimiento_core::projection::{RunPhase, SessionProjection, StateQuality};
+use pimiento_core::projection::{
+    RunPhase, SessionProjection, StateQuality, format_model_label, split_model_label,
+};
 use pimiento_core::transcript::{ToolStatus, TranscriptEntry};
 use serde_json::{Value, json};
 
@@ -789,6 +791,46 @@ fn model_changed_updates_state_and_keeps_raw_visible() {
         p.transcript.last(),
         Some(TranscriptEntry::Unknown { .. })
     ));
+}
+
+#[test]
+fn hydrate_get_state_accepts_model_object() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "model": {"provider": "opencode-go", "id": "kimi-k3:max"},
+        "sessionId": "s-obj",
+    }));
+    assert_eq!(p.state.model.as_deref(), Some("opencode-go/kimi-k3:max"));
+}
+
+#[test]
+fn model_changed_without_model_preserves_prior() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "model": {"provider": "opencode-go", "id": "gpt-5.6-luna"},
+    }));
+    apply(&mut p, json!({ "type": "model_changed" }));
+    assert_eq!(p.state.model.as_deref(), Some("opencode-go/gpt-5.6-luna"));
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Unknown { .. })
+    ));
+}
+
+#[test]
+fn format_and_split_model_label_round_trip() {
+    assert_eq!(
+        format_model_label(&json!({"provider":"opencode-go","id":"kimi-k3:max"})).as_deref(),
+        Some("opencode-go/kimi-k3:max")
+    );
+    assert_eq!(
+        format_model_label(&json!({"provider":"opencode-go","modelId":"x"})).as_deref(),
+        Some("opencode-go/x")
+    );
+    assert_eq!(
+        split_model_label("opencode-go/kimi-k3:max"),
+        Some(("opencode-go".into(), "kimi-k3:max".into()))
+    );
 }
 
 #[test]

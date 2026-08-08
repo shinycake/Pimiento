@@ -359,8 +359,11 @@ impl SessionProjection {
     }
 
     fn apply_model_changed(&mut self, raw: &Value) {
-        if let Some(m) = raw.get("model").and_then(Value::as_str) {
-            self.state.model = Some(m.to_owned());
+        // OMP 17.2.10 emits a bare `{ type: "model_changed" }` with no model
+        // payload. When a model field *is* present (string or object), promote
+        // it; otherwise leave the prior display model untouched.
+        if let Some(m) = raw.get("model").and_then(format_model_label) {
+            self.state.model = Some(m);
         }
         self.push_unknown(raw);
     }
@@ -769,7 +772,9 @@ impl SessionProjection {
         let bool_field = |k: &str| state.get(k).and_then(Value::as_bool);
         let val_field = |k: &str| state.get(k).cloned();
 
-        if let Some(m) = str_field("model") {
+        // OMP reports `model` as a Model object `{provider,id,...}`; older
+        // fixtures may use a plain string. Accept both.
+        if let Some(m) = state.get("model").and_then(format_model_label) {
             self.state.model = Some(m);
         }
         if let Some(t) = val_field("thinking").or_else(|| val_field("thinkingLevel")) {
@@ -809,6 +814,44 @@ impl SessionProjection {
         self.transcript
             .push(TranscriptEntry::Unknown { raw: raw.clone() });
     }
+}
+
+/// Format an OMP model reference for display / `set_model` targeting.
+///
+/// Accepts:
+/// - a plain string (`"provider/id"` or opaque label)
+/// - an object with `provider` + `id` (canonical Model shape)
+/// - an object with `provider` + `modelId` (command-adjacent shape)
+#[must_use]
+pub fn format_model_label(v: &Value) -> Option<String> {
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        return (!s.is_empty()).then(|| s.to_owned());
+    }
+    let provider = v.get("provider").and_then(Value::as_str)?.trim();
+    let id = v
+        .get("id")
+        .or_else(|| v.get("modelId"))
+        .and_then(Value::as_str)?
+        .trim();
+    if provider.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some(format!("{provider}/{id}"))
+}
+
+/// Split a `provider/id` label into `(provider, model_id)`.
+///
+/// Uses the first `/` as the separator so ids like `kimi-k3:max` stay intact.
+#[must_use]
+pub fn split_model_label(label: &str) -> Option<(String, String)> {
+    let (provider, id) = label.split_once('/')?;
+    let provider = provider.trim();
+    let id = id.trim();
+    if provider.is_empty() || id.is_empty() {
+        return None;
+    }
+    Some((provider.to_owned(), id.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
