@@ -283,6 +283,23 @@ fn mount_notices_are_detected_without_inventing_content() {
 }
 
 #[test]
+fn thinking_collapse_preview_uses_first_wire_line() {
+    assert_eq!(
+        thinking_collapse_preview("  first beat\nsecond"),
+        "Thinking · first beat"
+    );
+    assert_eq!(thinking_collapse_preview("   \n"), "Thinking · expand");
+    let long = "x".repeat(80);
+    let preview = thinking_collapse_preview(&long);
+    assert!(preview.starts_with("Thinking · "));
+    assert!(preview.ends_with('…'));
+    assert_eq!(
+        preview.chars().count(),
+        "Thinking · ".chars().count() + 56 + 1
+    );
+}
+
+#[test]
 fn groups_sessions_by_workspace_name_and_preserves_session_order() {
     let entries = vec![
         RailEntry {
