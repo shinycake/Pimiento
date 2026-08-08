@@ -222,15 +222,19 @@ impl SessionView {
     }
 
     fn sync_status_model(&mut self) {
-        // Keep the version prefix; replace the model suffix if present.
+        // Keep the version prefix; refresh model (+ thinking) suffix.
         let model = self
             .projection
             .state
             .model
             .as_deref()
             .unwrap_or("(no model)");
+        let thinking = thinking_label(self.projection.state.thinking.as_ref());
         if let Some((ver, _)) = self.status_message.split_once("  •  ") {
-            self.status_message = format!("{ver}  •  {model}");
+            self.status_message = match thinking {
+                Some(t) => format!("{ver}  •  {model}  •  think:{t}"),
+                None => format!("{ver}  •  {model}"),
+            };
         }
     }
 
@@ -1342,13 +1346,35 @@ fn try_connect_omp(
     // get_available_models can be large enough to exceed the default RPC timeout.
     let models = Vec::new();
 
-    let status = format!(
-        "{}  •  {}",
-        discovered.version_text.trim(),
-        proj.state.model.as_deref().unwrap_or("(no model)")
-    );
+    let model = proj.state.model.as_deref().unwrap_or("(no model)");
+    let status = match thinking_label(proj.state.thinking.as_ref()) {
+        Some(t) => format!(
+            "{}  •  {}  •  think:{}",
+            discovered.version_text.trim(),
+            model,
+            t
+        ),
+        None => format!("{}  •  {}", discovered.version_text.trim(), model),
+    };
 
     Ok((client, proj, status, models))
+}
+
+fn thinking_label(v: Option<&serde_json::Value>) -> Option<String> {
+    let v = v?;
+    if let Some(s) = v.as_str() {
+        let s = s.trim();
+        return (!s.is_empty()).then(|| s.to_owned());
+    }
+    if let Some(s) = v.get("level").and_then(|x| x.as_str()) {
+        let s = s.trim();
+        return (!s.is_empty()).then(|| s.to_owned());
+    }
+    if let Some(s) = v.get("thinkingLevel").and_then(|x| x.as_str()) {
+        let s = s.trim();
+        return (!s.is_empty()).then(|| s.to_owned());
+    }
+    None
 }
 
 fn load_all_model_choices(catalog: &serde_json::Value, current: Option<&str>) -> Vec<ModelChoice> {
@@ -1443,6 +1469,17 @@ mod tests {
         assert!(composer_uses_steer(&RunPhase::Streaming));
         assert!(!composer_uses_steer(&RunPhase::Idle));
         assert!(!composer_uses_steer(&RunPhase::Dead));
+    }
+    #[test]
+    fn thinking_label_reads_string_or_level_object() {
+        assert_eq!(
+            thinking_label(Some(&serde_json::json!("high"))).as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            thinking_label(Some(&serde_json::json!({"level":"medium"}))).as_deref(),
+            Some("medium")
+        );
     }
     #[test]
     fn phase_disallows_send_dead() {
