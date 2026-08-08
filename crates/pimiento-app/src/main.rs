@@ -93,16 +93,18 @@ fn main() {
         .then(|| latest_resume_path(&persistence, &recent))
         .flatten();
 
+    let initial_theme = theme_preference_from_env(std::env::var("PIMIENTO_THEME").ok().as_deref());
+
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
-        cx.set_global(ThemePreferenceState(ThemePreference::System));
+        cx.set_global(ThemePreferenceState(initial_theme));
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 window_bounds: saved_window_bounds.map(WindowBounds::Windowed),
                 ..Default::default()
             };
             cx.open_window(window_options, |window, cx| {
-                Theme::sync_system_appearance(Some(window), cx);
+                apply_theme_preference(initial_theme, window, cx);
                 window
                     .observe_window_appearance(|window, cx| {
                         let follows_system =

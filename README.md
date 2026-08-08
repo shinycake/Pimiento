@@ -17,10 +17,16 @@ cargo build -p pimiento-app
 ./scripts/run_app.sh
 ```
 
-Set `PIMIENTO_AUTO_CONNECT=1` when launching to automatically connect:
+Set `PIMIENTO_AUTO_CONNECT=1` when launching to automatically connect (also the default in `scripts/run_app.sh`):
 
 ```sh
 PIMIENTO_AUTO_CONNECT=1 ./scripts/run_app.sh
+```
+
+Optional theme override for dogfood/QA (`system` is the default):
+
+```sh
+PIMIENTO_THEME=light ./scripts/run_app.sh
 ```
 
 ## Daily loop

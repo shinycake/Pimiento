@@ -155,6 +155,10 @@ def send_prompt(text: str) -> None:
 
 
 def toggle_theme() -> None:
+    """Best-effort Cmd+K palette theme toggle (often no-ops under GPUI AX).
+
+    Prefer relaunching with PIMIENTO_THEME=light|dark|system for QA.
+    """
     frontmost()
     sh([CLICLICK, "kd:cmd", "t:k", "ku:cmd"])
     time.sleep(0.2)
