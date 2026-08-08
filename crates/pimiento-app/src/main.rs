@@ -48,9 +48,13 @@ fn next_theme_mode(current: ThemeMode) -> ThemeMode {
     }
 }
 
-fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
+fn toggle_theme_mode(window: &mut Window, cx: &mut App) {
     let next = next_theme_mode(cx.theme().mode);
     Theme::change(next, Some(window), cx);
+}
+
+fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
+    toggle_theme_mode(window, cx);
 }
 
 // ── SessionView ───────────────────────────────────────────────────────────
@@ -1224,16 +1228,16 @@ impl SessionView {
                 cx.notify();
             }
             InputEvent::PressEnter {
-                secondary: false,
+                secondary,
                 shift: false,
             } => {
                 let text = self.composer.read(cx).value().to_string();
-                if text.trim().is_empty() {
-                    return;
-                }
                 let matches = self.filtered_slash_commands(&text);
-                if composer_enter_action(self.slash_menu == SlashMenuState::Open, matches.len())
-                    == ComposerEnterAction::AcceptCompletion
+                if composer_enter_action(
+                    self.slash_menu == SlashMenuState::Open,
+                    matches.len(),
+                    *secondary,
+                ) == ComposerEnterAction::AcceptCompletion
                 {
                     if let Some(command) = matches.get(self.slash_selected) {
                         let command = command.clone();
@@ -1241,35 +1245,43 @@ impl SessionView {
                     }
                     return;
                 }
-                let Some(client) = self.client.clone() else {
-                    return;
-                };
-
-                let steer = composer_uses_steer(&self.projection.run_phase);
-                self.projection.push_user_message(text.clone());
-                self.close_slash_menu();
-                self.clear_composer = true;
-                cx.notify();
-
-                cx.spawn(async move |_, _| {
-                    let body = if steer {
-                        RpcCommandBody::Steer {
-                            message: text,
-                            images: None,
-                        }
-                    } else {
-                        RpcCommandBody::Prompt {
-                            message: text,
-                            images: None,
-                            streaming_behavior: None,
-                        }
-                    };
-                    let _ = client.send(body).await;
-                })
-                .detach();
+                self.send_composer_message(cx);
             }
             _ => {}
         }
+    }
+
+    fn send_composer_message(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+
+        let steer = composer_uses_steer(&self.projection.run_phase);
+        self.projection.push_user_message(text.clone());
+        self.close_slash_menu();
+        self.clear_composer = true;
+        cx.notify();
+
+        cx.spawn(async move |_, _| {
+            let body = if steer {
+                RpcCommandBody::Steer {
+                    message: text,
+                    images: None,
+                }
+            } else {
+                RpcCommandBody::Prompt {
+                    message: text,
+                    images: None,
+                    streaming_behavior: None,
+                }
+            };
+            let _ = client.send(body).await;
+        })
+        .detach();
     }
 
     fn filtered_slash_commands(&self, text: &str) -> Vec<SlashCommand> {
@@ -1349,6 +1361,7 @@ impl SessionView {
                 if composer_enter_action(
                     self.slash_menu == SlashMenuState::Open,
                     matches.len(),
+                    false,
                 ) == ComposerEnterAction::AcceptCompletion =>
             {
                 if let Some(command) = matches.get(self.slash_selected) {
@@ -1918,10 +1931,7 @@ impl SessionView {
     ) {
         self.close_palette(cx);
         match id {
-            PaletteActionId::ToggleTheme => {
-                let next = next_theme_mode(cx.theme().mode);
-                Theme::change(next, Some(window), cx);
-            }
+            PaletteActionId::ToggleTheme => toggle_theme_mode(window, cx),
             PaletteActionId::ToggleTodos => self.toggle_todo_panel(cx),
             PaletteActionId::ToggleAgents => self.toggle_subagent_drawer(cx),
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
@@ -2228,8 +2238,12 @@ enum ComposerEnterAction {
     Send,
 }
 
-fn composer_enter_action(menu_open: bool, match_count: usize) -> ComposerEnterAction {
-    if menu_open && match_count > 0 {
+fn composer_enter_action(
+    menu_open: bool,
+    match_count: usize,
+    force_send: bool,
+) -> ComposerEnterAction {
+    if !force_send && menu_open && match_count > 0 {
         ComposerEnterAction::AcceptCompletion
     } else {
         ComposerEnterAction::Send
@@ -2713,7 +2727,11 @@ impl Render for SessionView {
 
         let theme = cx.theme().clone();
         let is_dark = theme.mode.is_dark();
-        let toggle_label = if is_dark { "☀ Light" } else { "☾ Dark" };
+        let toggle_label = if is_dark {
+            "Theme: Dark"
+        } else {
+            "Theme: Light"
+        };
         let phase_label = match self.projection.run_phase {
             RunPhase::Idle => "idle",
             RunPhase::Streaming => "streaming",
@@ -3391,14 +3409,7 @@ impl Render for SessionView {
                                     .label("Send")
                                     .disabled(!self.can_send())
                                     .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.on_composer_event(
-                                            this.composer.clone(),
-                                            &InputEvent::PressEnter {
-                                                secondary: false,
-                                                shift: false,
-                                            },
-                                            cx,
-                                        );
+                                        this.send_composer_message(cx);
                                     })),
                             )
                             .when(
@@ -5313,6 +5324,9 @@ fn main() {
         gpui_component::init(cx);
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
+                // Start in the host window's current appearance; later user toggles are explicit
+                // overrides, so system appearance changes do not unexpectedly replace them.
+                Theme::sync_system_appearance(Some(window), cx);
                 let session = cx.new(|cx| {
                     SessionView::new(
                         window,
@@ -5621,11 +5635,25 @@ mod tests {
     #[test]
     fn slash_enter_accepts_only_when_menu_has_matches() {
         assert_eq!(
-            composer_enter_action(true, 1),
+            composer_enter_action(true, 1, false),
             ComposerEnterAction::AcceptCompletion
         );
-        assert_eq!(composer_enter_action(true, 0), ComposerEnterAction::Send);
-        assert_eq!(composer_enter_action(false, 1), ComposerEnterAction::Send);
+        assert_eq!(
+            composer_enter_action(true, 0, false),
+            ComposerEnterAction::Send
+        );
+        assert_eq!(
+            composer_enter_action(false, 1, false),
+            ComposerEnterAction::Send
+        );
+    }
+
+    #[test]
+    fn secondary_enter_sends_instead_of_accepting_slash_completion() {
+        assert_eq!(
+            composer_enter_action(true, 1, true),
+            ComposerEnterAction::Send
+        );
     }
 
     #[test]
