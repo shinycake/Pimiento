@@ -2478,7 +2478,7 @@ impl Render for SessionView {
                                             )
                                             .child(
                                                 Button::new("todo-panel-toggle")
-                                                    .label("Tasks")
+                                                    .label("Checklist")
                                                     .small()
                                                     .ghost()
                                                     .on_click(cx.listener(

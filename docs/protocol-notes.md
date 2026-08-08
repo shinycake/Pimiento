@@ -230,6 +230,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Rail dots use only projected state: info for Streaming/AwaitingResume/Compacting/Retrying, warning for unread transcript rows while inactive, and no dot otherwise.
 - The primary window title follows the active session's OMP-published name (cwd fallback) and projected run phase. GPUI's `Window::set_window_title` is called only when the computed title changes.
+- The window title omits the session-name segment when the authoritative name is empty or exactly matches the product name, avoiding `Pimiento — Pimiento`.
 - The composer Abort action was already always visible for abortable phases and danger-styled; the unread-tail pill was already primary-styled as `N new ↓`.
 
 ## D4 launcher and dialog polish — 2026-08-08

@@ -184,7 +184,7 @@ pub(crate) fn render_entry(
             let text_for_copy = text.clone();
             div()
                 .w_full()
-                .py_2()
+                .py_1()
                 .child(
                     h_flex()
                         .w_full()
