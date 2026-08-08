@@ -275,6 +275,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The context inspector header includes a ghost **Hide** control (alongside the existing `⌘J` hint) that toggles the same disposable `inspector_open` preference.
 - When the inspector is closed, a full-height 64 px **Show Context** strip mirrors the collapsed session-rail restore affordance.
 - While a run is abortable/streaming, the primary composer button reads **Steer** (same `steer` RPC path as Enter); **Follow-up** remains a separate control.
+- Empty transcript copy is a short brand-ready orientation pair (no keymap wall).
 
 ## Palette theme label — 2026-08-08
 
