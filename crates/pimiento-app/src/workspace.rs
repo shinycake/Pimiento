@@ -686,6 +686,13 @@ pub(crate) fn render_inspector(
                         )
                         .child(Tag::secondary().small().child(todo_count.to_string())),
                 )
+                .when(todo_phases.is_empty(), |section| {
+                    section.child(
+                        Label::new("No checklist items yet")
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
                 .children(todo_phases.iter().map(|phase| {
                     v_flex()
                         .w_full()

@@ -289,6 +289,13 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Collapsed thinking rows show a truncated first non-empty line from the wire thinking text (not a fabricated summary). Empty completed thinking remains a zero-height placeholder.
 
+## Dialog / dead chrome polish — 2026-08-08
+
+- Pending extension-UI dialogs dim the composer row and disable Send/Steer with reason "Answer the dialog above first".
+- Dead sessions keep Restart only on the crash card (not duplicated on the composer). Crash Copy copies the full displayed detail (dead_reason + status).
+- Running tool cards note that cancel is turn-level Abort only.
+- Empty Checklist inspector shows "No checklist items yet". About keymap lists session digits and transcript paging.
+
 ## Palette theme label — 2026-08-08
 
 - Command palette Theme entry shows the current preference (`Theme: Light` etc.) and documents the cycle order. Presentation-only.

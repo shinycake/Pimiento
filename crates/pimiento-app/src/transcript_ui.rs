@@ -552,6 +552,13 @@ pub(crate) fn render_tool_card(
                     )
                 }),
         )
+        .when(tc.status == ToolStatus::Running, |card| {
+            card.child(
+                Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
+            )
+        })
         .when(expanded, |parent| {
             let args_for_copy = args_text.clone();
             parent.child(
@@ -705,12 +712,12 @@ pub(crate) fn render_crash_card(
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let status_copy = status_message.to_owned();
     let detail = match dead_reason {
         Some(reason) if reason != status_message => format!("{reason}\n{status_message}"),
         Some(reason) => reason.to_owned(),
         None => status_message.to_owned(),
     };
+    let detail_for_copy = detail.clone();
 
     v_flex()
         .w_full()
@@ -760,7 +767,7 @@ pub(crate) fn render_crash_card(
                                 .ghost()
                                 .on_click(move |_, _window, cx| {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        status_copy.clone(),
+                                        detail_for_copy.clone(),
                                     ));
                                 }),
                         ),
