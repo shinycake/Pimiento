@@ -216,7 +216,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Pristine UI polish — 2026-08-08
 
 - Transcript-level `Copy` actions are hidden until their semantic row is hovered; Markdown code-block copy remains visible because it is contextual to the block.
-- The toolbar shortens `cursor/<model-id>` to `<model-id>`, while the inspector keeps the full OMP-published provider/model string.
+- The toolbar and inspector shorten `cursor/<model-id>` to `<model-id>` for display; the OMP-published value remains authoritative in projection state.
 - Running tool elapsed time is disposable display state keyed by the OMP tool-call ID. A foreground GPUI task repaints once per second while any projected tool is running; completion duration remains OMP-authoritative when published.
 - Inspector visibility is stored as `{ "inspector_open": bool }` in `ui.json` under the existing Pimiento persistence root. Missing or malformed state defaults to open.
 
@@ -231,3 +231,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Rail dots use only projected state: info for Streaming/AwaitingResume/Compacting/Retrying, warning for unread transcript rows while inactive, and no dot otherwise.
 - The primary window title follows the active session's OMP-published name (cwd fallback) and projected run phase. GPUI's `Window::set_window_title` is called only when the computed title changes.
 - The composer Abort action was already always visible for abortable phases and danger-styled; the unread-tail pill was already primary-styled as `N new ↓`.
+
+## D4 launcher and dialog polish — 2026-08-08
+
+- The command palette exposes an in-app **About Pimiento** notice with the discovered `omp --version` output when connected; this is disposable display state only.
+- Launcher and inline-dialog changes are presentation-only. Dialog responses, Esc cancellation, and `open_url` copy/open behavior retain their existing RPC shapes.
