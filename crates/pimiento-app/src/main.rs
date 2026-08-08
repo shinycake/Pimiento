@@ -1060,7 +1060,7 @@ fn render_tool_card(
                     .gap_2()
                     .child({
                         let tc_id = tc_id.clone();
-                        Button::new("toggle-tool")
+                        Button::new(format!("toggle-tool-{tc_id}"))
                             .label(if expanded {
                                 "▲ collapse"
                             } else {
@@ -1074,7 +1074,7 @@ fn render_tool_card(
                             })
                     })
                     .child(
-                        Button::new("copy-tool")
+                        Button::new(format!("copy-tool-{tc_id}"))
                             .label("📋 copy")
                             .small()
                             .ghost()
