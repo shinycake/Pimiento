@@ -3653,45 +3653,99 @@ fn render_entry(
                 .into_any_element()
         }
         TranscriptEntry::ToolCall(tc) => {
-            render_tool_card(tc, expanded.contains(&tc.tool_call_id), cx)
+            render_tool_card(row_ix, tc, expanded.contains(&tc.tool_call_id), cx)
         }
-        TranscriptEntry::Notice(text) => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(text.clone()),
-            )
-            .into_any_element(),
-        TranscriptEntry::Error { message, .. } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.danger)
-                    .text_sm()
-                    .child(message.clone()),
-            )
-            .into_any_element(),
-        TranscriptEntry::CommandOutput(text) => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.muted)
-                    .font_family(theme.mono_font_family.clone())
-                    .text_size(theme.mono_font_size)
-                    .child(text.clone()),
-            )
-            .into_any_element(),
+        TranscriptEntry::Notice(text) => {
+            let text_for_copy = text.clone();
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(text.clone()),
+                        )
+                        .child(
+                            Button::new(("copy-notice", row_ix))
+                                .label("Copy")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        text_for_copy.clone(),
+                                    ));
+                                }),
+                        ),
+                )
+                .into_any_element()
+        }
+        TranscriptEntry::Error { message, code } => {
+            let copy_text = match code {
+                Some(code) => format!("{message}\ncode: {code}"),
+                None => message.clone(),
+            };
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.danger)
+                        .child(div().flex_1().text_sm().child(message.clone()))
+                        .child(
+                            Button::new(("copy-error", row_ix))
+                                .label("Copy")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        copy_text.clone(),
+                                    ));
+                                }),
+                        ),
+                )
+                .into_any_element()
+        }
+        TranscriptEntry::CommandOutput(text) => {
+            let text_for_copy = text.clone();
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.muted)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
+                        .child(div().flex_1().child(text.clone()))
+                        .child(
+                            Button::new(("copy-command-output", row_ix))
+                                .label("Copy")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        text_for_copy.clone(),
+                                    ));
+                                }),
+                        ),
+                )
+                .into_any_element()
+        }
         TranscriptEntry::Compaction { phase } => {
             let (label, tint) = match phase {
                 CompactionPhase::Started | CompactionPhase::Progress => {
@@ -3700,6 +3754,7 @@ fn render_entry(
                 CompactionPhase::Completed => ("Compaction complete", theme.success),
                 CompactionPhase::Failed => ("Compaction failed", theme.danger),
             };
+            let label_for_copy = label.to_owned();
             div()
                 .w_full()
                 .py_1()
@@ -3711,11 +3766,28 @@ fn render_entry(
                         .bg(theme.muted)
                         .text_xs()
                         .text_color(tint)
-                        .child(label),
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(div().flex_1().child(label))
+                                .child(
+                                    Button::new(("copy-compaction", row_ix))
+                                        .label("Copy")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                label_for_copy.clone(),
+                                            ));
+                                        }),
+                                ),
+                        ),
                 )
                 .into_any_element()
         }
         TranscriptEntry::RetryInfo { detail } => {
+            let detail_for_copy = detail.clone();
             let retrying =
                 detail.starts_with("auto-retry started") || detail.starts_with("fallback applied");
             let tint = if retrying {
@@ -3736,24 +3808,56 @@ fn render_entry(
                         .bg(theme.muted)
                         .text_xs()
                         .text_color(tint)
-                        .child(detail.clone()),
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(div().flex_1().child(detail.clone()))
+                                .child(
+                                    Button::new(("copy-retry-info", row_ix))
+                                        .label("Copy")
+                                        .small()
+                                        .ghost()
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                detail_for_copy.clone(),
+                                            ));
+                                        }),
+                                ),
+                        ),
                 )
                 .into_any_element()
         }
-        TranscriptEntry::Unknown { raw } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.warning)
-                    .text_xs()
-                    .font_family(theme.mono_font_family.clone())
-                    .child(format!("{raw:#}")),
-            )
-            .into_any_element(),
+        TranscriptEntry::Unknown { raw } => {
+            let raw_for_copy = compact_json(raw);
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.warning)
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .child(div().flex_1().child(format!("{raw:#}")))
+                        .child(
+                            Button::new(("copy-unknown", row_ix))
+                                .label("Copy")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        raw_for_copy.clone(),
+                                    ));
+                                }),
+                        ),
+                )
+                .into_any_element()
+        }
     }
 }
 
@@ -3765,6 +3869,7 @@ fn code_block_copy_id(row_ix: usize, lang: Option<&str>, code: &str) -> ElementI
 
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
 fn render_tool_card(
+    row_ix: usize,
     tc: &pimiento_core::transcript::ToolCall,
     expanded: bool,
     cx: &mut Context<SessionView>,
@@ -3777,6 +3882,7 @@ fn render_tool_card(
     };
     let output_text = tc.output.to_string();
     let has_output = !tc.output.is_empty();
+    let args_text = compact_json(&tc.args_json);
     let output_value = serde_json::from_str::<serde_json::Value>(&output_text)
         .unwrap_or_else(|_| serde_json::Value::String(output_text.clone()));
     let edit_diff = parse_edit_diff(&tc.name, &tc.args_json, &output_value).or_else(|| {
@@ -3860,6 +3966,44 @@ fn render_tool_card(
                     )
                 }),
         )
+        .when(expanded, |parent| {
+            let args_for_copy = args_text.clone();
+            parent.child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(div().flex_1().text_xs().child("Arguments"))
+                            .child(
+                                Button::new(("copy-tool-args", row_ix))
+                                    .label("Copy")
+                                    .small()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            args_for_copy.clone(),
+                                        ));
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .max_h(px(320.))
+                            .overflow_y_scrollbar()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(theme.muted)
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(theme.mono_font_size)
+                            .child(args_text.clone()),
+                    ),
+            )
+        })
         .when(expanded && has_output, |parent| {
             parent.child(if let Some(diff) = edit_diff.as_ref() {
                 v_flex()
@@ -3881,7 +4025,7 @@ fn render_tool_card(
                             DiffLineKind::Context => theme.muted_foreground,
                         };
                         div()
-                            .id(("diff-line", ix))
+                            .id(format!("diff-line-{row_ix}-{ix}"))
                             .text_color(color)
                             .child(line.text.clone())
                     }))
@@ -3901,28 +4045,28 @@ fn render_tool_card(
                     .into_any_element()
             })
         })
-        .when(has_output, |parent| {
-            parent.child(
-                h_flex()
-                    .gap_2()
-                    .child({
-                        let tc_id = tc_id.clone();
-                        Button::new(format!("toggle-tool-{tc_id}"))
-                            .label(if expanded {
-                                "▲ collapse"
-                            } else {
-                                "▼ output"
-                            })
-                            .small()
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                let _ = view_for_toggle
-                                    .update(cx, |this, cx| this.toggle_tool_expanded(&tc_id, cx));
-                            })
-                    })
-                    .child(
-                        Button::new(format!("copy-tool-{tc_id}"))
-                            .label("copy")
+        .child(
+            h_flex()
+                .gap_2()
+                .child({
+                    let tc_id = tc_id.clone();
+                    Button::new(("toggle-tool", row_ix))
+                        .label(if expanded {
+                            "▲ collapse"
+                        } else {
+                            "▼ details"
+                        })
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            let _ = view_for_toggle
+                                .update(cx, |this, cx| this.toggle_tool_expanded(&tc_id, cx));
+                        })
+                })
+                .when(has_output, |controls| {
+                    controls.child(
+                        Button::new(("copy-tool-output", row_ix))
+                            .label("Copy")
                             .small()
                             .ghost()
                             .on_click({
@@ -3934,32 +4078,32 @@ fn render_tool_card(
                                 }
                             }),
                     )
-                    .children({
-                        let revert_path =
-                            edit_diff.as_ref().and_then(|d| d.path.clone()).or_else(|| {
-                                tc.args_json
-                                    .get("path")
-                                    .or_else(|| tc.args_json.pointer("/input/path"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_owned)
-                            });
-                        revert_path.map(|path| {
-                            let tc_id = tc_id.clone();
-                            Button::new(format!("revert-tool-{tc_id}"))
-                                .label("Revert file…")
-                                .small()
-                                .ghost()
-                                .on_click(move |_, _, cx| {
-                                    let path = path.clone();
-                                    let tc_id = tc_id.clone();
-                                    let _ = view_for_revert.update(cx, |this, cx| {
-                                        this.request_file_revert(path, tc_id, cx);
-                                    });
-                                })
-                        })
-                    }),
-            )
-        })
+                })
+                .children({
+                    let revert_path =
+                        edit_diff.as_ref().and_then(|d| d.path.clone()).or_else(|| {
+                            tc.args_json
+                                .get("path")
+                                .or_else(|| tc.args_json.pointer("/input/path"))
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned)
+                        });
+                    revert_path.map(|path| {
+                        let tc_id = tc_id.clone();
+                        Button::new(format!("revert-tool-{tc_id}"))
+                            .label("Revert file…")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                let path = path.clone();
+                                let tc_id = tc_id.clone();
+                                let _ = view_for_revert.update(cx, |this, cx| {
+                                    this.request_file_revert(path, tc_id, cx);
+                                });
+                            })
+                    })
+                }),
+        )
         .into_any_element()
 }
 
