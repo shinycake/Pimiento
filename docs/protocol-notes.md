@@ -125,3 +125,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - `get_state.todoPhases` (also accepted as `todos` / `{phases:[…]}`) is parsed into phase/task rows.
 - Status strip **Todos (actionable/total)** toggles a read-only panel above the composer with glyphs for pending/in_progress/completed/blocked/abandoned.
+
+## Multi-session workspace — 2026-08-08
+
+- Root UI is a workspace with a left session rail; each rail entry is its own `SessionView` + supervised OMP child.
+- **New** / **Close** manage slots; Cmd/Ctrl+1..9 switches the active session without pausing inactive pumps.

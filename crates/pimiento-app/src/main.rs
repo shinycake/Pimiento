@@ -1335,6 +1335,29 @@ impl SessionView {
             )
             .into_any_element()
     }
+    fn rail_label_and_phase(&self) -> (String, String) {
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.launcher_cwd.as_path());
+        let label = projection_session_name(&self.projection, cwd);
+        let phase = match self.projection.run_phase {
+            RunPhase::Idle => "idle",
+            RunPhase::Streaming => "stream",
+            RunPhase::AwaitingResume => "await",
+            RunPhase::Compacting => "compact",
+            RunPhase::Retrying => "retry",
+            RunPhase::Restarting => "restart",
+            RunPhase::Dead => "dead",
+        };
+        (label, phase.to_owned())
+    }
+
+    fn shutdown_session(&mut self, cx: &mut Context<Self>) {
+        self.client.take();
+        self.pump.take();
+        cx.notify();
+    }
 }
 
 // ── guards ────────────────────────────────────────────────────────────────
@@ -1575,6 +1598,205 @@ fn render_todo_panel(phases: &[TodoPhaseView], cx: &mut Context<SessionView>) ->
 }
 
 // ── render ────────────────────────────────────────────────────────────────
+
+struct WorkspaceView {
+    sessions: Vec<gpui::Entity<SessionView>>,
+    active: usize,
+    persistence: SessionPersistence,
+    initial_cwd: PathBuf,
+}
+
+impl WorkspaceView {
+    fn new(
+        first: gpui::Entity<SessionView>,
+        persistence: SessionPersistence,
+        initial_cwd: PathBuf,
+    ) -> Self {
+        Self {
+            sessions: vec![first],
+            active: 0,
+            persistence,
+            initial_cwd,
+        }
+    }
+
+    fn clamp_active(&mut self) {
+        if self.sessions.is_empty() {
+            self.active = 0;
+            return;
+        }
+        self.active = self.active.min(self.sessions.len() - 1);
+    }
+
+    fn select_session(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.sessions.len() {
+            self.active = index;
+            cx.notify();
+        }
+    }
+
+    fn add_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let remembered = self.persistence.load_recent_sessions();
+        let last_session = self
+            .persistence
+            .load_last_session()
+            .filter(|resume| resume.exists());
+        let recent = collect_launcher_sessions(
+            &self.persistence,
+            &self.initial_cwd,
+            omp_sessions_root().as_deref(),
+            home_dir().as_deref(),
+            std::env::temp_dir().as_path(),
+        );
+        let persistence = self.persistence.clone();
+        let cwd = self.initial_cwd.clone();
+        let session = cx.new(|cx| {
+            SessionView::new(
+                window,
+                cx,
+                None,
+                "Choose a working directory to begin".to_owned(),
+                SessionProjection::new(),
+                Vec::new(),
+                LauncherBootstrap {
+                    persistence,
+                    launcher_cwd: cwd,
+                    recent_sessions: if recent.is_empty() {
+                        remembered
+                    } else {
+                        recent
+                    },
+                    last_session,
+                },
+            )
+        });
+        self.sessions.push(session);
+        self.active = self.sessions.len() - 1;
+        cx.notify();
+    }
+
+    fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let idx = self.active;
+        if let Some(session) = self.sessions.get(idx).cloned() {
+            session.update(cx, SessionView::shutdown_session);
+        }
+        self.sessions.remove(idx);
+        if self.sessions.is_empty() {
+            self.add_session(window, cx);
+        } else {
+            self.clamp_active();
+            cx.notify();
+        }
+    }
+
+    fn handle_workspace_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !(event.keystroke.modifiers.platform || event.keystroke.modifiers.control) {
+            return false;
+        }
+        let Some(digit) = workspace_digit_key(&event.keystroke.key) else {
+            return false;
+        };
+        let index = digit.saturating_sub(1);
+        if index < self.sessions.len() {
+            self.select_session(index, cx);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn workspace_digit_key(key: &str) -> Option<usize> {
+    match key {
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => key.parse().ok(),
+        _ => None,
+    }
+}
+
+impl Render for WorkspaceView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.clamp_active();
+        let theme = cx.theme().clone();
+        let active = self.active;
+        let labels: Vec<(String, String, usize)> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(ix, session)| {
+                let (label, phase) = session.read(cx).rail_label_and_phase();
+                (label, phase, ix)
+            })
+            .collect();
+
+        h_flex()
+            .size_full()
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .capture_key_down(cx.listener(|this, event, _window, cx| {
+                if this.handle_workspace_key(event, cx) {
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                v_flex()
+                    .w(px(220.))
+                    .h_full()
+                    .gap_1()
+                    .p_2()
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .bg(theme.muted)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                Button::new("workspace-new-session")
+                                    .label("New")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.add_session(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("workspace-close-session")
+                                    .label("Close")
+                                    .small()
+                                    .ghost()
+                                    .disabled(self.sessions.is_empty())
+                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                        this.close_active(window, cx);
+                                    })),
+                            ),
+                    )
+                    .children(labels.into_iter().map(|(label, phase, ix)| {
+                        let selected = ix == active;
+                        Button::new(("workspace-session", ix))
+                            .label(format!("{label} · {phase}"))
+                            .small()
+                            .when(selected, Button::primary)
+                            .when(!selected, Button::ghost)
+                            .w_full()
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                this.select_session(ix, cx);
+                            }))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .child(self.sessions.get(active).cloned().map_or_else(
+                        || div().into_any_element(),
+                        gpui::IntoElement::into_any_element,
+                    )),
+            )
+    }
+}
 
 impl Render for SessionView {
     #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
@@ -3386,7 +3608,7 @@ fn main() {
         gpui_component::init(cx);
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
+                let session = cx.new(|cx| {
                     SessionView::new(
                         window,
                         cx,
@@ -3405,11 +3627,14 @@ fn main() {
                 if auto_connect {
                     let cwd = initial_cwd.clone();
                     let resume = auto_resume.clone();
-                    view.update(cx, |this, cx| {
+                    session.update(cx, |this, cx| {
                         this.begin_connection(window, cwd, resume, true, cx);
                     });
                 }
-                cx.new(|cx| Root::new(view, window, cx))
+                let workspace = cx.new(|_cx| {
+                    WorkspaceView::new(session, persistence.clone(), initial_cwd.clone())
+                });
+                cx.new(|cx| Root::new(workspace, window, cx))
             })
             .expect("open primary window");
         })
@@ -3436,6 +3661,14 @@ mod tests {
         assert!(!composer_uses_steer(&RunPhase::Idle));
         assert!(!composer_uses_steer(&RunPhase::Dead));
     }
+    #[test]
+    fn workspace_digit_key_maps_one_through_nine() {
+        assert_eq!(workspace_digit_key("1"), Some(1));
+        assert_eq!(workspace_digit_key("9"), Some(9));
+        assert_eq!(workspace_digit_key("0"), None);
+        assert_eq!(workspace_digit_key("a"), None);
+    }
+
     #[test]
     fn classify_messages_page_error_detects_busy_and_stale() {
         assert_eq!(
