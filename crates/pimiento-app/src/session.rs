@@ -65,6 +65,9 @@ pub(crate) struct SessionView {
     pub(crate) pending_revert: Option<PendingRevert>,
     pub(crate) palette_open: bool,
     pub(crate) about_open: bool,
+    /// Mirrors workspace inspector visibility so the session toolbar can
+    /// defer Checklist/Agents/ctx chrome while the Context pane is open.
+    pub(crate) inspector_open: bool,
     pub(crate) palette_query: String,
     pub(crate) palette_selected: usize,
     pub(crate) pending_workspace_palette: Option<PaletteActionId>,
@@ -171,6 +174,7 @@ impl SessionView {
             pending_revert: None,
             palette_open: false,
             about_open: false,
+            inspector_open: false,
             palette_query: String::new(),
             palette_selected: 0,
             pending_workspace_palette: None,
@@ -2438,19 +2442,24 @@ impl Render for SessionView {
                                             .flex_1()
                                             .justify_center()
                                             .gap_2()
-                                            .when_some(context_label, |group, context| {
-                                                group.child(
-                                                    Label::new(context)
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground),
-                                                )
-                                            })
-                                            .when_some(tokens_label, |group, tokens| {
-                                                group.child(
-                                                    Label::new(tokens)
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground),
-                                                )
+                                            // When the Context inspector is open it already
+                                            // shows ctx% / tps — keep the toolbar quiet.
+                                            .when(!self.inspector_open, |group| {
+                                                group
+                                                    .when_some(context_label, |group, context| {
+                                                        group.child(
+                                                            Label::new(context)
+                                                                .text_xs()
+                                                                .text_color(theme.muted_foreground),
+                                                        )
+                                                    })
+                                                    .when_some(tokens_label, |group, tokens| {
+                                                        group.child(
+                                                            Label::new(tokens)
+                                                                .text_xs()
+                                                                .text_color(theme.muted_foreground),
+                                                        )
+                                                    })
                                             }),
                                     )
                                     .child(
@@ -2483,38 +2492,51 @@ impl Render for SessionView {
                                                         )),
                                                 )
                                             })
-                                            .child(
-                                                div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
-                                            )
-                                            .child(
-                                                Button::new("todo-panel-toggle")
-                                                    .label("Checklist")
-                                                    .small()
-                                                    .ghost()
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.request_inspector_focus(
-                                                                PaletteActionId::ToggleTodos,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("subagent-drawer-toggle")
-                                                    .label("Agents")
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.request_inspector_focus(
-                                                                PaletteActionId::ToggleAgents,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    )),
-                                            )
+                                            .when(!self.inspector_open, |group| {
+                                                group
+                                                    .child(
+                                                        div()
+                                                            .w(px(1.))
+                                                            .h(px(16.))
+                                                            .mx_1()
+                                                            .bg(theme.border),
+                                                    )
+                                                    .child(
+                                                        Button::new("todo-panel-toggle")
+                                                            .label("Checklist")
+                                                            .small()
+                                                            .ghost()
+                                                            .on_click(cx.listener(
+                                                                |this,
+                                                                 _: &ClickEvent,
+                                                                 _window,
+                                                                 cx| {
+                                                                    this.request_inspector_focus(
+                                                                        PaletteActionId::ToggleTodos,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        Button::new("subagent-drawer-toggle")
+                                                            .label("Agents")
+                                                            .small()
+                                                            .ghost()
+                                                            .disabled(!can_pick)
+                                                            .on_click(cx.listener(
+                                                                |this,
+                                                                 _: &ClickEvent,
+                                                                 _window,
+                                                                 cx| {
+                                                                    this.request_inspector_focus(
+                                                                        PaletteActionId::ToggleAgents,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                            })
                                             .child(
                                                 div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
                                             )

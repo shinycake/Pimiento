@@ -104,11 +104,15 @@ impl WorkspaceView {
         let first_subscription = cx.observe(&first, |_this, _session, cx| {
             cx.notify();
         });
+        let inspector_open = persistence.load_inspector_open();
+        first.update(cx, |session, _cx| {
+            session.inspector_open = inspector_open;
+        });
         Self {
             sessions: vec![first],
             session_subscriptions: vec![first_subscription],
             active: 0,
-            inspector_open: persistence.load_inspector_open(),
+            inspector_open,
             rail_collapsed: persistence.load_rail_collapsed(),
             persistence,
             initial_cwd,
@@ -258,6 +262,7 @@ impl WorkspaceView {
         self.sessions.push(session);
         self.session_subscriptions.push(subscription);
         self.active = self.sessions.len() - 1;
+        self.sync_inspector_open_to_sessions(cx);
         cx.notify();
     }
 
@@ -289,6 +294,7 @@ impl WorkspaceView {
         self.inspector_open = true;
         self.persistence.save_inspector_open(true);
         self.inspector_focus = focus;
+        self.sync_inspector_open_to_sessions(cx);
         if let Some(session) = self.sessions.get(self.active).cloned() {
             session.update(cx, SessionView::ensure_subagent_snapshots);
         }
@@ -298,12 +304,25 @@ impl WorkspaceView {
     pub(crate) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
         self.inspector_open = !self.inspector_open;
         self.persistence.save_inspector_open(self.inspector_open);
+        self.sync_inspector_open_to_sessions(cx);
         if self.inspector_open
             && let Some(session) = self.sessions.get(self.active).cloned()
         {
             session.update(cx, SessionView::ensure_subagent_snapshots);
         }
         cx.notify();
+    }
+
+    pub(crate) fn sync_inspector_open_to_sessions(&self, cx: &mut Context<Self>) {
+        let open = self.inspector_open;
+        for session in &self.sessions {
+            session.update(cx, |session, cx| {
+                if session.inspector_open != open {
+                    session.inspector_open = open;
+                    cx.notify();
+                }
+            });
+        }
     }
 
     pub(crate) fn handle_workspace_key(
