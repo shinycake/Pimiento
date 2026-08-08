@@ -4,6 +4,7 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -1882,7 +1883,7 @@ impl Render for SessionView {
                                                 let glyph = todo_status_glyph(&task.status);
                                                 let mut line = format!("{glyph} {}", task.content);
                                                 if let Some(blocker) = task.blocker.as_deref() {
-                                                    line.push_str(&format!(" — {blocker}"));
+                                                    let _ = write!(line, " — {blocker}");
                                                 }
                                                 div()
                                                     .id(("todo-task", phase_ix * 1000 + task_ix))
