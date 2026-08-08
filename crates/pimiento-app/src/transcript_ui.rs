@@ -685,9 +685,8 @@ pub(crate) fn render_tool_card(
                             .ghost()
                             .on_click(move |_, _, cx| {
                                 let path = path.clone();
-                                let tc_id = tc_id.clone();
                                 let _ = view_for_revert.update(cx, |this, cx| {
-                                    this.request_file_revert(path, tc_id, cx);
+                                    this.request_file_revert(path, cx);
                                 });
                             })
                     })
