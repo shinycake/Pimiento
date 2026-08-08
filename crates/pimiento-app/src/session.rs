@@ -1578,7 +1578,7 @@ impl SessionView {
                             .gap_2()
                             .child(
                                 Button::new("start-working-directory")
-                                    .label("Start")
+                                    .label("Start here")
                                     .primary()
                                     .disabled(connecting)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
