@@ -32,6 +32,9 @@ if os.fork() > 0:
 os.chdir(cwd)
 os.environ["PIMIENTO_CWD"] = cwd
 os.environ.setdefault("RUST_BACKTRACE", "1")
+# Auto-connect so GUI driving does not depend on AX/Start-here clicks
+# (GPUI often exposes an empty accessibility tree).
+os.environ.setdefault("PIMIENTO_AUTO_CONNECT", "1")
 sys.stdout.flush(); sys.stderr.flush()
 si = open("/dev/null", "rb")
 so = open(log_path, "ab", buffering=0)
