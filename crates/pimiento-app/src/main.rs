@@ -783,6 +783,17 @@ impl Render for SessionView {
                         ),
                 )
             })
+            .when(
+                matches!(self.projection.run_phase, RunPhase::Dead),
+                |parent| {
+                    parent.child(render_crash_card(
+                        &self.status_message,
+                        self.projection.dead_reason.as_deref(),
+                        self.can_restart(),
+                        cx,
+                    ))
+                },
+            )
             .child(
                 h_flex()
                     .w_full()
@@ -1089,6 +1100,78 @@ fn render_tool_card(
                     ),
             )
         })
+        .into_any_element()
+}
+
+// ── crash card ────────────────────────────────────────────────────────────
+
+fn render_crash_card(
+    status_message: &str,
+    dead_reason: Option<&str>,
+    can_restart: bool,
+    cx: &mut Context<SessionView>,
+) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let status_copy = status_message.to_owned();
+    let detail = match dead_reason {
+        Some(reason) if reason != status_message => format!("{reason}\n{status_message}"),
+        Some(reason) => reason.to_owned(),
+        None => status_message.to_owned(),
+    };
+
+    v_flex()
+        .w_full()
+        .px_3()
+        .py_2()
+        .gap_2()
+        .bg(theme.muted)
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            v_flex()
+                .w_full()
+                .p_3()
+                .gap_2()
+                .rounded_md()
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(theme.danger)
+                .child(
+                    Label::new("Session crashed")
+                        .text_sm()
+                        .text_color(theme.danger),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(detail),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("crash-restart")
+                                .primary()
+                                .label("Restart")
+                                .disabled(!can_restart)
+                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.do_restart(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("crash-copy")
+                                .label("Copy")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _window, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        status_copy.clone(),
+                                    ));
+                                }),
+                        ),
+                ),
+        )
         .into_any_element()
 }
 
