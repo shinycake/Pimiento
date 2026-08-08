@@ -62,7 +62,7 @@ struct SessionView {
     clear_composer: bool,
     clear_model_search: bool,
     _subscriptions: Vec<gpui::Subscription>,
-    _pump: Option<Task<()>>,
+    pump: Option<Task<()>>,
 }
 
 impl SessionView {
@@ -79,7 +79,7 @@ impl SessionView {
                 .multi_line(true)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("Type a message… (Enter send, Shift+Enter newline)")
+                .placeholder("Type… Enter send (steers while streaming); Shift+Enter newline")
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx)
@@ -138,7 +138,7 @@ impl SessionView {
             clear_composer: false,
             clear_model_search: false,
             _subscriptions: subscriptions,
-            _pump: pump,
+            pump,
         };
         view.start_catalog_load(cx);
         view
@@ -325,18 +325,25 @@ impl SessionView {
                 return;
             };
 
+            let steer = composer_uses_steer(&self.projection.run_phase);
             self.projection.push_user_message(text.clone());
             self.clear_composer = true;
             cx.notify();
 
             cx.spawn(async move |_, _| {
-                let _ = client
-                    .send(RpcCommandBody::Prompt {
+                let body = if steer {
+                    RpcCommandBody::Steer {
+                        message: text,
+                        images: None,
+                    }
+                } else {
+                    RpcCommandBody::Prompt {
                         message: text,
                         images: None,
                         streaming_behavior: None,
-                    })
-                    .await;
+                    }
+                };
+                let _ = client.send(body).await;
             })
             .detach();
         }
@@ -344,6 +351,71 @@ impl SessionView {
 
     fn can_send(&self) -> bool {
         self.client.is_some() && phase_allows_send(&self.projection.run_phase)
+    }
+
+    fn can_restart(&self) -> bool {
+        matches!(self.projection.run_phase, RunPhase::Dead)
+            && self
+                .projection
+                .state
+                .session_file
+                .as_ref()
+                .is_some_and(|s| !s.is_empty())
+    }
+
+    fn do_restart(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.projection.state.session_file.clone() else {
+            return;
+        };
+        self.projection.mark_restarting();
+        self.client = None;
+        self.pump = None;
+        "Restarting session…".clone_into(&mut self.status_message);
+        cx.notify();
+
+        match try_connect_omp(Some(PathBuf::from(session))) {
+            Ok((client, proj, status, models)) => {
+                self.available_models = models;
+                self.projection = proj;
+                self.status_message = status;
+                self.client = Some(client.clone());
+                let events = client.events();
+                self.pump = Some(cx.spawn(async move |view, cx| {
+                    while let Ok(event) = events.recv().await {
+                        let _ = view.update(cx, |this, cx| {
+                            match &event {
+                                ClientEvent::Frame(frame) => {
+                                    let is_model_changed =
+                                        frame.raw.get("type").and_then(|v| v.as_str())
+                                            == Some("model_changed");
+                                    this.projection.apply(frame);
+                                    if is_model_changed {
+                                        this.refresh_state_after_model_change(cx);
+                                    }
+                                }
+                                ClientEvent::Closed(info) => {
+                                    let reason = info.error_msg.clone().unwrap_or_else(|| {
+                                        format!("exit code {:?}", info.exit_code)
+                                    });
+                                    this.projection.mark_dead(reason);
+                                    this.client = None;
+                                    let tail = &info.stderr_tail;
+                                    this.status_message =
+                                        format!("OMP closed — {}", &tail[..256.min(tail.len())]);
+                                }
+                            }
+                            cx.notify();
+                        });
+                    }
+                }));
+                self.start_catalog_load(cx);
+            }
+            Err(e) => {
+                self.projection.mark_dead(e.clone());
+                self.status_message = e;
+            }
+        }
+        cx.notify();
     }
 
     fn can_abort(&self) -> bool {
@@ -381,6 +453,10 @@ impl SessionView {
 }
 
 // ── guards ────────────────────────────────────────────────────────────────
+
+fn composer_uses_steer(phase: &RunPhase) -> bool {
+    matches!(phase, RunPhase::Streaming)
+}
 
 fn phase_allows_send(phase: &RunPhase) -> bool {
     !matches!(phase, RunPhase::Dead | RunPhase::Restarting)
@@ -621,6 +697,11 @@ impl Render for SessionView {
                     .when(self.can_abort(), |parent| {
                         parent.child(Button::new("abort").danger().label("Abort").on_click(
                             cx.listener(|this, _: &ClickEvent, _window, cx| this.do_abort(cx)),
+                        ))
+                    })
+                    .when(self.can_restart(), |parent| {
+                        parent.child(Button::new("restart").primary().label("Restart").on_click(
+                            cx.listener(|this, _: &ClickEvent, _window, cx| this.do_restart(cx)),
                         ))
                     }),
             )
@@ -1046,7 +1127,31 @@ fn do_dialog_response(
 
 // ── OMP connection helper ─────────────────────────────────────────────────
 
-fn try_connect_omp() -> Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String> {
+fn last_session_path() -> PathBuf {
+    dirs_next_home()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pimiento")
+        .join("last-session")
+}
+
+fn dirs_next_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn remember_session_file(session_file: Option<&str>) {
+    let Some(session_file) = session_file.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let path = last_session_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, session_file);
+}
+
+fn try_connect_omp(
+    resume: Option<PathBuf>,
+) -> Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String> {
     let inputs = DiscoveryInputs {
         override_bin: std::env::var_os("PIMIENTO_OMP_BIN")
             .map(PathBuf::from)
@@ -1059,10 +1164,23 @@ fn try_connect_omp() -> Result<(RpcClient, SessionProjection, String, Vec<ModelC
     let discovered = smol::block_on(async { discover(&inputs, &SystemRunner) })
         .map_err(|e| format!("OMP not found: {e}"))?;
 
+    let cwd = std::env::var_os("PIMIENTO_CWD")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::current_dir().ok());
+
+    let resume = resume.or_else(|| {
+        let raw = std::fs::read_to_string(last_session_path()).ok()?;
+        let raw = raw.trim();
+        (!raw.is_empty()).then(|| PathBuf::from(raw))
+    });
+
     let cfg = ClientConfig {
         program: discovered.path,
         env: discovered.env,
-        no_session: true,
+        cwd,
+        no_session: false,
+        resume,
         ..Default::default()
     };
 
@@ -1085,6 +1203,7 @@ fn try_connect_omp() -> Result<(RpcClient, SessionProjection, String, Vec<ModelC
         && let Some(data) = &r.data
     {
         proj.hydrate_get_state(data);
+        remember_session_file(proj.state.session_file.as_deref());
     }
     if let Ok(r) = &avail
         && r.success
@@ -1161,7 +1280,7 @@ fn filter_models(models: &[ModelChoice], query: &str) -> Vec<ModelChoice> {
 // ── entry ─────────────────────────────────────────────────────────────────
 
 fn main() {
-    let connect_result = try_connect_omp();
+    let connect_result = try_connect_omp(None);
 
     gpui_platform::application().run(|cx| {
         gpui_component::init(cx);
@@ -1192,6 +1311,12 @@ mod tests {
     #[test]
     fn phase_allows_send_streaming() {
         assert!(phase_allows_send(&RunPhase::Streaming));
+    }
+    #[test]
+    fn composer_steers_only_while_streaming() {
+        assert!(composer_uses_steer(&RunPhase::Streaming));
+        assert!(!composer_uses_steer(&RunPhase::Idle));
+        assert!(!composer_uses_steer(&RunPhase::Dead));
     }
     #[test]
     fn phase_disallows_send_dead() {
