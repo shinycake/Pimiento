@@ -253,8 +253,13 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Theme preference env — 2026-08-08
 
 - `PIMIENTO_THEME=system|light|dark` selects the initial theme preference at process start (default `system`). Palette **Toggle theme** still cycles at runtime. This is disposable display state only.
+- Theme choices from the palette persist in `ui.json`; `PIMIENTO_THEME` overrides for the process without rewriting that file.
 - Without that environment override, startup reads `theme` from `ui.json`; palette changes write it immediately, while an environment override never overwrites the stored preference.
 - The collapsed session rail now keeps a full-height 64 px restore target labeled **Show Sessions** with a muted `⌘B` hint.
+
+## About keymap card — 2026-08-08
+
+- The About overlay includes a compact keymap cheat-sheet (palette, sessions rail, inspector, new/close, send, abort). Presentation-only.
 
 ## Rail persistence + streaming polish — 2026-08-08
 
