@@ -281,6 +281,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - After a successful `export_html`, Pimiento reveals the written file in the platform file manager (`open -R` on macOS; parent folder via `xdg-open` on Linux). The transcript notice still carries the authoritative path from OMP.
 
+## Toolbar deference when inspector open — 2026-08-08
+
+- While the Context inspector is visible, the session toolbar hides the duplicated Checklist/Agents shortcuts and ctx%/tps readouts (those facts already live in the inspector). Model/thinking/More remain. Presentation-only.
+
 ## Palette theme label — 2026-08-08
 
 - Command palette Theme entry shows the current preference (`Theme: Light` etc.) and documents the cycle order. Presentation-only.
