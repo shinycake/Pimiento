@@ -2,8 +2,10 @@ use crate::*;
 
 // ── theme preference ──────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub(crate) enum ThemePreference {
+    #[default]
     System,
     Light,
     Dark,
@@ -30,6 +32,16 @@ pub(crate) fn theme_preference_from_env(raw: Option<&str>) -> ThemePreference {
     }
 }
 
+pub(crate) fn initial_theme_preference(
+    env: Option<&OsStr>,
+    persistence: &SessionPersistence,
+) -> ThemePreference {
+    env.map_or_else(
+        || persistence.load_theme_preference(),
+        |raw| theme_preference_from_env(raw.to_str()),
+    )
+}
+
 pub(crate) fn apply_theme_preference(
     preference: ThemePreference,
     window: &mut Window,
@@ -45,8 +57,13 @@ pub(crate) fn apply_theme_preference(
     window.refresh();
 }
 
-pub(crate) fn cycle_theme_preference(window: &mut Window, cx: &mut App) {
+pub(crate) fn cycle_theme_preference(
+    persistence: &SessionPersistence,
+    window: &mut Window,
+    cx: &mut App,
+) {
     let next = next_theme_preference(cx.global::<ThemePreferenceState>().0);
+    persistence.save_theme_preference(next);
     apply_theme_preference(next, window, cx);
 }
 
@@ -75,6 +92,17 @@ pub(crate) struct PersistedWindowBounds {
 pub(crate) struct PersistedUi {
     #[serde(default = "default_inspector_open")]
     pub(crate) inspector_open: bool,
+    #[serde(default)]
+    pub(crate) theme: ThemePreference,
+}
+
+impl Default for PersistedUi {
+    fn default() -> Self {
+        Self {
+            inspector_open: default_inspector_open(),
+            theme: ThemePreference::System,
+        }
+    }
 }
 
 pub(crate) fn default_inspector_open() -> bool {
@@ -214,15 +242,34 @@ impl SessionPersistence {
     }
 
     pub(crate) fn load_inspector_open(&self) -> bool {
-        let Ok(raw) = std::fs::read_to_string(self.ui_path()) else {
-            return default_inspector_open();
-        };
-        serde_json::from_str::<PersistedUi>(&raw)
-            .map_or_else(|_| default_inspector_open(), |ui| ui.inspector_open)
+        self.load_ui().inspector_open
     }
 
     pub(crate) fn save_inspector_open(&self, inspector_open: bool) {
-        let Ok(contents) = serde_json::to_string_pretty(&PersistedUi { inspector_open }) else {
+        let mut ui = self.load_ui();
+        ui.inspector_open = inspector_open;
+        self.save_ui(ui);
+    }
+
+    pub(crate) fn load_theme_preference(&self) -> ThemePreference {
+        self.load_ui().theme
+    }
+
+    pub(crate) fn save_theme_preference(&self, theme: ThemePreference) {
+        let mut ui = self.load_ui();
+        ui.theme = theme;
+        self.save_ui(ui);
+    }
+
+    fn load_ui(&self) -> PersistedUi {
+        let Ok(raw) = std::fs::read_to_string(self.ui_path()) else {
+            return PersistedUi::default();
+        };
+        serde_json::from_str(&raw).unwrap_or_default()
+    }
+
+    fn save_ui(&self, ui: PersistedUi) {
+        let Ok(contents) = serde_json::to_string_pretty(&ui) else {
             return;
         };
         let _ = write_persistence_file(&self.ui_path(), &contents);

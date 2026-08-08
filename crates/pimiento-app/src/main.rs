@@ -4,6 +4,7 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsStr;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -93,7 +94,8 @@ fn main() {
         .then(|| latest_resume_path(&persistence, &recent))
         .flatten();
 
-    let initial_theme = theme_preference_from_env(std::env::var("PIMIENTO_THEME").ok().as_deref());
+    let theme_override = std::env::var_os("PIMIENTO_THEME");
+    let initial_theme = initial_theme_preference(theme_override.as_deref(), &persistence);
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);

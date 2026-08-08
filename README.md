@@ -23,7 +23,7 @@ Set `PIMIENTO_AUTO_CONNECT=1` when launching to automatically connect (also the 
 PIMIENTO_AUTO_CONNECT=1 ./scripts/run_app.sh
 ```
 
-Optional theme override for dogfood/QA (`system` is the default):
+Palette **Toggle theme** choices persist in `ui.json`. For a process-only dogfood/QA override that leaves the stored preference unchanged:
 
 ```sh
 PIMIENTO_THEME=light ./scripts/run_app.sh
