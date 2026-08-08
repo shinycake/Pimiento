@@ -2940,6 +2940,7 @@ impl Render for SessionView {
                                     parent.child(
                                         Button::new("follow-up")
                                             .label("Follow-up")
+                                            .ghost()
                                             .disabled(!self.can_follow_up(cx))
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, _window, cx| {
