@@ -249,3 +249,4 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Pinned `gpui-component` Input tracks composition privately (`ime_marked_range`) and `submit_on_enter` still emits `InputEvent::PressEnter` without a public `is_composing` / marked-range API.
 - Pimiento therefore cannot add an app-level Enter-while-composing guard without forking or waiting for an upstream Input API. Manual CJK IME QA remains required on each OS; document failures against the pin rev rather than inventing a client-side composition state.
+- The collapsed session rail now keeps a full-height 64 px restore target labeled **Show Sessions** with a muted `⌘B` hint.
