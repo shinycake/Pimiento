@@ -804,6 +804,32 @@ fn hydrate_get_state_accepts_model_object() {
 }
 
 #[test]
+fn hydrate_get_state_promotes_context_usage() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "model": {"provider": "cursor", "id": "composer-2.5"},
+        "contextUsage": {"tokens": 100, "contextWindow": 200_000, "percent": 8.5},
+        "tokensPerSecond": 11.5,
+    }));
+    assert_eq!(
+        p.state
+            .context
+            .as_ref()
+            .and_then(|v| v.get("percent"))
+            .and_then(serde_json::Value::as_f64),
+        Some(8.5)
+    );
+    assert_eq!(
+        p.state
+            .tokens
+            .as_ref()
+            .and_then(|v| v.get("tokensPerSecond"))
+            .and_then(serde_json::Value::as_f64),
+        Some(11.5)
+    );
+}
+
+#[test]
 fn model_changed_without_model_preserves_prior() {
     let mut p = SessionProjection::new();
     p.hydrate_get_state(&json!({

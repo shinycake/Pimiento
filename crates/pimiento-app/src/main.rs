@@ -222,7 +222,7 @@ impl SessionView {
     }
 
     fn sync_status_model(&mut self) {
-        // Keep the version prefix; refresh model (+ thinking) suffix.
+        // Keep the version prefix; refresh model / thinking / context suffix.
         let model = self
             .projection
             .state
@@ -230,11 +230,20 @@ impl SessionView {
             .as_deref()
             .unwrap_or("(no model)");
         let thinking = thinking_label(self.projection.state.thinking.as_ref());
+        let ctx = context_percent_label(self.projection.state.context.as_ref());
+        let tps = tokens_per_second_label(self.projection.state.tokens.as_ref());
         if let Some((ver, _)) = self.status_message.split_once("  •  ") {
-            self.status_message = match thinking {
-                Some(t) => format!("{ver}  •  {model}  •  think:{t}"),
-                None => format!("{ver}  •  {model}"),
-            };
+            let mut parts = vec![ver.to_owned(), model.to_owned()];
+            if let Some(t) = thinking {
+                parts.push(format!("think:{t}"));
+            }
+            if let Some(c) = ctx {
+                parts.push(format!("ctx:{c}"));
+            }
+            if let Some(t) = tps {
+                parts.push(format!("{t}/s"));
+            }
+            self.status_message = parts.join("  •  ");
         }
     }
 
@@ -1433,17 +1442,40 @@ fn try_connect_omp(
     let models = Vec::new();
 
     let model = proj.state.model.as_deref().unwrap_or("(no model)");
-    let status = match thinking_label(proj.state.thinking.as_ref()) {
-        Some(t) => format!(
-            "{}  •  {}  •  think:{}",
-            discovered.version_text.trim(),
-            model,
-            t
-        ),
-        None => format!("{}  •  {}", discovered.version_text.trim(), model),
-    };
+    let mut parts = vec![discovered.version_text.trim().to_owned(), model.to_owned()];
+    if let Some(t) = thinking_label(proj.state.thinking.as_ref()) {
+        parts.push(format!("think:{t}"));
+    }
+    if let Some(c) = context_percent_label(proj.state.context.as_ref()) {
+        parts.push(format!("ctx:{c}"));
+    }
+    if let Some(t) = tokens_per_second_label(proj.state.tokens.as_ref()) {
+        parts.push(format!("{t}/s"));
+    }
+    let status = parts.join("  •  ");
 
     Ok((client, proj, status, models))
+}
+
+fn context_percent_label(v: Option<&serde_json::Value>) -> Option<String> {
+    let v = v?;
+    let pct = v
+        .get("percent")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| v.as_f64())?;
+    Some(format!("{pct:.0}%"))
+}
+
+fn tokens_per_second_label(v: Option<&serde_json::Value>) -> Option<String> {
+    let v = v?;
+    let tps = v
+        .get("tokensPerSecond")
+        .and_then(serde_json::Value::as_f64)
+        .or_else(|| v.as_f64())?;
+    if tps <= 0.0 {
+        return None;
+    }
+    Some(format!("{tps:.1}"))
 }
 
 fn thinking_label(v: Option<&serde_json::Value>) -> Option<String> {
@@ -1566,6 +1598,19 @@ mod tests {
             thinking_label(Some(&serde_json::json!({"level":"medium"}))).as_deref(),
             Some("medium")
         );
+    }
+    #[test]
+    fn context_and_tps_labels() {
+        assert_eq!(
+            context_percent_label(Some(&serde_json::json!({"percent": 8.378}))).as_deref(),
+            Some("8%")
+        );
+        assert_eq!(
+            tokens_per_second_label(Some(&serde_json::json!({"tokensPerSecond": 12.34})))
+                .as_deref(),
+            Some("12.3")
+        );
+        assert_eq!(tokens_per_second_label(Some(&serde_json::json!(0.0))), None);
     }
     #[test]
     fn phase_disallows_send_dead() {

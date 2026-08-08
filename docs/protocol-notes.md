@@ -84,3 +84,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `get_state.sessionFile` is remembered at `~/.pimiento/last-session` and passed as `--resume` on relaunch/Restart.
 - Stale resume pointers fall back to a fresh durable session.
 - Composer Enter sends `steer` while `RunPhase::Streaming`, otherwise `prompt`.
+
+## contextUsage / tokensPerSecond — 2026-08-08
+
+- `get_state` reports `contextUsage: { tokens, contextWindow, percent }` (not `context`).
+- `tokensPerSecond` is a top-level scalar (often null until a turn is streaming).
+- Pimiento promotes these into `RuntimeState.context` / `.tokens` for the status strip (`ctx:N%`, `N/s`).

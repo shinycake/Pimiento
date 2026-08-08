@@ -801,8 +801,13 @@ impl SessionProjection {
         }
         if let Some(t) = val_field("tokens").or_else(|| val_field("usage")) {
             self.state.tokens = Some(t);
+        } else if let Some(tps) = val_field("tokensPerSecond") {
+            // OMP often reports a bare tokensPerSecond scalar until a turn
+            // accumulates richer usage — keep it under the tokens blob.
+            self.state.tokens = Some(serde_json::json!({ "tokensPerSecond": tps }));
         }
-        if let Some(c) = val_field("context") {
+        // OMP 17.2.10 names this `contextUsage` (`{tokens,contextWindow,percent}`).
+        if let Some(c) = val_field("context").or_else(|| val_field("contextUsage")) {
             self.state.context = Some(c);
         }
         if let Some(todos) = val_field("todoPhases").or_else(|| val_field("todos")) {
