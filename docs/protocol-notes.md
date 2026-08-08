@@ -270,6 +270,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Session-rail visibility is disposable layout state stored as `{ "rail_collapsed": bool }` in `ui.json`; missing state defaults to expanded.
 - An empty projected assistant row renders a quiet muted ellipsis only while its wire-derived `streaming` flag is true. The cue contains no inferred assistant content and does not duplicate the toolbar phase.
 - The empty transcript presents one short sentence without key-command tips.
+- Completed thinking rows with empty text render as zero-height placeholders so list indices stay stable without showing a hollow "Thinking · expand" control.
 
 ## Palette theme label — 2026-08-08
 
