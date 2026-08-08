@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, ElementId, FollowMode, KeyDownEvent, ListAlignment,
-    ListState, PathPromptOptions, Render, Task, Window, WindowOptions, div, list, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, KeyDownEvent,
+    ListAlignment, ListOffset, ListState, PathPromptOptions, Render, Task, Window, WindowOptions,
+    div, list, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -212,6 +213,12 @@ struct SessionView {
     thinking_picker_open: bool,
     todo_panel_open: bool,
     subagent_drawer_open: bool,
+    /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
+    subagent_snapshots: Vec<serde_json::Value>,
+    selected_subagent_id: Option<String>,
+    subagent_tail_next_byte: Option<u64>,
+    subagent_tail_lines: Vec<String>,
+    subagent_drawer_status: String,
     pending_revert: Option<PendingRevert>,
     palette_open: bool,
     palette_query: String,
@@ -305,6 +312,11 @@ impl SessionView {
             thinking_picker_open: false,
             todo_panel_open,
             subagent_drawer_open: false,
+            subagent_snapshots: Vec::new(),
+            selected_subagent_id: None,
+            subagent_tail_next_byte: None,
+            subagent_tail_lines: Vec::new(),
+            subagent_drawer_status: String::new(),
             pending_revert: None,
             palette_open: false,
             palette_query: String::new(),
@@ -391,6 +403,7 @@ impl SessionView {
             self.session_cwd = None;
             self.projection = SessionProjection::new();
             self.todo_panel_open = false;
+            self.clear_subagent_drawer_state();
             self.available_models.clear();
             self.model_picker_open = false;
             self.thinking_picker_open = false;
@@ -531,6 +544,7 @@ impl SessionView {
         }
         self.projection = SessionProjection::new();
         self.todo_panel_open = false;
+        self.clear_subagent_drawer_state();
         self.available_models.clear();
         self.expanded_tools.clear();
         self.transcript_list.reset(0);
@@ -574,6 +588,54 @@ impl SessionView {
         self.transcript_list.set_follow_mode(FollowMode::Tail);
         self.unread_below = 0;
         cx.notify();
+    }
+
+    fn handle_transcript_nav_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = &event.keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.alt {
+            return false;
+        }
+        // capture_key_down runs before children — don't steal Home/End/Page*
+        // from the composer or model search while they own focus.
+        if self.composer.read(cx).focus_handle(cx).is_focused(window)
+            || self
+                .model_search
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            return false;
+        }
+
+        match event.keystroke.key.as_str() {
+            "pageup" | "page_up" => {
+                self.transcript_list.set_follow_mode(FollowMode::Normal);
+                self.transcript_list.scroll_by(px(-480.));
+            }
+            "pagedown" | "page_down" => {
+                self.transcript_list.set_follow_mode(FollowMode::Normal);
+                self.transcript_list.scroll_by(px(480.));
+            }
+            "home" => {
+                self.transcript_list.set_follow_mode(FollowMode::Normal);
+                self.transcript_list.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
+            }
+            "end" => {
+                self.jump_to_transcript_tail(cx);
+                return true;
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
     }
 
     fn start_catalog_load(&mut self, cx: &mut Context<Self>) {
@@ -634,7 +696,188 @@ impl SessionView {
 
     fn toggle_subagent_drawer(&mut self, cx: &mut Context<Self>) {
         self.subagent_drawer_open = !self.subagent_drawer_open;
+        if self.subagent_drawer_open {
+            self.refresh_subagents(cx);
+        }
         cx.notify();
+    }
+
+    fn clear_subagent_drawer_state(&mut self) {
+        self.subagent_drawer_open = false;
+        self.subagent_snapshots.clear();
+        self.selected_subagent_id = None;
+        self.subagent_tail_next_byte = None;
+        self.subagent_tail_lines.clear();
+        self.subagent_drawer_status.clear();
+    }
+
+    fn refresh_subagents(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            "OMP is not connected".clone_into(&mut self.subagent_drawer_status);
+            return;
+        };
+        "Loading agents…".clone_into(&mut self.subagent_drawer_status);
+        cx.spawn(async move |view, cx| {
+            let result = client.send(RpcCommandBody::GetSubagents).await;
+            let _ = view.update(cx, |this, cx| match result {
+                Ok(response) if response.success => {
+                    let snapshots = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("subagents"))
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    this.apply_subagent_snapshots(snapshots, cx);
+                }
+                Ok(response) => {
+                    this.subagent_drawer_status = response
+                        .error
+                        .unwrap_or_else(|| "get_subagents failed".to_owned());
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.subagent_drawer_status = format!("get_subagents: {error}");
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn apply_subagent_snapshots(
+        &mut self,
+        snapshots: Vec<serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        self.subagent_snapshots = snapshots;
+        let selection_is_present = self.selected_subagent_id.as_ref().is_some_and(|selected| {
+            self.subagent_snapshots
+                .iter()
+                .any(|snapshot| subagent_snapshot_id(snapshot) == Some(selected.as_str()))
+        });
+        if !selection_is_present {
+            self.selected_subagent_id = self
+                .subagent_snapshots
+                .iter()
+                .find_map(subagent_snapshot_id)
+                .map(str::to_owned);
+            self.subagent_tail_next_byte = None;
+            self.subagent_tail_lines.clear();
+        }
+
+        if let Some(selected) = self.selected_subagent_id.clone() {
+            let from_byte = self.subagent_tail_next_byte;
+            self.fetch_subagent_messages(selected, from_byte, cx);
+        } else if self.projection.subagents_raw.is_empty() {
+            "No agents reported".clone_into(&mut self.subagent_drawer_status);
+        } else {
+            "No snapshots; showing recent agent events"
+                .clone_into(&mut self.subagent_drawer_status);
+        }
+        cx.notify();
+    }
+
+    fn select_subagent(&mut self, subagent_id: String, cx: &mut Context<Self>) {
+        if self.selected_subagent_id.as_deref() == Some(subagent_id.as_str()) {
+            return;
+        }
+        self.selected_subagent_id = Some(subagent_id.clone());
+        self.subagent_tail_next_byte = None;
+        self.subagent_tail_lines.clear();
+        self.fetch_subagent_messages(subagent_id, None, cx);
+        cx.notify();
+    }
+
+    fn fetch_subagent_messages(
+        &mut self,
+        subagent_id: String,
+        from_byte: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            "OMP is not connected".clone_into(&mut self.subagent_drawer_status);
+            return;
+        };
+        let session_file = self
+            .subagent_snapshots
+            .iter()
+            .find(|snapshot| subagent_snapshot_id(snapshot) == Some(subagent_id.as_str()))
+            .and_then(subagent_snapshot_session_file)
+            .map(str::to_owned);
+        self.subagent_drawer_status = if from_byte.is_some() {
+            "Refreshing messages…".to_owned()
+        } else {
+            "Loading messages…".to_owned()
+        };
+        cx.spawn(async move |view, cx| {
+            let result = client
+                .send(RpcCommandBody::GetSubagentMessages {
+                    subagent_id: Some(subagent_id.clone()),
+                    session_file,
+                    from_byte,
+                })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                if this.selected_subagent_id.as_deref() != Some(subagent_id.as_str()) {
+                    return;
+                }
+                match result {
+                    Ok(response) if response.success => {
+                        this.apply_subagent_message_page(response.data.as_ref(), &subagent_id);
+                    }
+                    Ok(response) => {
+                        this.subagent_drawer_status = response
+                            .error
+                            .unwrap_or_else(|| "get_subagent_messages failed".to_owned());
+                    }
+                    Err(error) => {
+                        this.subagent_drawer_status = format!("get_subagent_messages: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_subagent_message_page(&mut self, data: Option<&serde_json::Value>, subagent_id: &str) {
+        let Some(data) = data else {
+            "No message payload returned".clone_into(&mut self.subagent_drawer_status);
+            return;
+        };
+        if data.get("reset").and_then(serde_json::Value::as_bool) == Some(true) {
+            self.subagent_tail_lines.clear();
+        }
+        self.subagent_tail_next_byte = data.get("nextByte").and_then(serde_json::Value::as_u64);
+        // Prefer wire `messages` (AgentMessage[]). Only fall back to `entries`
+        // when `messages` is absent — an empty messages array is authoritative.
+        let digests: Vec<String> = if let Some(messages) =
+            data.get("messages").and_then(serde_json::Value::as_array)
+        {
+            messages.iter().map(subagent_message_digest).collect()
+        } else if let Some(entries) = data.get("entries").and_then(serde_json::Value::as_array) {
+            entries.iter().map(subagent_message_digest).collect()
+        } else {
+            Vec::new()
+        };
+        if !digests.is_empty() {
+            self.subagent_tail_lines.extend(digests);
+            let excess = self.subagent_tail_lines.len().saturating_sub(80);
+            if excess > 0 {
+                self.subagent_tail_lines.drain(..excess);
+            }
+        }
+        self.subagent_drawer_status = format!(
+            "{} · {} line(s){}",
+            subagent_id,
+            self.subagent_tail_lines.len(),
+            if data.get("reset").and_then(serde_json::Value::as_bool) == Some(true) {
+                " (reset)"
+            } else {
+                ""
+            }
+        );
     }
 
     fn export_html(&mut self, cx: &mut Context<Self>) {
@@ -2421,7 +2664,10 @@ impl Render for SessionView {
         let todo_count = todo_open_count(&todo_phases);
         let todo_button_label = format!("Todos ({todo_count})");
         let show_todo_panel = self.todo_panel_open && !todo_phases.is_empty();
-        let subagent_count = self.projection.subagents_raw.len();
+        let subagent_count = self
+            .subagent_snapshots
+            .len()
+            .max(self.projection.subagents_raw.len());
         let subagent_button_label = if subagent_count == 0 {
             "Agents".to_owned()
         } else if self.subagent_drawer_open {
@@ -2429,7 +2675,26 @@ impl Render for SessionView {
         } else {
             format!("Agents ({subagent_count}) >")
         };
-        let show_subagent_drawer = self.subagent_drawer_open && subagent_count > 0;
+        let show_subagent_drawer = self.subagent_drawer_open;
+        let subagent_rows: Vec<(String, String)> = self
+            .subagent_snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                subagent_snapshot_id(snapshot)
+                    .map(|id| (id.to_owned(), subagent_snapshot_summary(snapshot)))
+            })
+            .collect();
+        let selected_subagent_id = self.selected_subagent_id.clone();
+        let subagent_tail_lines = self.subagent_tail_lines.clone();
+        let subagent_drawer_status = self.subagent_drawer_status.clone();
+        let fallback_subagent_events: Vec<String> = self
+            .projection
+            .subagents_raw
+            .iter()
+            .rev()
+            .take(12)
+            .map(subagent_payload_summary)
+            .collect();
         let compacting = matches!(self.projection.run_phase, RunPhase::Compacting);
         let retrying = matches!(self.projection.run_phase, RunPhase::Retrying);
         let can_pick = self.client.is_some();
@@ -2485,7 +2750,8 @@ impl Render for SessionView {
                     .capture_key_down(cx.listener(|this, event, window, cx| {
                         let handled = this.handle_palette_key(event, window, cx)
                             || this.handle_dialog_key(event, cx)
-                            || this.handle_slash_key(event, window, cx);
+                            || this.handle_slash_key(event, window, cx)
+                            || this.handle_transcript_nav_key(event, window, cx);
                         if handled {
                             cx.stop_propagation();
                         }
@@ -2570,7 +2836,7 @@ impl Render for SessionView {
                                                     .label(subagent_button_label)
                                                     .small()
                                                     .ghost()
-                                                    .disabled(subagent_count == 0)
+                                                    .disabled(!can_pick)
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
                                                             this.toggle_subagent_drawer(cx);
@@ -2729,24 +2995,101 @@ impl Render for SessionView {
                                 .px_3()
                                 .py_2()
                                 .gap_1()
-                                .max_h(px(160.))
+                                .max_h(px(250.))
                                 .overflow_y_scrollbar()
                                 .border_b_1()
                                 .border_color(theme.border)
                                 .bg(theme.secondary)
-                                .children(
-                                    self.projection
-                                        .subagents_raw
-                                        .iter()
-                                        .enumerate()
-                                        .rev()
-                                        .take(12)
-                                        .map(|(ix, payload)| {
-                                            let summary = subagent_payload_summary(payload);
-                                            Label::new(format!("#{ix} {summary}"))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .child(Label::new("Agents").text_sm())
+                                        .child(
+                                            Button::new("subagent-drawer-refresh")
+                                                .label("Refresh")
+                                                .small()
+                                                .ghost()
+                                                .disabled(!can_pick)
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _window, cx| {
+                                                        this.refresh_subagents(cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    Label::new(subagent_drawer_status.clone())
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .when(!subagent_rows.is_empty(), |panel| {
+                                    panel.child(
+                                        div()
+                                            .w_full()
+                                            .max_h(px(88.))
+                                            .overflow_y_scrollbar()
+                                            .children(subagent_rows.iter().enumerate().map(
+                                                |(ix, (id, summary))| {
+                                                    let id = id.clone();
+                                                    let selected = selected_subagent_id.as_deref()
+                                                        == Some(id.as_str());
+                                                    Button::new(("subagent-choice", ix))
+                                                    .label(summary.clone())
+                                                    .small()
+                                                    .w_full()
+                                                    .when(selected, Button::primary)
+                                                    .when(!selected, Button::ghost)
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _window, cx| {
+                                                            this.select_subagent(id.clone(), cx);
+                                                        },
+                                                    ))
+                                                },
+                                            )),
+                                    )
+                                })
+                                .when(!subagent_tail_lines.is_empty(), |panel| {
+                                    panel.child(
+                                        div()
+                                            .w_full()
+                                            .max_h(px(108.))
+                                            .overflow_y_scrollbar()
+                                            .children(subagent_tail_lines.iter().enumerate().map(
+                                                |(ix, line)| {
+                                                    Label::new(format!("{ix}: {line}"))
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                },
+                                            )),
+                                    )
+                                })
+                                .when(
+                                    subagent_rows.is_empty()
+                                        && !fallback_subagent_events.is_empty(),
+                                    |panel| {
+                                        panel.children(
+                                            fallback_subagent_events.iter().enumerate().map(
+                                                |(ix, summary)| {
+                                                    Label::new(format!("#{ix} {summary}"))
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground)
+                                                },
+                                            ),
+                                        )
+                                    },
+                                )
+                                .when(
+                                    subagent_rows.is_empty()
+                                        && fallback_subagent_events.is_empty()
+                                        && subagent_drawer_status.is_empty(),
+                                    |panel| {
+                                        panel.child(
+                                            Label::new("No agents reported")
                                                 .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                        }),
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                    },
                                 ),
                         )
                     })
@@ -3107,6 +3450,101 @@ fn subagent_payload_summary(payload: &serde_json::Value) -> String {
         format!("{kind} {name}")
     } else {
         format!("{kind} {name}: {detail}")
+    }
+}
+
+fn subagent_snapshot_id(snapshot: &serde_json::Value) -> Option<&str> {
+    snapshot.get("id").and_then(serde_json::Value::as_str)
+}
+
+fn subagent_snapshot_session_file(snapshot: &serde_json::Value) -> Option<&str> {
+    snapshot
+        .get("sessionFile")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn subagent_snapshot_summary(snapshot: &serde_json::Value) -> String {
+    let id = subagent_snapshot_id(snapshot).unwrap_or("unknown");
+    let agent = snapshot
+        .get("agent")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("agent");
+    let status = snapshot
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let description = snapshot
+        .get("description")
+        .or_else(|| snapshot.get("task"))
+        .or_else(|| snapshot.get("assignment"))
+        .map(compact_subagent_value)
+        .unwrap_or_default();
+    if description.is_empty() {
+        format!("{agent} · {status} · {id}")
+    } else {
+        format!("{agent} · {status} · {id}: {description}")
+    }
+}
+
+fn subagent_message_digest(message: &serde_json::Value) -> String {
+    let role = message
+        .get("role")
+        .or_else(|| message.get("message").and_then(|value| value.get("role")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("message");
+    let content = message
+        .get("content")
+        .or_else(|| {
+            message
+                .get("message")
+                .and_then(|value| value.get("content"))
+        })
+        .map_or_else(|| compact_subagent_value(message), compact_subagent_value);
+    format!("{role}: {content}")
+}
+
+fn compact_subagent_value(value: &serde_json::Value) -> String {
+    let text = match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .find_map(subagent_text_part)
+            .unwrap_or_else(|| compact_json(value)),
+        serde_json::Value::Object(object) => object
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| compact_json(value), str::to_owned),
+        _ => compact_json(value),
+    };
+    truncate_subagent_text(&text, 120)
+}
+
+fn subagent_text_part(part: &serde_json::Value) -> Option<String> {
+    part.as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            part.get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .or_else(|| {
+            part.get("content")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+}
+
+fn compact_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "<unrenderable JSON>".to_owned())
+}
+
+fn truncate_subagent_text(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let prefix: String = chars.by_ref().take(limit).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 

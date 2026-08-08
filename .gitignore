@@ -23,3 +23,8 @@
 *.profraw
 
 # NOTE: Cargo.lock IS committed (workspace with binary crate); do not add it here.
+
+# Local OMP session HTML exports (can be tens of MB)
+omp-session-*.html
+
+omp-session-*.html
