@@ -169,6 +169,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Error, notice, command-output, unknown-frame, and expanded tool rows expose small copy actions using only their projected text or JSON fields.
 - User rows expose the same ghost `Copy` action and copy only the submitted user text.
+- Assistant rows expose a ghost `Copy` action that copies the projected Markdown source; per-code-block copy remains available.
 
 ## Esc abort arming — 2026-08-08
 
