@@ -70,6 +70,7 @@ pub(crate) struct SessionView {
     pub(crate) running_tool_timer: Option<Task<()>>,
     pub(crate) clear_composer: bool,
     pub(crate) pending_composer_value: Option<String>,
+    pub(crate) refocus_composer: bool,
     pub(crate) clear_model_search: bool,
     /// Virtualized transcript list (GPUI `ListState`, bottom-aligned chat).
     pub(crate) transcript_list: ListState,
@@ -174,6 +175,7 @@ impl SessionView {
             running_tool_timer: None,
             clear_composer: false,
             pending_composer_value: None,
+            refocus_composer: false,
             clear_model_search: false,
             transcript_list,
             last_transcript_len: initial_len,
@@ -1132,6 +1134,7 @@ impl SessionView {
         self.projection.push_user_message(text.clone());
         self.close_slash_menu();
         self.clear_composer = true;
+        self.refocus_composer = true;
         cx.notify();
 
         cx.spawn(async move |_, _| {
@@ -1176,6 +1179,7 @@ impl SessionView {
 
     pub(crate) fn accept_slash_command(&mut self, command: &SlashCommand, cx: &mut Context<Self>) {
         self.pending_composer_value = Some(slash_completion_text(command));
+        self.refocus_composer = true;
         self.close_slash_menu();
         cx.notify();
     }
@@ -1444,6 +1448,7 @@ impl SessionView {
 
         self.projection.push_user_message(text.clone());
         self.clear_composer = true;
+        self.refocus_composer = true;
         cx.notify();
 
         cx.spawn(async move |_, _| {
@@ -2274,6 +2279,12 @@ impl Render for SessionView {
                 input.set_value("", window, cx);
             });
         }
+        if self.refocus_composer {
+            self.refocus_composer = false;
+            self.composer.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
         if self.clear_model_search {
             self.clear_model_search = false;
             self.model_search.update(cx, |input, cx| {
@@ -2399,7 +2410,12 @@ impl Render for SessionView {
                                         h_flex()
                                             .gap_2()
                                             .child(
-                                                Label::new(self.status_message.clone()).text_xs(),
+                                                Label::new(self.status_message.clone())
+                                                    .text_xs()
+                                                    .when(
+                                                        self.status_message == ABORT_ARM_STATUS,
+                                                        |label| label.text_color(theme.warning),
+                                                    ),
                                             )
                                             .child(
                                                 Label::new(phase_label)
@@ -2842,6 +2858,15 @@ impl Render for SessionView {
                                                 }),
                                         )
                                     }),
+                            )
+                            .child(
+                                Label::new(if cfg!(target_os = "macos") {
+                                    "⌘↩"
+                                } else {
+                                    "Ctrl+Enter"
+                                })
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
                             )
                             .child(
                                 Button::new("send")
