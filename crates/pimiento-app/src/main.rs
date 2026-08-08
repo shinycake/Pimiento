@@ -370,12 +370,14 @@ struct SessionView {
     subagent_drawer_status: String,
     pending_revert: Option<PendingRevert>,
     palette_open: bool,
+    about_open: bool,
     palette_query: String,
     palette_selected: usize,
     pending_workspace_palette: Option<PaletteActionId>,
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
+    omp_version: Option<String>,
     abort_arm: Option<AbortArm>,
     abort_arm_generation: u64,
     available_models: Vec<ModelChoice>,
@@ -455,6 +457,9 @@ impl SessionView {
         } else {
             LauncherPhase::Hidden
         };
+        let omp_version = client
+            .as_ref()
+            .and_then(|_| (!status.trim().is_empty()).then(|| status.trim().to_owned()));
         let mut view = Self {
             projection: initial_projection,
             client,
@@ -469,12 +474,14 @@ impl SessionView {
             subagent_drawer_status: String::new(),
             pending_revert: None,
             palette_open: false,
+            about_open: false,
             palette_query: String::new(),
             palette_selected: 0,
             pending_workspace_palette: None,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
+            omp_version,
             abort_arm: None,
             abort_arm_generation: 0,
             available_models,
@@ -618,6 +625,7 @@ impl SessionView {
             Ok((client, projection, status, models)) => {
                 self.available_models = models;
                 self.projection = projection;
+                self.omp_version = Some(status.clone());
                 self.status_message = status;
                 self.client = Some(client.clone());
                 self.session_cwd = Some(cwd);
@@ -1770,14 +1778,16 @@ impl SessionView {
             .size_full()
             .items_center()
             .justify_center()
-            .p_4()
+            .px_6()
+            .py_6()
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(
                 v_flex()
                     .w_full()
-                    .max_w(px(720.))
-                    .p_8()
+                    .max_w(px(520.))
+                    .px_6()
+                    .py_6()
                     .gap_4()
                     .rounded_md()
                     .bg(theme.muted)
@@ -1787,12 +1797,12 @@ impl SessionView {
                         v_flex()
                             .gap_1()
                             .child(
-                                Label::new("Start a Pimiento session")
+                                Label::new("Pimiento")
                                     .text_lg()
                                     .font_weight(gpui::FontWeight::SEMIBOLD),
                             )
                             .child(
-                                Label::new("Choose where OMP should work, or resume a recent session.")
+                                Label::new("Drive your existing omp from a focused native workspace.")
                                     .text_sm()
                                     .text_color(theme.muted_foreground),
                             ),
@@ -1815,7 +1825,7 @@ impl SessionView {
                             .gap_2()
                             .child(
                                 Button::new("start-working-directory")
-                                    .label("Start here")
+                                    .label("Start")
                                     .primary()
                                     .disabled(connecting)
                                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -1894,7 +1904,7 @@ impl SessionView {
                         parent.child(
                             v_flex()
                                 .gap_2()
-                                .child(Separator::horizontal().label("Recent sessions"))
+                                .child(Separator::horizontal().label("Recent"))
                                 .children(recents.into_iter().enumerate().map(|(ix, recent)| {
                                     let cwd = recent.cwd.clone();
                                     let resume = recent.session_file.clone();
@@ -2010,6 +2020,7 @@ impl SessionView {
     fn toggle_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = !self.palette_open;
         if self.palette_open {
+            self.about_open = false;
             self.palette_query.clear();
             self.palette_selected = 0;
             self.model_picker_open = false;
@@ -2024,6 +2035,19 @@ impl SessionView {
             self.palette_open = false;
             self.palette_query.clear();
             self.palette_selected = 0;
+            cx.notify();
+        }
+    }
+
+    fn show_about(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        self.about_open = true;
+        cx.notify();
+    }
+
+    fn close_about(&mut self, cx: &mut Context<Self>) {
+        if self.about_open {
+            self.about_open = false;
             cx.notify();
         }
     }
@@ -2121,6 +2145,7 @@ impl SessionView {
     ) {
         self.close_palette(cx);
         match id {
+            PaletteActionId::About => self.show_about(cx),
             PaletteActionId::ToggleTheme => cycle_theme_preference(window, cx),
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
             PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
@@ -2209,6 +2234,21 @@ impl SessionView {
             }
             _ => true, // swallow while open
         }
+    }
+
+    fn handle_about_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if !self.about_open {
+            return false;
+        }
+        if !event.keystroke.modifiers.modified()
+            && matches!(
+                event.keystroke.key.as_str(),
+                "escape" | "esc" | "enter" | "return"
+            )
+        {
+            self.close_about(cx);
+        }
+        true
     }
 
     fn rail_entry(&self, ix: usize) -> RailEntry {
@@ -2390,6 +2430,7 @@ struct PendingRevert {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaletteActionId {
+    About,
     ToggleTheme,
     ToggleTodos,
     ToggleAgents,
@@ -2416,6 +2457,11 @@ struct PaletteEntry {
 
 fn palette_catalog() -> &'static [PaletteEntry] {
     &[
+        PaletteEntry {
+            id: PaletteActionId::About,
+            label: "About Pimiento",
+            hint: "version app information",
+        },
         PaletteEntry {
             id: PaletteActionId::ToggleTheme,
             label: "Toggle theme",
@@ -3096,8 +3142,8 @@ fn render_inspector(
             cwd,
             state
                 .model
-                .clone()
-                .unwrap_or_else(|| "Unknown model".to_owned()),
+                .as_deref()
+                .map_or_else(|| "Unknown model".to_owned(), short_model_label),
             thinking_label(state.thinking.as_ref()).unwrap_or_else(|| "unknown".to_owned()),
             phase,
             context_percent(state.context.as_ref()),
@@ -3838,7 +3884,8 @@ impl Render for SessionView {
                     .bg(theme.background)
                     .text_color(theme.foreground)
                     .capture_key_down(cx.listener(|this, event, window, cx| {
-                        let handled = this.handle_palette_key(event, window, cx)
+                        let handled = this.handle_about_key(event, cx)
+                            || this.handle_palette_key(event, window, cx)
                             || this.handle_dialog_key(event, cx)
                             || this.handle_slash_key(event, window, cx)
                             || this.handle_abort_esc_key(event, cx)
@@ -4410,6 +4457,63 @@ impl Render for SessionView {
                                             .text_color(theme.muted_foreground),
                                     )
                                 }),
+                        ),
+                )
+            })
+            .when(self.about_open, |parent| {
+                let version = self.omp_version.as_deref().map_or_else(
+                    || "OMP version unavailable".to_owned(),
+                    |version| format!("OMP version: {version}"),
+                );
+                parent.child(
+                    div()
+                        .id("about-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(gpui::rgba(0x0000_0080))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_about(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("about-panel")
+                                .w(px(360.))
+                                .gap_3()
+                                .p_5()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.background)
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Pimiento")
+                                        .text_lg()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new("A native client for OMP rpc-ui.")
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(Label::new(version).text_sm())
+                                .child(
+                                    Label::new("Local-only · no telemetry")
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(h_flex().w_full().justify_end().child(
+                                    Button::new("about-ok").label("OK").primary().on_click(
+                                        cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                            this.close_about(cx);
+                                        }),
+                                    ),
+                                )),
                         ),
                 )
             })
@@ -5288,13 +5392,17 @@ fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyE
         .unwrap_or(&dialog.method);
     v_flex()
         .w_full()
-        .p_3()
-        .gap_2()
+        .p_4()
+        .gap_3()
         .rounded_md()
         .bg(theme.secondary)
         .border_1()
         .border_color(theme.border)
-        .child(Label::new(gpui::SharedString::from(title.to_owned())).text_sm())
+        .child(
+            Label::new(gpui::SharedString::from(title.to_owned()))
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD),
+        )
         .when_some(
             dialog
                 .payload
@@ -5363,7 +5471,21 @@ fn render_confirm_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gp
     let id_yes = dialog.id.clone();
     let id_no = dialog.id.clone();
     h_flex()
+        .w_full()
+        .justify_end()
         .gap_2()
+        .child({
+            let view = view.clone();
+            Button::new("confirm-no")
+                .label("N No")
+                .small()
+                .ghost()
+                .on_click(move |_, _, cx| {
+                    let mut fields = serde_json::Map::new();
+                    fields.insert("accepted".into(), serde_json::Value::Bool(false));
+                    do_dialog_response(&view, &id_no, fields, cx);
+                })
+        })
         .child({
             let view = view.clone();
             Button::new("confirm-yes")
@@ -5374,17 +5496,6 @@ fn render_confirm_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gp
                     let mut fields = serde_json::Map::new();
                     fields.insert("accepted".into(), serde_json::Value::Bool(true));
                     do_dialog_response(&view, &id_yes, fields, cx);
-                })
-        })
-        .child({
-            let view = view.clone();
-            Button::new("confirm-no")
-                .label("N No")
-                .small()
-                .on_click(move |_, _, cx| {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("accepted".into(), serde_json::Value::Bool(false));
-                    do_dialog_response(&view, &id_no, fields, cx);
                 })
         })
         .into_any_element()
@@ -5448,18 +5559,10 @@ fn render_open_url_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> g
         .child(div().text_xs().font_family("Menlo").child(url.clone()))
         .child(
             h_flex()
+                .w_full()
+                .justify_end()
                 .gap_2()
-                .child({
-                    let url_c = url.clone();
-                    Button::new(format!("open-url-{id}"))
-                        .label("Open")
-                        .small()
-                        .primary()
-                        .disabled(url.is_empty())
-                        .on_click(move |_, _, _cx| {
-                            open_url_in_os_browser(&url_c);
-                        })
-                })
+                .child(render_cancel_button(dialog, cx))
                 .child({
                     let url_c = url.clone();
                     Button::new(format!("copy-url-{id}"))
@@ -5471,7 +5574,17 @@ fn render_open_url_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> g
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(url_c.clone()));
                         })
                 })
-                .child(render_cancel_button(dialog, cx)),
+                .child({
+                    let url_c = url.clone();
+                    Button::new(format!("open-url-{id}"))
+                        .label("Open")
+                        .small()
+                        .primary()
+                        .disabled(url.is_empty())
+                        .on_click(move |_, _, _cx| {
+                            open_url_in_os_browser(&url_c);
+                        })
+                }),
         )
         .into_any_element()
 }
@@ -6628,6 +6741,8 @@ mod tests {
 
     #[test]
     fn filter_palette_entries_matches_label_and_hint() {
+        let hits = filter_palette_entries("about");
+        assert!(hits.iter().any(|e| e.id == PaletteActionId::About));
         let hits = filter_palette_entries("theme");
         assert!(hits.iter().any(|e| e.id == PaletteActionId::ToggleTheme));
         let hits = filter_palette_entries("rail");
