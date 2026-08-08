@@ -13,7 +13,10 @@ open dist/Pimiento.app
 ```
 
 The script builds `pimiento-app` in release mode and assembles
-`dist/Pimiento.app`. Re-running it replaces the existing bundle.
+`dist/Pimiento.app`. It rasterizes the checked-in
+`assets/pimiento-icon.svg` into the required sizes, combines them into
+`Contents/Resources/Pimiento.icns`, and declares that icon in the bundle's
+`Info.plist`. Re-running it replaces the existing bundle.
 
 ## Install for the current user
 
