@@ -1280,6 +1280,9 @@ impl SessionView {
 
     /// Honest reason when Send/Steer is disabled (Doctrine: disabled-with-reason).
     pub(crate) fn send_disabled_reason(&self) -> Option<&'static str> {
+        if self.can_send() {
+            return None;
+        }
         if !self.projection.pending_dialogs.is_empty() {
             return Some("Answer the dialog above first");
         }
@@ -1289,8 +1292,7 @@ impl SessionView {
         match self.projection.run_phase {
             RunPhase::Dead => Some("Session dead — Restart from the crash card"),
             RunPhase::Restarting => Some("Restarting omp…"),
-            RunPhase::Compacting => Some("Compacting — wait or abort"),
-            _ => None,
+            _ => Some("Send is unavailable"),
         }
     }
 
