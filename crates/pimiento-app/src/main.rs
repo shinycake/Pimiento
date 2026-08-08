@@ -34,7 +34,7 @@ use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
     projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
     todos::{TodoPhaseView, TodoTaskView, parse_todo_phases, todo_status_glyph},
-    transcript::{ToolStatus, TranscriptEntry},
+    transcript::{CompactionPhase, ToolStatus, TranscriptEntry},
 };
 use serde::{Deserialize, Serialize};
 
@@ -2697,6 +2697,8 @@ impl Render for SessionView {
             .collect();
         let compacting = matches!(self.projection.run_phase, RunPhase::Compacting);
         let retrying = matches!(self.projection.run_phase, RunPhase::Retrying);
+        let fallback_banner = self.projection.fallback_banner.clone();
+        let show_activity_banner = compacting || retrying || fallback_banner.is_some();
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -2973,7 +2975,7 @@ impl Render for SessionView {
                                 )
                             }),
                     )
-                    .when(compacting || retrying, |parent| {
+                    .when(show_activity_banner, |parent| {
                         parent.child(
                             div()
                                 .w_full()
@@ -2981,8 +2983,10 @@ impl Render for SessionView {
                                 .py_1()
                                 .bg(theme.warning)
                                 .text_xs()
-                                .child(if compacting {
-                                    "Compacting session…".to_owned()
+                                .child(if let Some(fallback_banner) = fallback_banner {
+                                    fallback_banner
+                                } else if compacting {
+                                    "Compacting…".to_owned()
                                 } else {
                                     "Auto-retry in progress…".to_owned()
                                 }),
@@ -3688,26 +3692,54 @@ fn render_entry(
                     .child(text.clone()),
             )
             .into_any_element(),
-        TranscriptEntry::Compaction { phase } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("compaction: {phase:?}")),
-            )
-            .into_any_element(),
-        TranscriptEntry::RetryInfo { detail } => div()
-            .w_full()
-            .py_1()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(format!("retry: {detail}")),
-            )
-            .into_any_element(),
+        TranscriptEntry::Compaction { phase } => {
+            let (label, tint) = match phase {
+                CompactionPhase::Started | CompactionPhase::Progress => {
+                    ("Compacting…", theme.warning)
+                }
+                CompactionPhase::Completed => ("Compaction complete", theme.success),
+                CompactionPhase::Failed => ("Compaction failed", theme.danger),
+            };
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.muted)
+                        .text_xs()
+                        .text_color(tint)
+                        .child(label),
+                )
+                .into_any_element()
+        }
+        TranscriptEntry::RetryInfo { detail } => {
+            let retrying =
+                detail.starts_with("auto-retry started") || detail.starts_with("fallback applied");
+            let tint = if retrying {
+                theme.warning
+            } else if detail.starts_with("fallback succeeded") {
+                theme.success
+            } else {
+                theme.muted_foreground
+            };
+            div()
+                .w_full()
+                .py_1()
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.muted)
+                        .text_xs()
+                        .text_color(tint)
+                        .child(detail.clone()),
+                )
+                .into_any_element()
+        }
         TranscriptEntry::Unknown { raw } => div()
             .w_full()
             .py_1()

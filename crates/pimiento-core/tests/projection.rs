@@ -460,18 +460,84 @@ fn compaction_lifecycle_transitions_phase() {
 fn retry_lifecycle_transitions_phase() {
     let mut p = SessionProjection::new();
     apply(&mut p, json!({ "type": "agent_start" }));
-    apply(&mut p, json!({ "type": "auto_retry_start" }));
+    apply(
+        &mut p,
+        json!({ "type": "auto_retry_start", "attempt": 2, "maxAttempts": 3 }),
+    );
     assert_eq!(p.run_phase, RunPhase::Retrying);
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::RetryInfo { detail }) if detail == "auto-retry started (attempt 2/3)"
+    ));
     apply(&mut p, json!({ "type": "auto_retry_end" }));
     assert_eq!(p.run_phase, RunPhase::Streaming);
-    apply(&mut p, json!({ "type": "retry_fallback_applied" }));
-    apply(&mut p, json!({ "type": "retry_fallback_succeeded" }));
+    apply(
+        &mut p,
+        json!({
+            "type": "retry_fallback_applied",
+            "from": "cursor/a",
+            "to": "cursor/b",
+            "role": "task"
+        }),
+    );
+    assert_eq!(
+        p.fallback_banner.as_deref(),
+        Some("Using fallback model cursor/b (instead of cursor/a) for task")
+    );
+    apply(
+        &mut p,
+        json!({
+            "type": "retry_fallback_succeeded",
+            "model": "cursor/b",
+            "role": "task"
+        }),
+    );
+    assert_eq!(p.fallback_banner, None);
     let retries = p
         .transcript
         .iter()
         .filter(|e| matches!(e, TranscriptEntry::RetryInfo { .. }))
         .count();
     assert_eq!(retries, 4);
+}
+
+#[test]
+fn fallback_rows_are_human_readable_when_fields_are_missing() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "retry_fallback_applied", "to": "cursor/b" }),
+    );
+    apply(&mut p, json!({ "type": "retry_fallback_succeeded" }));
+
+    let details: Vec<_> = p
+        .transcript
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptEntry::RetryInfo { detail } => Some(detail.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        details,
+        ["fallback applied: cursor/b", "fallback succeeded"]
+    );
+    assert_eq!(p.fallback_banner, None);
+}
+
+#[test]
+fn retry_end_clears_an_active_fallback_banner() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "retry_fallback_applied", "to": "cursor/b" }),
+    );
+    assert_eq!(
+        p.fallback_banner.as_deref(),
+        Some("Using fallback model cursor/b")
+    );
+    apply(&mut p, json!({ "type": "auto_retry_end" }));
+    assert_eq!(p.fallback_banner, None);
 }
 
 // ---------------------------------------------------------------------------

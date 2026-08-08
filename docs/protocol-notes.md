@@ -158,3 +158,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `get_subagents` returns `{ subagents: RpcSubagentSnapshot[] }`; the Agents drawer renders each snapshot tolerantly, preserving raw values rather than assuming every optional field exists.
 - `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back on refresh for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied.
 - PageUp/PageDown/Home/End navigate the transcript `ListState`; PageUp/PageDown/Home leave tail-follow mode and End re-enables it at the transcript tail. Keys are ignored while the composer or model-search input is focused so Home/End still move the caret.
+
+## Compaction and retry fallback UX — 2026-08-08
+
+- `retry_fallback_applied` carries `{ from, to, role }`; `retry_fallback_succeeded` carries `{ model, role }`. Pimiento reads these only from the retained raw event JSON, emits human-readable retry rows, and omits missing values without guessing.
+- An applied fallback sets a wire-derived sticky banner (`Using fallback model …`); OMP's fallback-success or retry-end event clears it. `auto_retry_*` attempt counts are rendered only when supplied by the raw event.
+- `auto_compaction_start/end` render as `Compacting…` and `Compaction complete`, rather than debug enum names.

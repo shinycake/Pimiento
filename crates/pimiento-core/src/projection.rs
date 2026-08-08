@@ -152,6 +152,9 @@ pub struct SessionProjection {
     pub pending_dialogs: Vec<UiDialog>,
     /// Current run-phase state machine value.
     pub run_phase: RunPhase,
+    /// Wire-derived fallback-model notice shown while a retry fallback is
+    /// active. Cleared once OMP reports retry completion or fallback success.
+    pub fallback_banner: Option<String>,
     /// Non-dialog extension UI display state.
     pub display: DisplayState,
 
@@ -212,13 +215,13 @@ impl SessionProjection {
 
             IncomingFrameKind::AutoCompactionStart => self.apply_compaction_start(),
             IncomingFrameKind::AutoCompactionEnd => self.apply_compaction_end(),
-            IncomingFrameKind::AutoRetryStart => self.apply_retry_start(),
-            IncomingFrameKind::AutoRetryEnd => self.apply_retry_end(),
+            IncomingFrameKind::AutoRetryStart => self.apply_retry_start(&frame.raw),
+            IncomingFrameKind::AutoRetryEnd => self.apply_retry_end(&frame.raw),
             IncomingFrameKind::RetryFallbackApplied => {
-                self.push_retry_info("retry_fallback_applied");
+                self.apply_retry_fallback_applied(&frame.raw);
             }
             IncomingFrameKind::RetryFallbackSucceeded => {
-                self.push_retry_info("retry_fallback_succeeded");
+                self.apply_retry_fallback_succeeded(&frame.raw);
             }
             IncomingFrameKind::ModelChanged => self.apply_model_changed(&frame.raw),
             IncomingFrameKind::ThinkingLevelChanged(t) => self.apply_thinking_level(t),
@@ -365,14 +368,35 @@ impl SessionProjection {
         });
     }
 
-    fn apply_retry_start(&mut self) {
+    fn apply_retry_start(&mut self, raw: &Value) {
         self.run_phase = RunPhase::Retrying;
-        self.push_retry_info("auto_retry_start");
+        self.push_retry_info(retry_event_detail("auto-retry started", raw));
     }
 
-    fn apply_retry_end(&mut self) {
+    fn apply_retry_end(&mut self, raw: &Value) {
         self.run_phase = self.streaming_or_idle_phase();
-        self.push_retry_info("auto_retry_end");
+        self.fallback_banner = None;
+        self.push_retry_info(retry_event_detail("auto-retry ended", raw));
+    }
+
+    fn apply_retry_fallback_applied(&mut self, raw: &Value) {
+        let from = raw_string(raw, "from");
+        let to = raw_string(raw, "to");
+        let role = raw_string(raw, "role");
+        let detail = fallback_applied_detail(from.as_deref(), to.as_deref(), role.as_deref());
+        self.fallback_banner = Some(fallback_banner_text(
+            from.as_deref(),
+            to.as_deref(),
+            role.as_deref(),
+        ));
+        self.push_retry_info(detail);
+    }
+
+    fn apply_retry_fallback_succeeded(&mut self, raw: &Value) {
+        let model = raw_string(raw, "model");
+        let role = raw_string(raw, "role");
+        self.fallback_banner = None;
+        self.push_retry_info(fallback_succeeded_detail(model.as_deref(), role.as_deref()));
     }
 
     fn streaming_or_idle_phase(&self) -> RunPhase {
@@ -383,9 +407,9 @@ impl SessionProjection {
         }
     }
 
-    fn push_retry_info(&mut self, detail: &str) {
+    fn push_retry_info(&mut self, detail: impl Into<String>) {
         self.transcript.push(TranscriptEntry::RetryInfo {
-            detail: detail.to_owned(),
+            detail: detail.into(),
         });
     }
 
@@ -949,6 +973,86 @@ impl SessionProjection {
     fn push_unknown(&mut self, raw: &Value) {
         self.transcript
             .push(TranscriptEntry::Unknown { raw: raw.clone() });
+    }
+}
+
+fn raw_string(raw: &Value, field: &str) -> Option<String> {
+    raw.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn raw_scalar(raw: &Value, field: &str) -> Option<String> {
+    raw.get(field).and_then(|value| match value {
+        Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_owned())
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
+}
+
+fn retry_event_detail(prefix: &str, raw: &Value) -> String {
+    let attempt = ["attempt", "attemptNumber", "retryAttempt"]
+        .iter()
+        .find_map(|field| raw_scalar(raw, field));
+    let maximum = ["maxAttempts", "max_attempts", "totalAttempts"]
+        .iter()
+        .find_map(|field| raw_scalar(raw, field));
+    let attempts = raw_scalar(raw, "attempts");
+
+    match (attempt, maximum, attempts) {
+        (Some(attempt), Some(maximum), _) => format!("{prefix} (attempt {attempt}/{maximum})"),
+        (Some(attempt), None, _) => format!("{prefix} (attempt {attempt})"),
+        (None, _, Some(attempts)) => format!("{prefix} (attempts: {attempts})"),
+        (None, Some(maximum), None) => format!("{prefix} (max attempts: {maximum})"),
+        (None, None, None) => prefix.to_owned(),
+    }
+}
+
+fn fallback_applied_detail(from: Option<&str>, to: Option<&str>, role: Option<&str>) -> String {
+    match (from, to, role) {
+        (Some(from), Some(to), Some(role)) => {
+            format!("fallback applied: {from} → {to} (role={role})")
+        }
+        (Some(from), None, Some(role)) => {
+            format!("fallback applied from: {from} (role={role})")
+        }
+        (None, Some(to), Some(role)) => format!("fallback applied: {to} (role={role})"),
+        (None, None, Some(role)) => format!("fallback applied (role={role})"),
+        (Some(from), Some(to), None) => format!("fallback applied: {from} → {to}"),
+        (Some(from), None, None) => format!("fallback applied from: {from}"),
+        (None, Some(to), None) => format!("fallback applied: {to}"),
+        (None, None, None) => "fallback applied".to_owned(),
+    }
+}
+
+fn fallback_succeeded_detail(model: Option<&str>, role: Option<&str>) -> String {
+    match (model, role) {
+        (Some(model), Some(role)) => format!("fallback succeeded: {model} (role={role})"),
+        (Some(model), None) => format!("fallback succeeded: {model}"),
+        (None, Some(role)) => format!("fallback succeeded (role={role})"),
+        (None, None) => "fallback succeeded".to_owned(),
+    }
+}
+
+fn fallback_banner_text(from: Option<&str>, to: Option<&str>, role: Option<&str>) -> String {
+    match (from, to, role) {
+        (Some(from), Some(to), Some(role)) => {
+            format!("Using fallback model {to} (instead of {from}) for {role}")
+        }
+        (None, Some(to), Some(role)) => format!("Using fallback model {to} for {role}"),
+        (Some(from), None, Some(role)) => {
+            format!("Using a fallback model (instead of {from}) for {role}")
+        }
+        (None, None, Some(role)) => format!("Using a fallback model for {role}"),
+        (Some(from), Some(to), None) => format!("Using fallback model {to} (instead of {from})"),
+        (None, Some(to), None) => format!("Using fallback model {to}"),
+        (Some(from), None, None) => format!("Using a fallback model (instead of {from})"),
+        (None, None, None) => "Using a fallback model".to_owned(),
     }
 }
 
