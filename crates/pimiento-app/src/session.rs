@@ -2478,7 +2478,7 @@ impl Render for SessionView {
                                             )
                                             .child(
                                                 Button::new("todo-panel-toggle")
-                                                    .label("Checklist")
+                                                    .label("Tasks")
                                                     .small()
                                                     .ghost()
                                                     .on_click(cx.listener(
@@ -2667,9 +2667,21 @@ impl Render for SessionView {
                                         .items_center()
                                         .justify_center()
                                         .child(
-                                            Label::new("Send a message to start")
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground),
+                                            v_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new("Start the conversation")
+                                                        .text_sm()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child(
+                                                    Label::new(
+                                                        "Enter to send · ⌘Enter forces send",
+                                                    )
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                                ),
                                         ),
                                 )
                             })
