@@ -239,3 +239,4 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Launcher and inline-dialog changes are presentation-only. Dialog responses, Esc cancellation, and `open_url` copy/open behavior retain their existing RPC shapes.
 - App sources were modularized for maintainability without changing protocol or runtime behavior.
 - Visual-hierarchy polish (rail affordance, transcript spacing, inspector emphasis, and empty-state copy) changes presentation only; all displayed session facts remain OMP-authoritative.
+- Versions below or newer than the tested `omp 17.2.10+` baseline proceed with a warning banner; the exact discovered semantic version comes from startup discovery.

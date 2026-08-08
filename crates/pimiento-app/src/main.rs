@@ -31,7 +31,9 @@ use gpui_component::{
 };
 use omp_rpc_client::{
     client::{ClientConfig, ClientEvent, RpcClient},
-    discovery::{DiscoveryInputs, SystemRunner, discover},
+    discovery::{
+        DiscoveryInputs, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport, discover,
+    },
     frames::{RpcCommandBody, SubagentSubscriptionLevel},
 };
 use pimiento_core::{

@@ -135,7 +135,7 @@ pub enum VersionSupport {
     Supported,
     /// Newer than [`MIN_SUPPORTED`] — accept, warn at the app layer.
     Newer,
-    /// Below [`MIN_SUPPORTED`] — the app should hard-fail here.
+    /// Below [`MIN_SUPPORTED`] — accept, warn at the app layer.
     BelowMinimum,
 }
 
