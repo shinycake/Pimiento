@@ -190,3 +190,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Transcript presentation is semantic rather than chat-like: user entries are full-width plain rows with a theme-accent left border; assistant entries remain plain full-width rows. User text is no longer rendered in a filled bubble.
 - The composer uses gpui-component `Input`. For macOS CJK IME QA, enable a CJK input source, start composing in the composer, and press Enter while the candidate/composition UI is active: Enter must confirm composition without sending. After composition is committed, a subsequent Enter must send exactly once. This remains a manual verification; Linux/Wayland IME is still an outstanding checklist item.
 - Popups and overlays must use gpui-component primitives so placement remains backend-owned. Wayland and X11 popup behavior both remain outstanding Linux QA on this macOS dogfood machine.
+
+## D4 window bounds — 2026-08-08
+
+- The primary window's last windowed bounds are stored at `window.json` under `~/.pimiento` (or `PIMIENTO_HOME`) and restored on the next launch. Maximized and fullscreen bounds are not persisted.
+- Persisted width and height are clamped to 480×320 logical pixels; malformed or non-positive bounds are ignored.
+- Multi-monitor caveat: when a saved origin is no longer on-screen, GPUI or the host OS may adjust placement. Pimiento v1 deliberately does not invent display-coordinate correction logic.

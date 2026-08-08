@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, Global,
-    KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions, Render, Task, Window,
-    WindowOptions, div, list, prelude::*, px,
+    App, Bounds, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, Global,
+    KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions, Pixels, Render, Task,
+    Window, WindowBounds, WindowOptions, div, list, point, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -102,6 +102,8 @@ const MAX_DISCOVERED_SESSIONS: usize = 24;
 const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
 const ABORT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 const ABORT_ARM_STATUS: &str = "Press Esc again to abort";
+const MIN_WINDOW_WIDTH: f32 = 480.0;
+const MIN_WINDOW_HEIGHT: f32 = 320.0;
 static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +144,68 @@ struct RecentSession {
     last_used: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct PersistedWindowBounds {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl PersistedWindowBounds {
+    fn from_bounds(bounds: Bounds<Pixels>) -> Option<Self> {
+        let x = f32::from(bounds.origin.x);
+        let y = f32::from(bounds.origin.y);
+        let width = f32::from(bounds.size.width);
+        let height = f32::from(bounds.size.height);
+        if !x.is_finite()
+            || !y.is_finite()
+            || !width.is_finite()
+            || !height.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+        {
+            return None;
+        }
+        let bounds = normalize_window_bounds(bounds);
+        Some(Self {
+            x: bounds.origin.x.into(),
+            y: bounds.origin.y.into(),
+            width: bounds.size.width.into(),
+            height: bounds.size.height.into(),
+        })
+    }
+
+    fn into_bounds(self) -> Option<Bounds<Pixels>> {
+        if !self.x.is_finite()
+            || !self.y.is_finite()
+            || !self.width.is_finite()
+            || !self.height.is_finite()
+            || self.width <= 0.0
+            || self.height <= 0.0
+        {
+            return None;
+        }
+        Some(Bounds {
+            origin: point(px(self.x), px(self.y)),
+            size: size(
+                px(self.width.max(MIN_WINDOW_WIDTH)),
+                px(self.height.max(MIN_WINDOW_HEIGHT)),
+            ),
+        })
+    }
+}
+
+fn normalize_window_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds {
+        origin: bounds.origin,
+        size: size(
+            bounds.size.width.max(px(MIN_WINDOW_WIDTH)),
+            bounds.size.height.max(px(MIN_WINDOW_HEIGHT)),
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionPersistence {
     root: PathBuf,
@@ -165,6 +229,10 @@ impl SessionPersistence {
 
     fn recent_sessions_path(&self) -> PathBuf {
         self.root.join("recent.json")
+    }
+
+    fn window_bounds_path(&self) -> PathBuf {
+        self.root.join("window.json")
     }
 
     fn load_last_session(&self) -> Option<PathBuf> {
@@ -193,6 +261,23 @@ impl SessionPersistence {
             std::io::Error::other(format!("serialize recent sessions: {error}"))
         })?;
         write_persistence_file(&self.recent_sessions_path(), &contents)
+    }
+
+    fn load_window_bounds(&self) -> Option<Bounds<Pixels>> {
+        let raw = std::fs::read_to_string(self.window_bounds_path()).ok()?;
+        serde_json::from_str::<PersistedWindowBounds>(&raw)
+            .ok()?
+            .into_bounds()
+    }
+
+    fn save_window_bounds(&self, bounds: Bounds<Pixels>) {
+        let Some(record) = PersistedWindowBounds::from_bounds(bounds) else {
+            return;
+        };
+        let Ok(contents) = serde_json::to_string_pretty(&record) else {
+            return;
+        };
+        let _ = write_persistence_file(&self.window_bounds_path(), &contents);
     }
 
     fn remember_recent_session(
@@ -5472,6 +5557,7 @@ fn filter_models(models: &[ModelChoice], query: &str) -> Vec<ModelChoice> {
 
 fn main() {
     let persistence = SessionPersistence::from_environment();
+    let saved_window_bounds = persistence.load_window_bounds();
     let remembered = persistence.load_recent_sessions();
     let last_session = persistence
         .load_last_session()
@@ -5499,7 +5585,11 @@ fn main() {
         gpui_component::init(cx);
         cx.set_global(ThemePreferenceState(ThemePreference::System));
         cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
+            let window_options = WindowOptions {
+                window_bounds: saved_window_bounds.map(WindowBounds::Windowed),
+                ..Default::default()
+            };
+            cx.open_window(window_options, |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
                 window
                     .observe_window_appearance(|window, cx| {
@@ -5542,7 +5632,23 @@ fn main() {
                         .update(cx, WorkspaceView::should_close_window)
                         .unwrap_or(true)
                 });
-                cx.new(|cx| Root::new(workspace, window, cx))
+                let bounds_persistence = persistence.clone();
+                let mut last_saved_bounds = saved_window_bounds;
+                cx.new(|cx| {
+                    cx.observe_window_bounds(window, move |_, window, _| {
+                        let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+                            return;
+                        };
+                        let bounds = normalize_window_bounds(bounds);
+                        if last_saved_bounds == Some(bounds) {
+                            return;
+                        }
+                        bounds_persistence.save_window_bounds(bounds);
+                        last_saved_bounds = Some(bounds);
+                    })
+                    .detach();
+                    Root::new(workspace, window, cx)
+                })
             })
             .expect("open primary window");
         })
@@ -6070,6 +6176,45 @@ mod tests {
         persistence.forget_session(Path::new("/tmp/session.jsonl"));
         assert!(persistence.load_recent_sessions().is_empty());
         assert!(persistence.load_last_session().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn window_bounds_persistence_roundtrip_clamps_and_rejects_invalid_sizes() {
+        let root = std::env::temp_dir().join(format!(
+            "pimiento-window-bounds-{}-{}",
+            std::process::id(),
+            current_unix_seconds()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let persistence = SessionPersistence::from_root(root.clone());
+        let bounds = Bounds {
+            origin: point(px(100.0), px(50.0)),
+            size: size(px(1200.0), px(800.0)),
+        };
+
+        persistence.save_window_bounds(bounds);
+        assert_eq!(persistence.load_window_bounds(), Some(bounds));
+
+        std::fs::write(
+            persistence.window_bounds_path(),
+            r#"{"x":10.0,"y":20.0,"width":200.0,"height":100.0}"#,
+        )
+        .expect("write small window bounds");
+        assert_eq!(
+            persistence.load_window_bounds(),
+            Some(Bounds {
+                origin: point(px(10.0), px(20.0)),
+                size: size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT)),
+            })
+        );
+
+        std::fs::write(
+            persistence.window_bounds_path(),
+            r#"{"x":10.0,"y":20.0,"width":0.0,"height":800.0}"#,
+        )
+        .expect("write invalid window bounds");
+        assert_eq!(persistence.load_window_bounds(), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
