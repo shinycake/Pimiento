@@ -531,15 +531,31 @@ pub(crate) fn render_inspector(
             h_flex()
                 .w_full()
                 .justify_between()
+                .items_center()
+                .gap_2()
                 .child(
                     Label::new("Context")
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD),
                 )
                 .child(
-                    Label::new("⌘J")
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            Label::new("⌘J")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            Button::new("inspector-hide")
+                                .label("Hide")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.toggle_inspector(cx);
+                                })),
+                        ),
                 ),
         )
         .child(Separator::horizontal())
