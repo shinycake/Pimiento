@@ -285,6 +285,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - While the Context inspector is visible, the session toolbar hides the duplicated Checklist/Agents shortcuts and ctx%/tps readouts (those facts already live in the inspector). Model/thinking/More remain. Presentation-only.
 
+## Thinking collapse preview — 2026-08-08
+
+- Collapsed thinking rows show a truncated first non-empty line from the wire thinking text (not a fabricated summary). Empty completed thinking remains a zero-height placeholder.
+
 ## Palette theme label — 2026-08-08
 
 - Command palette Theme entry shows the current preference (`Theme: Light` etc.) and documents the cycle order. Presentation-only.

@@ -101,10 +101,11 @@ pub(crate) fn render_entry(
         } => {
             let view = cx.entity().downgrade();
             let text_for_copy = text.clone();
+            let preview = thinking_collapse_preview(text);
             h_flex()
                 .w_full()
                 .gap_2()
-                .py_2()
+                .py_1()
                 .child(
                     div()
                         .id(("thinking-collapsed", row_ix))
@@ -117,11 +118,11 @@ pub(crate) fn render_entry(
                         })
                         .child(
                             div()
-                                .py_1()
+                                .py_0p5()
                                 .text_color(theme.muted_foreground)
                                 .text_xs()
                                 .italic()
-                                .child("Thinking · expand"),
+                                .child(preview),
                         ),
                 )
                 .child(
@@ -1006,6 +1007,24 @@ pub(crate) fn do_cancel_dialog(view: &gpui::WeakEntity<SessionView>, id: &str, c
 pub(crate) fn notice_looks_like_mount_event(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("mounted") && (lower.contains("mcp") || lower.contains("tool"))
+}
+
+/// Collapsed thinking cue: first non-empty line, truncated — wire text only.
+pub(crate) fn thinking_collapse_preview(text: &str) -> String {
+    const MAX_CHARS: usize = 56;
+    let preview = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if preview.is_empty() {
+        return "Thinking · expand".to_owned();
+    }
+    let mut truncated = preview.chars().take(MAX_CHARS).collect::<String>();
+    if preview.chars().count() > MAX_CHARS {
+        truncated.push('…');
+    }
+    format!("Thinking · {truncated}")
 }
 
 pub(crate) fn do_dialog_response(
