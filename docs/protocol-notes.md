@@ -180,3 +180,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - `InputEvent::PressEnter.secondary` is gpui-component's `secondary-enter` binding (Cmd+Enter on macOS, Ctrl+Enter elsewhere). It bypasses slash completion and follows the existing prompt/steer send path. Shift+Enter remains the component-provided multiline newline path.
 - Pimiento initializes `ThemeMode` once from `window.appearance()`. The status-strip `Theme: Light` / `Theme: Dark` button remains a manual Light/Dark override; it deliberately does not track subsequent OS appearance changes.
+
+## D4 semantic rows and platform QA — 2026-08-08
+
+- Transcript presentation is semantic rather than chat-like: user entries are full-width plain rows with a theme-accent left border; assistant entries remain plain full-width rows. User text is no longer rendered in a filled bubble.
+- The composer uses gpui-component `Input`. For macOS CJK IME QA, enable a CJK input source, start composing in the composer, and press Enter while the candidate/composition UI is active: Enter must confirm composition without sending. After composition is committed, a subsequent Enter must send exactly once. This remains a manual verification; Linux/Wayland IME is still an outstanding checklist item.
+- Popups and overlays must use gpui-component primitives so placement remains backend-owned. Wayland and X11 popup behavior both remain outstanding Linux QA on this macOS dogfood machine.

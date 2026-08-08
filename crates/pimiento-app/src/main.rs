@@ -3652,17 +3652,15 @@ fn render_entry(
             let text_for_copy = text.clone();
             h_flex()
                 .w_full()
-                .justify_end()
                 .gap_2()
                 .py_1()
                 .child(
                     div()
-                        .max_w(px(480.))
+                        .flex_1()
+                        .border_l_2()
+                        .border_color(theme.accent)
                         .px_3()
                         .py_1p5()
-                        .rounded_md()
-                        .bg(theme.primary)
-                        .text_color(theme.primary_foreground)
                         .child(text.clone()),
                 )
                 .child(
@@ -3799,6 +3797,8 @@ fn render_entry(
                                 .py_1()
                                 .rounded_sm()
                                 .bg(theme.muted)
+                                .text_color(theme.muted_foreground)
+                                .italic()
                                 .child(TextView::markdown(("thinking", row_ix), text.clone())),
                         ),
                 )
