@@ -1772,18 +1772,9 @@ impl SessionView {
         }
     }
 
-    pub(crate) fn request_file_revert(
-        &mut self,
-        path: String,
-        tool_call_id: String,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn request_file_revert(&mut self, path: String, cx: &mut Context<Self>) {
         let command = revert_command_for_path(&path);
-        self.pending_revert = Some(PendingRevert {
-            path,
-            command,
-            tool_call_id,
-        });
+        self.pending_revert = Some(PendingRevert { path, command });
         cx.notify();
     }
 
@@ -2084,8 +2075,6 @@ pub(crate) fn workspace_should_block_close(phases: &[RunPhase]) -> bool {
 pub(crate) struct PendingRevert {
     pub(crate) path: String,
     pub(crate) command: String,
-    #[allow(dead_code)]
-    pub(crate) tool_call_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
