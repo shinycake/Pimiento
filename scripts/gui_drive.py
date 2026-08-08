@@ -123,12 +123,23 @@ def click_button(name: str) -> None:
         if n == name or name in n:
             click_xy(x + w // 2, y + h // 2)
             return
-    # Fallback known launcher geometry when AX tree is empty.
+    # Fallback launcher geometry when AX tree is empty (GPUI often reports 0 elems).
+    # Empirically Start here sits near the horizontal mid of the right-half window,
+    # slightly above vertical mid of the content card.
     if name == "Start here":
         wx, wy, ww, wh = window_frame()
-        click_xy(wx + 735, wy + 810)
+        click_xy(wx + int(ww * 0.49), wy + int(wh * 0.49))
         return
     raise SystemExit(f"button not found: {name!r}; have={[b[0] for b in buttons]}")
+
+
+def in_launcher() -> bool:
+    names = [n for n, *_ in ax_buttons()]
+    if any(n == "Start here" for n in names):
+        return True
+    # AX empty: treat as launcher only if window title still looks idle/launcher.
+    # Title is often blank for GPUI; prefer attempting start when unknown.
+    return not names
 
 
 def send_prompt(text: str) -> None:
@@ -155,12 +166,12 @@ def main() -> None:
     sub.add_parser("buttons")
     p_click = sub.add_parser("click")
     p_click.add_argument("name")
-    p_start = sub.add_parser("start-here")
+    sub.add_parser("start-here")
     p_send = sub.add_parser("send")
     p_send.add_argument("text")
     p_shot = sub.add_parser("shot")
     p_shot.add_argument("path")
-    p_smoke = sub.add_parser("smoke")
+    sub.add_parser("smoke")
     args = parser.parse_args()
 
     ensure_alive()
@@ -176,7 +187,16 @@ def main() -> None:
         click_button(args.name)
     elif args.cmd == "start-here":
         position_right_half()
-        click_button("Start here")
+        time.sleep(0.4)
+        # Retry AX a few times; GPUI often exposes buttons only after focus/layout.
+        for _ in range(6):
+            names = [n for n, *_ in ax_buttons()]
+            if any(n == "Start here" for n in names):
+                click_button("Start here")
+                break
+            time.sleep(0.25)
+        else:
+            click_button("Start here")
         time.sleep(3)
         print(window_frame())
     elif args.cmd == "send":
@@ -186,8 +206,8 @@ def main() -> None:
         print(args.path)
     elif args.cmd == "smoke":
         position_right_half()
-        names = [n for n, *_ in ax_buttons()]
-        if any(n == "Start here" for n in names) or not names:
+        time.sleep(0.3)
+        if in_launcher() or any(n == "Start here" for n, *_ in ax_buttons()):
             click_button("Start here")
             time.sleep(4)
         send_prompt("ping: reply with exactly PONG and nothing else")
