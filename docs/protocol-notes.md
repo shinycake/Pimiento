@@ -77,3 +77,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `get_available_models` can exceed the default 30s RPC timeout; Pimiento loads it asynchronously after window open with a 180s timeout.
 - Outbound commands are flat NDJSON objects (`{id,type,provider,modelId}`), never wrapped in `params`.
 - Session model picker: searchable full catalog + freeform `provider/id` Enter fallback.
+
+## Session durability (SH) — 2026-08-08
+
+- Live app now spawns durable OMP sessions (`no_session: false`) with `cwd` from `PIMIENTO_CWD` or process cwd.
+- `get_state.sessionFile` is remembered at `~/.pimiento/last-session` and passed as `--resume` on relaunch/Restart.
+- Stale resume pointers fall back to a fresh durable session.
+- Composer Enter sends `steer` while `RunPhase::Streaming`, otherwise `prompt`.
