@@ -1047,6 +1047,41 @@ impl Render for WorkspaceView {
                     ))
                 },
             )
+            .when(!inspector_open, |parent| {
+                parent.child(
+                    v_flex()
+                        .id("workspace-show-inspector")
+                        .w(px(64.))
+                        .h_full()
+                        .items_center()
+                        .gap_0p5()
+                        .pt_3()
+                        .border_l_1()
+                        .border_color(theme.sidebar_border)
+                        .bg(theme.sidebar)
+                        .text_color(theme.sidebar_foreground)
+                        .cursor_pointer()
+                        .hover(|rail| rail.bg(theme.secondary))
+                        .child(
+                            Label::new("Show")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM),
+                        )
+                        .child(
+                            Label::new("Context")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM),
+                        )
+                        .child(
+                            Label::new("⌘J")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.toggle_inspector(cx);
+                        })),
+                )
+            })
             .when(self.pending_quit_confirm, |parent| {
                 parent.child(
                     div()
