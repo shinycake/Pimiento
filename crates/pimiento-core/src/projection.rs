@@ -266,6 +266,14 @@ impl SessionProjection {
     /// The caller supplies a fresh projection. Tool calls are indexed while
     /// walking the message history so later `toolResult` messages can update
     /// the corresponding row in place.
+    /// Drop transcript rows produced by history hydration so paging can restart
+    /// cleanly after a `stale_cursor` error. Preserves non-history UI state.
+    pub fn clear_hydrated_history(&mut self) {
+        self.transcript.clear();
+        self.tool_index.clear();
+        self.current_message.clear();
+    }
+
     pub fn hydrate_messages(&mut self, data: &Value) {
         let Some(messages) = data.get("messages").and_then(Value::as_array) else {
             return;

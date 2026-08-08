@@ -4,7 +4,6 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::HashSet;
-use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,7 +31,7 @@ use omp_rpc_client::{
 };
 use pimiento_core::{
     projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
-    todos::{actionable_todo_count, parse_todo_phases, todo_status_glyph},
+    todos::{TodoPhaseView, TodoTaskView, parse_todo_phases, todo_status_glyph},
     transcript::{ToolStatus, TranscriptEntry},
 };
 use serde::{Deserialize, Serialize};
@@ -269,6 +268,7 @@ impl SessionView {
             cx.subscribe(&model_search, Self::on_model_search_event),
         ];
 
+        let todo_panel_open = !parse_todo_phases(initial_projection.todos_raw.as_ref()).is_empty();
         let initial_len = initial_projection.transcript.len();
         let transcript_list = ListState::new(initial_len, ListAlignment::Bottom, px(400.));
         transcript_list.set_follow_mode(FollowMode::Tail);
@@ -296,7 +296,7 @@ impl SessionView {
             model_search,
             model_picker_open: false,
             thinking_picker_open: false,
-            todo_panel_open: true,
+            todo_panel_open,
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
@@ -377,6 +377,7 @@ impl SessionView {
             self.launcher_error = None;
             self.session_cwd = None;
             self.projection = SessionProjection::new();
+            self.todo_panel_open = false;
             self.available_models.clear();
             self.model_picker_open = false;
             self.thinking_picker_open = false;
@@ -429,6 +430,7 @@ impl SessionView {
         match result {
             Ok((client, projection, status, models)) => {
                 self.available_models = models;
+                self.todo_panel_open = !parse_todo_phases(projection.todos_raw.as_ref()).is_empty();
                 self.projection = projection;
                 self.status_message = status;
                 self.client = Some(client.clone());
@@ -515,6 +517,7 @@ impl SessionView {
             self.launcher_cwd = cwd;
         }
         self.projection = SessionProjection::new();
+        self.todo_panel_open = false;
         self.available_models.clear();
         self.expanded_tools.clear();
         self.transcript_list.reset(0);
@@ -608,7 +611,11 @@ impl SessionView {
     }
 
     fn toggle_todo_panel(&mut self, cx: &mut Context<Self>) {
-        self.todo_panel_open = !self.todo_panel_open;
+        if parse_todo_phases(self.projection.todos_raw.as_ref()).is_empty() {
+            self.todo_panel_open = false;
+        } else {
+            self.todo_panel_open = !self.todo_panel_open;
+        }
         cx.notify();
     }
 
@@ -1504,6 +1511,69 @@ fn slash_completion_text(command: &SlashCommand) -> String {
     format!("{} ", command.name)
 }
 
+fn todo_open_count(phases: &[TodoPhaseView]) -> usize {
+    phases
+        .iter()
+        .flat_map(|phase| phase.tasks.iter())
+        .filter(|task| matches!(task.status.as_str(), "open" | "in_progress"))
+        .count()
+}
+
+fn render_todo_task(task: &TodoTaskView, theme: &Theme) -> gpui::AnyElement {
+    let blocker = (task.status == "blocked")
+        .then(|| task.blocker.clone())
+        .flatten();
+    v_flex()
+        .w_full()
+        .gap_0()
+        .child(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .child(Label::new(todo_status_glyph(&task.status)).text_xs())
+                .child(Label::new(task.content.clone()).text_sm()),
+        )
+        .when_some(blocker, |row, blocker| {
+            row.child(
+                Label::new(format!("blocked: {blocker}"))
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
+            )
+        })
+        .into_any_element()
+}
+
+fn render_todo_panel(phases: &[TodoPhaseView], cx: &mut Context<SessionView>) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    v_flex()
+        .w_full()
+        .px_3()
+        .py_2()
+        .gap_2()
+        .bg(theme.secondary)
+        .border_t_1()
+        .border_color(theme.border)
+        .max_h(px(220.))
+        .overflow_y_scrollbar()
+        .children(phases.iter().map(|phase| {
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    Label::new(phase.name.clone())
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .children(
+                    phase
+                        .tasks
+                        .iter()
+                        .map(|task| render_todo_task(task, &theme)),
+                )
+        }))
+        .into_any_element()
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 impl Render for SessionView {
@@ -1555,18 +1625,8 @@ impl Render for SessionView {
             self.projection.state.fast_mode_active,
         );
         let todo_phases = parse_todo_phases(self.projection.todos_raw.as_ref());
-        let todo_actionable = actionable_todo_count(&todo_phases);
-        let todo_total = todo_phases
-            .iter()
-            .map(|phase| phase.tasks.len())
-            .sum::<usize>();
-        let todo_button_label = if todo_phases.is_empty() {
-            "Todos".to_owned()
-        } else if self.todo_panel_open {
-            format!("Todos ({todo_actionable}/{todo_total}) v")
-        } else {
-            format!("Todos ({todo_actionable}/{todo_total}) >")
-        };
+        let todo_count = todo_open_count(&todo_phases);
+        let todo_button_label = format!("Todos ({todo_count})");
         let show_todo_panel = self.todo_panel_open && !todo_phases.is_empty();
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
@@ -1854,45 +1914,7 @@ impl Render for SessionView {
                 },
             )
             .when(show_todo_panel, |parent| {
-                parent.child(
-                    v_flex()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .bg(theme.secondary)
-                        .border_t_1()
-                        .border_color(theme.border)
-                        .max_h(px(220.))
-                        .overflow_y_scrollbar()
-                        .children(
-                            todo_phases
-                                .into_iter()
-                                .enumerate()
-                                .map(|(phase_ix, phase)| {
-                                    v_flex()
-                                        .w_full()
-                                        .gap_1()
-                                        .child(
-                                            Label::new(phase.name.clone())
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                        .children(phase.tasks.into_iter().enumerate().map(
-                                            |(task_ix, task)| {
-                                                let glyph = todo_status_glyph(&task.status);
-                                                let mut line = format!("{glyph} {}", task.content);
-                                                if let Some(blocker) = task.blocker.as_deref() {
-                                                    let _ = write!(line, " — {blocker}");
-                                                }
-                                                div()
-                                                    .id(("todo-task", phase_ix * 1000 + task_ix))
-                                                    .child(Label::new(line).text_sm())
-                                            },
-                                        ))
-                                }),
-                        ),
-                )
+                parent.child(render_todo_panel(&todo_phases, cx))
             })
             .child(
                 h_flex()
@@ -3007,6 +3029,138 @@ fn latest_resume_path(
         .or_else(|| recent.first().map(|session| session.session_file.clone()))
 }
 
+const MESSAGE_PAGE_LIMIT: u32 = 100;
+const MESSAGE_PAGE_MAX_PAGES: usize = 50;
+const MESSAGE_PAGE_BUSY_RETRIES: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessagesPageErrorKind {
+    Busy,
+    Stale,
+    Other,
+}
+
+fn classify_messages_page_error(
+    code: Option<&str>,
+    message: Option<&str>,
+) -> MessagesPageErrorKind {
+    let blob = format!("{} {}", code.unwrap_or(""), message.unwrap_or("")).to_ascii_lowercase();
+    if code == Some("session_busy")
+        || blob.contains("session_busy")
+        || blob.contains("session is changing")
+    {
+        MessagesPageErrorKind::Busy
+    } else if code == Some("stale_cursor")
+        || blob.contains("stale_cursor")
+        || blob.contains("cursor is stale")
+    {
+        MessagesPageErrorKind::Stale
+    } else {
+        MessagesPageErrorKind::Other
+    }
+}
+
+fn history_row_count(proj: &SessionProjection) -> usize {
+    proj.transcript
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptEntry::User { .. }
+                    | TranscriptEntry::AssistantText { .. }
+                    | TranscriptEntry::Thinking { .. }
+                    | TranscriptEntry::ToolCall { .. }
+                    | TranscriptEntry::CommandOutput(_)
+            )
+        })
+        .count()
+}
+
+fn hydrate_history_pages(client: &RpcClient, proj: &mut SessionProjection) {
+    let mut cursor: Option<String> = None;
+    let mut pages = 0usize;
+    let mut stale_restarts = 0usize;
+
+    loop {
+        if pages >= MESSAGE_PAGE_MAX_PAGES {
+            proj.transcript.push(TranscriptEntry::Notice(format!(
+                "Stopped history hydration after {MESSAGE_PAGE_MAX_PAGES} pages"
+            )));
+            break;
+        }
+
+        let mut attempt = 0usize;
+        let page_result = loop {
+            attempt += 1;
+            let response = smol::block_on(async {
+                client
+                    .send(RpcCommandBody::GetMessagesPage {
+                        cursor: cursor.clone(),
+                        limit: Some(MESSAGE_PAGE_LIMIT),
+                    })
+                    .await
+            });
+            match response {
+                Ok(resp) if resp.success => break Ok(resp),
+                Ok(resp) => {
+                    let kind =
+                        classify_messages_page_error(resp.code.as_deref(), resp.error.as_deref());
+                    match kind {
+                        MessagesPageErrorKind::Busy if attempt < MESSAGE_PAGE_BUSY_RETRIES => {
+                            std::thread::sleep(Duration::from_millis(150));
+                        }
+                        MessagesPageErrorKind::Stale if stale_restarts == 0 => {
+                            proj.clear_hydrated_history();
+                            cursor = None;
+                            pages = 0;
+                            stale_restarts += 1;
+                            break Err("stale_restart".to_owned());
+                        }
+                        _ => {
+                            break Err(resp
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "get_messages_page failed".to_owned()));
+                        }
+                    }
+                }
+                Err(error) => break Err(error.to_string()),
+            }
+        };
+
+        match page_result {
+            Err(msg) if msg == "stale_restart" => {}
+            Err(_) => {
+                if history_row_count(proj) == 0
+                    && let Ok(resp) =
+                        smol::block_on(async { client.send(RpcCommandBody::GetMessages).await })
+                    && resp.success
+                    && let Some(data) = resp.data.as_ref()
+                {
+                    proj.hydrate_messages(data);
+                }
+                break;
+            }
+            Ok(resp) => {
+                let Some(data) = resp.data.as_ref() else {
+                    break;
+                };
+                proj.hydrate_messages(data);
+                pages += 1;
+                match data
+                    .get("nextCursor")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
 fn try_connect_omp(
     cwd: Option<PathBuf>,
     resume: Option<&Path>,
@@ -3051,7 +3205,6 @@ fn try_connect_omp(
     };
 
     let get_state = smol::block_on(async { client.send(RpcCommandBody::GetState).await });
-    let messages = smol::block_on(async { client.send(RpcCommandBody::GetMessages).await });
     let avail = smol::block_on(async { client.send(RpcCommandBody::GetAvailableCommands).await });
     let _sub = smol::block_on(async {
         client
@@ -3075,12 +3228,7 @@ fn try_connect_omp(
             persistence.remember_recent_session(Some(session_file), Some(cwd), Some(&name));
         }
     }
-    if let Ok(r) = &messages
-        && r.success
-        && let Some(data) = &r.data
-    {
-        proj.hydrate_messages(data);
-    }
+    hydrate_history_pages(&client, &mut proj);
     if let Ok(r) = &avail
         && r.success
         && let Some(data) = &r.data
@@ -3289,6 +3437,26 @@ mod tests {
         assert!(!composer_uses_steer(&RunPhase::Dead));
     }
     #[test]
+    fn classify_messages_page_error_detects_busy_and_stale() {
+        assert_eq!(
+            classify_messages_page_error(Some("session_busy"), None),
+            MessagesPageErrorKind::Busy
+        );
+        assert_eq!(
+            classify_messages_page_error(Some("stale_cursor"), None),
+            MessagesPageErrorKind::Stale
+        );
+        assert_eq!(
+            classify_messages_page_error(None, Some("RPC message cursor is stale")),
+            MessagesPageErrorKind::Stale
+        );
+        assert_eq!(
+            classify_messages_page_error(None, Some("boom")),
+            MessagesPageErrorKind::Other
+        );
+    }
+
+    #[test]
     fn thinking_levels_are_non_empty_and_include_auto() {
         assert!(!THINKING_LEVELS.is_empty());
         assert!(THINKING_LEVELS.contains(&"auto"));
@@ -3302,6 +3470,21 @@ mod tests {
         assert_eq!(fast_mode_label(Some(true), Some(true)), "fast:active");
         assert_eq!(fast_mode_label(Some(false), Some(true)), "fast:active");
         assert_eq!(fast_mode_label(None, None), "fast:?");
+    }
+
+    #[test]
+    fn todo_count_only_includes_open_and_in_progress() {
+        let raw = serde_json::json!([{
+            "name": "Ship",
+            "tasks": [
+                {"content": "Open", "status": "open"},
+                {"content": "Running", "status": "in_progress"},
+                {"content": "Done", "status": "completed"},
+                {"content": "Blocked", "status": "blocked"}
+            ]
+        }]);
+        let phases = parse_todo_phases(Some(&raw));
+        assert_eq!(todo_open_count(&phases), 2);
     }
 
     #[test]

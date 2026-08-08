@@ -102,7 +102,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 ## Message history hydration — 2026-08-08
 
-- `get_messages` returns `{ messages: AgentMessage[] }`; message content may be a string or typed parts. Pimiento hydrates the full response in order and pairs `toolResult` rows to `toolCall` rows by `toolCallId` (unmatched results remain visible as command output).
+- Connect/resume hydrates history via paginated `get_messages_page` (`limit` 100, follows `nextCursor`, capped pages).
+- `session_busy` retries briefly; `stale_cursor` clears partial history and restarts paging once; hard failures fall back to legacy `get_messages`.
+- Page payloads are `{ messages, nextCursor?, totalMessages }`; message content may be a string or typed parts. `toolResult` rows pair to `toolCall` by `toolCallId`.
 
 ## Assistant code block copy — 2026-08-08
 
