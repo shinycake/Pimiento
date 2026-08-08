@@ -984,8 +984,8 @@ impl Render for WorkspaceView {
                         .w(px(64.))
                         .h_full()
                         .items_center()
-                        .gap_1()
-                        .pt_2()
+                        .gap_0p5()
+                        .pt_3()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
@@ -993,12 +993,17 @@ impl Render for WorkspaceView {
                         .cursor_pointer()
                         .hover(|rail| rail.bg(theme.secondary))
                         .child(
-                            Label::new("☰")
-                                .text_sm()
+                            Label::new("Show")
+                                .text_xs()
                                 .font_weight(gpui::FontWeight::MEDIUM),
                         )
                         .child(
                             Label::new("Sessions")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM),
+                        )
+                        .child(
+                            Label::new("⌘B")
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
                         )

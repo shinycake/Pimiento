@@ -154,6 +154,16 @@ def send_prompt(text: str) -> None:
     sh([CLICLICK, "kp:return"])
 
 
+def toggle_theme() -> None:
+    frontmost()
+    sh([CLICLICK, "kd:cmd", "t:k", "ku:cmd"])
+    time.sleep(0.2)
+    # GPUI palette focus can lag briefly after Cmd+K; this remains best-effort.
+    sh([CLICLICK, "t:theme"])
+    time.sleep(0.15)
+    sh([CLICLICK, "kp:return"])
+
+
 def screenshot(path: str) -> None:
     sh(["screencapture", "-x", path])
 
@@ -171,6 +181,7 @@ def main() -> None:
     p_send.add_argument("text")
     p_shot = sub.add_parser("shot")
     p_shot.add_argument("path")
+    sub.add_parser("theme")
     sub.add_parser("smoke")
     args = parser.parse_args()
 
@@ -204,6 +215,9 @@ def main() -> None:
     elif args.cmd == "shot":
         screenshot(args.path)
         print(args.path)
+    elif args.cmd == "theme":
+        toggle_theme()
+        print("theme toggle sent")
     elif args.cmd == "smoke":
         position_right_half()
         time.sleep(0.3)
