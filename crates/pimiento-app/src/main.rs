@@ -2449,6 +2449,7 @@ fn subagent_payload_summary(payload: &serde_json::Value) -> String {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Match arms mirror transcript variants.
 fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,
