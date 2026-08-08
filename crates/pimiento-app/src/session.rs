@@ -2711,9 +2711,20 @@ impl Render for SessionView {
                                         .items_center()
                                         .justify_center()
                                         .child(
-                                            Label::new("Start a conversation.")
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground),
+                                            v_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new("Pimiento is ready.")
+                                                        .text_sm()
+                                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child(
+                                                    Label::new("Type a message below to begin.")
+                                                        .text_xs()
+                                                        .text_color(theme.muted_foreground),
+                                                ),
                                         ),
                                 )
                             })
