@@ -11,6 +11,16 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+if [[ "${PIMIENTO_RESTART:-}" == "1" ]]; then
+  if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    sleep 0.3
+  fi
+  pkill -f '/target/debug/pimiento-app' 2>/dev/null || true
+  sleep 0.2
+  rm -f "$PIDFILE"
+fi
+
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "already running pid=$(cat "$PIDFILE")"
   exit 0
