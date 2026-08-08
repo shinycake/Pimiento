@@ -1871,7 +1871,9 @@ impl SessionView {
         self.close_palette(cx);
         match id {
             PaletteActionId::About => self.show_about(cx),
-            PaletteActionId::ToggleTheme => cycle_theme_preference(window, cx),
+            PaletteActionId::ToggleTheme => {
+                cycle_theme_preference(&self.persistence, window, cx);
+            }
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
             PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
             PaletteActionId::ToggleFast => self.toggle_fast_mode(cx),

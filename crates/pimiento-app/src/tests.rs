@@ -335,6 +335,24 @@ fn theme_preference_from_env_parses_known_values() {
 }
 
 #[test]
+fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
+    let parsed: PersistedUi =
+        serde_json::from_str(r#"{"inspector_open":false,"theme":"dark"}"#).expect("parse ui");
+    assert_eq!(parsed.theme, ThemePreference::Dark);
+
+    let legacy: PersistedUi =
+        serde_json::from_str(r#"{"inspector_open":true}"#).expect("parse legacy ui");
+    assert_eq!(legacy.theme, ThemePreference::System);
+
+    let value = serde_json::to_value(PersistedUi {
+        inspector_open: true,
+        theme: ThemePreference::Light,
+    })
+    .expect("serialize ui");
+    assert_eq!(value["theme"], "light");
+}
+
+#[test]
 fn workspace_blocks_close_for_every_abortable_phase() {
     for phase in [
         RunPhase::Streaming,
@@ -757,7 +775,7 @@ fn short_model_label_strips_only_cursor_provider() {
 }
 
 #[test]
-fn inspector_visibility_defaults_open_and_roundtrips() {
+fn ui_preferences_default_and_roundtrip_without_overwriting_each_other() {
     let root = std::env::temp_dir().join(format!(
         "pimiento-ui-persistence-{}-{}",
         std::process::id(),
@@ -766,11 +784,30 @@ fn inspector_visibility_defaults_open_and_roundtrips() {
     let _ = std::fs::remove_dir_all(&root);
     let persistence = SessionPersistence::from_root(root.clone());
     assert!(persistence.load_inspector_open());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::System);
+
+    persistence.save_theme_preference(ThemePreference::Dark);
+    assert_eq!(
+        initial_theme_preference(None, &persistence),
+        ThemePreference::Dark
+    );
+    assert_eq!(
+        initial_theme_preference(Some(OsStr::new("light")), &persistence),
+        ThemePreference::Light
+    );
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
 
     persistence.save_inspector_open(false);
     assert!(!persistence.load_inspector_open());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
+
+    persistence.save_theme_preference(ThemePreference::Light);
+    assert!(!persistence.load_inspector_open());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
+
     persistence.save_inspector_open(true);
     assert!(persistence.load_inspector_open());
+    assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
 
     let _ = std::fs::remove_dir_all(&root);
 }
