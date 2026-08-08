@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    App, ClickEvent, Context, KeyDownEvent, Render, Task, Window, WindowOptions, div, prelude::*,
-    px,
+    App, ClickEvent, Context, FollowMode, KeyDownEvent, ListAlignment, ListState, Render, Task,
+    Window, WindowOptions, div, list, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -64,6 +64,11 @@ struct SessionView {
     expanded_tools: HashSet<String>,
     clear_composer: bool,
     clear_model_search: bool,
+    /// Virtualized transcript list (GPUI `ListState`, bottom-aligned chat).
+    transcript_list: ListState,
+    last_transcript_len: usize,
+    /// Count of rows appended while the user was scrolled away from the tail.
+    unread_below: usize,
     _subscriptions: Vec<gpui::Subscription>,
     pump: Option<Task<()>>,
 }
@@ -94,6 +99,21 @@ impl SessionView {
             cx.subscribe(&composer, Self::on_composer_event),
             cx.subscribe(&model_search, Self::on_model_search_event),
         ];
+
+        let initial_len = initial_projection.transcript.len();
+        let transcript_list = ListState::new(initial_len, ListAlignment::Bottom, px(400.));
+        transcript_list.set_follow_mode(FollowMode::Tail);
+        {
+            let weak = cx.weak_entity();
+            transcript_list.set_scroll_handler(move |ev, _window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    if ev.is_following_tail {
+                        this.unread_below = 0;
+                    }
+                    cx.notify();
+                });
+            });
+        }
 
         // Start foreground pump if we have a live client
         let pump = client.as_ref().map(|c| {
@@ -140,11 +160,47 @@ impl SessionView {
             expanded_tools: HashSet::new(),
             clear_composer: false,
             clear_model_search: false,
+            transcript_list,
+            last_transcript_len: initial_len,
+            unread_below: 0,
             _subscriptions: subscriptions,
             pump,
         };
         view.start_catalog_load(cx);
         view
+    }
+
+    /// Keep `ListState` item count / measurements in sync with the projection.
+    ///
+    /// PLAN SH: `splice`/`reset` on count changes; `remeasure_items` when a
+    /// row's height may have changed (streaming growth, card expand).
+    fn sync_transcript_list(&mut self) {
+        let new_len = self.projection.transcript.len();
+        let old_len = self.last_transcript_len;
+        if new_len > old_len {
+            self.transcript_list
+                .splice(old_len..old_len, new_len - old_len);
+            if self.transcript_list.is_following_tail() {
+                self.unread_below = 0;
+            } else {
+                self.unread_below = self.unread_below.saturating_add(new_len - old_len);
+            }
+        } else if new_len < old_len {
+            self.transcript_list.reset(new_len);
+            self.unread_below = 0;
+        }
+        if new_len > 0 {
+            let start = new_len.saturating_sub(4);
+            self.transcript_list.remeasure_items(start..new_len);
+        }
+        self.last_transcript_len = new_len;
+    }
+
+    fn jump_to_transcript_tail(&mut self, cx: &mut Context<Self>) {
+        self.transcript_list.scroll_to_end();
+        self.transcript_list.set_follow_mode(FollowMode::Tail);
+        self.unread_below = 0;
+        cx.notify();
     }
 
     fn start_catalog_load(&mut self, cx: &mut Context<Self>) {
@@ -398,6 +454,11 @@ impl SessionView {
                 self.projection = proj;
                 self.status_message = status;
                 self.client = Some(client.clone());
+                let n = self.projection.transcript.len();
+                self.transcript_list.reset(n);
+                self.transcript_list.set_follow_mode(FollowMode::Tail);
+                self.last_transcript_len = n;
+                self.unread_below = 0;
                 let events = client.events();
                 self.pump = Some(cx.spawn(async move |view, cx| {
                     while let Ok(event) = events.recv().await {
@@ -456,6 +517,11 @@ impl SessionView {
             self.expanded_tools.remove(tool_call_id);
         } else {
             self.expanded_tools.insert(tool_call_id.to_owned());
+        }
+        if let Some(ix) = self.projection.transcript.iter().position(
+            |e| matches!(e, TranscriptEntry::ToolCall(tc) if tc.tool_call_id == tool_call_id),
+        ) {
+            self.transcript_list.remeasure_items(ix..ix + 1);
         }
         cx.notify();
     }
@@ -763,20 +829,43 @@ impl Render for SessionView {
                         )
                     }),
             )
-            .child(
+            .child({
+                self.sync_transcript_list();
+                let list_state = self.transcript_list.clone();
+                let view = cx.entity().downgrade();
+                let unread = self.unread_below;
                 div()
                     .flex_1()
                     .w_full()
-                    .overflow_y_scrollbar()
-                    .px_3()
-                    .py_2()
-                    .children(
-                        self.projection
-                            .transcript
-                            .iter()
-                            .map(|e| render_entry(e, &self.expanded_tools, cx)),
-                    ),
-            )
+                    .relative()
+                    .child(
+                        list(list_state, move |ix, _window, cx| {
+                            view.update(cx, |this, cx| {
+                                this.projection.transcript.get(ix).map_or_else(
+                                    || div().into_any_element(),
+                                    |e| render_entry(e, &this.expanded_tools, cx),
+                                )
+                            })
+                            .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .size_full()
+                        .px_3()
+                        .py_2(),
+                    )
+                    .when(unread > 0, |parent| {
+                        parent.child(
+                            div().absolute().bottom_3().right_3().child(
+                                Button::new("jump-transcript-tail")
+                                    .label(format!("{unread} new ↓"))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.jump_to_transcript_tail(cx);
+                                    })),
+                            ),
+                        )
+                    })
+            })
             .when(!self.projection.pending_dialogs.is_empty(), |parent| {
                 parent.child(
                     v_flex()
