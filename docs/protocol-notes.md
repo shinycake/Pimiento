@@ -108,3 +108,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 - Assistant Markdown code blocks expose a small `Copy` action that writes the rendered code to the host clipboard.
 - Copy button IDs hash the transcript row index, language, and code so repeated blocks remain distinct.
+
+## Slash command completion — 2026-08-08
+
+- Pimiento parses `available_commands_raw` as either a command array or `{commands: []}`. Slash names and aliases are normalized with a leading `/`; aliases filter to and complete the primary command name.
+- The composer opens a capped, prefix-filtered slash menu for slash-only drafts; Enter or a click completes locally, while Enter sends only when there are no menu matches.

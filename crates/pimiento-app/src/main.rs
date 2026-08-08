@@ -56,10 +56,25 @@ fn toggle_theme(_: &ClickEvent, window: &mut Window, cx: &mut App) {
 type ModelChoice = (String, String);
 
 const MODEL_PICKER_VISIBLE_CAP: usize = 200;
+const SLASH_COMMAND_VISIBLE_CAP: usize = 12;
 const MAX_RECENT_SESSIONS: usize = 12;
 const MAX_DISCOVERED_SESSIONS: usize = 24;
 const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
 static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlashCommand {
+    name: String,
+    description: String,
+    aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashMenuState {
+    Closed,
+    Open,
+    Dismissed,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LauncherPhase {
@@ -188,10 +203,13 @@ struct SessionView {
     composer: gpui::Entity<InputState>,
     model_search: gpui::Entity<InputState>,
     model_picker_open: bool,
+    slash_menu: SlashMenuState,
+    slash_selected: usize,
     status_message: String,
     available_models: Vec<ModelChoice>,
     expanded_tools: HashSet<String>,
     clear_composer: bool,
+    pending_composer_value: Option<String>,
     clear_model_search: bool,
     /// Virtualized transcript list (GPUI `ListState`, bottom-aligned chat).
     transcript_list: ListState,
@@ -269,10 +287,13 @@ impl SessionView {
             composer,
             model_search,
             model_picker_open: false,
+            slash_menu: SlashMenuState::Closed,
+            slash_selected: 0,
             status_message: status,
             available_models,
             expanded_tools: HashSet::new(),
             clear_composer: false,
+            pending_composer_value: None,
             clear_model_search: false,
             transcript_list,
             last_transcript_len: initial_len,
@@ -348,6 +369,8 @@ impl SessionView {
             self.projection = SessionProjection::new();
             self.available_models.clear();
             self.expanded_tools.clear();
+            self.slash_menu = SlashMenuState::Closed;
+            self.slash_selected = 0;
             self.transcript_list.reset(0);
             self.last_transcript_len = 0;
             self.unread_below = 0;
@@ -473,6 +496,7 @@ impl SessionView {
         self.client.take();
         self.pump.take();
         self.model_picker_open = false;
+        self.close_slash_menu();
         self.clear_composer = true;
         if let Some(cwd) = self.session_cwd.take() {
             self.launcher_cwd = cwd;
@@ -704,40 +728,149 @@ impl SessionView {
         event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
-        if let InputEvent::PressEnter {
-            secondary: false,
-            shift: false,
-        } = event
-        {
-            let text = self.composer.read(cx).value().to_string();
-            if text.trim().is_empty() {
-                return;
+        match event {
+            InputEvent::Change => {
+                if self.slash_menu == SlashMenuState::Dismissed {
+                    self.slash_menu = SlashMenuState::Closed;
+                }
+                self.update_slash_menu(cx);
+                cx.notify();
             }
-            let Some(client) = self.client.clone() else {
-                return;
-            };
-
-            let steer = composer_uses_steer(&self.projection.run_phase);
-            self.projection.push_user_message(text.clone());
-            self.clear_composer = true;
-            cx.notify();
-
-            cx.spawn(async move |_, _| {
-                let body = if steer {
-                    RpcCommandBody::Steer {
-                        message: text,
-                        images: None,
+            InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            } => {
+                let text = self.composer.read(cx).value().to_string();
+                if text.trim().is_empty() {
+                    return;
+                }
+                let matches = self.filtered_slash_commands(&text);
+                if composer_enter_action(self.slash_menu == SlashMenuState::Open, matches.len())
+                    == ComposerEnterAction::AcceptCompletion
+                {
+                    if let Some(command) = matches.get(self.slash_selected) {
+                        let command = command.clone();
+                        self.accept_slash_command(&command, cx);
                     }
-                } else {
-                    RpcCommandBody::Prompt {
-                        message: text,
-                        images: None,
-                        streaming_behavior: None,
-                    }
+                    return;
+                }
+                let Some(client) = self.client.clone() else {
+                    return;
                 };
-                let _ = client.send(body).await;
-            })
-            .detach();
+
+                let steer = composer_uses_steer(&self.projection.run_phase);
+                self.projection.push_user_message(text.clone());
+                self.close_slash_menu();
+                self.clear_composer = true;
+                cx.notify();
+
+                cx.spawn(async move |_, _| {
+                    let body = if steer {
+                        RpcCommandBody::Steer {
+                            message: text,
+                            images: None,
+                        }
+                    } else {
+                        RpcCommandBody::Prompt {
+                            message: text,
+                            images: None,
+                            streaming_behavior: None,
+                        }
+                    };
+                    let _ = client.send(body).await;
+                })
+                .detach();
+            }
+            _ => {}
+        }
+    }
+
+    fn filtered_slash_commands(&self, text: &str) -> Vec<SlashCommand> {
+        let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        filter_slash_commands(&commands, text.trim_start())
+    }
+
+    fn update_slash_menu(&mut self, cx: &Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        if self.slash_menu == SlashMenuState::Dismissed || !slash_draft_is_open(&text) {
+            self.close_slash_menu();
+            return;
+        }
+
+        self.slash_menu = SlashMenuState::Open;
+        let match_count = self.filtered_slash_commands(&text).len();
+        self.slash_selected = self.slash_selected.min(match_count.saturating_sub(1));
+    }
+
+    fn close_slash_menu(&mut self) {
+        self.slash_menu = SlashMenuState::Closed;
+        self.slash_selected = 0;
+    }
+
+    fn accept_slash_command(&mut self, command: &SlashCommand, cx: &mut Context<Self>) {
+        self.pending_composer_value = Some(slash_completion_text(command));
+        self.close_slash_menu();
+        cx.notify();
+    }
+
+    fn handle_slash_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.keystroke.modifiers.modified() || self.slash_menu != SlashMenuState::Open {
+            return false;
+        }
+
+        let text = self.composer.read(cx).value().to_string();
+        if !slash_draft_is_open(&text) {
+            self.close_slash_menu();
+            return false;
+        }
+
+        let matches = self.filtered_slash_commands(&text);
+        self.slash_selected = self.slash_selected.min(matches.len().saturating_sub(1));
+        let key = slash_key_action(&event.keystroke.key).or_else(|| {
+            event
+                .keystroke
+                .key_char
+                .as_deref()
+                .and_then(slash_key_action)
+        });
+        match key {
+            Some(SlashKeyAction::Dismiss) => {
+                self.slash_menu = SlashMenuState::Dismissed;
+                self.slash_selected = 0;
+                cx.notify();
+                true
+            }
+            Some(SlashKeyAction::Up) if !matches.is_empty() => {
+                self.slash_selected = self
+                    .slash_selected
+                    .checked_sub(1)
+                    .unwrap_or(matches.len() - 1);
+                cx.notify();
+                true
+            }
+            Some(SlashKeyAction::Down) if !matches.is_empty() => {
+                self.slash_selected = (self.slash_selected + 1) % matches.len();
+                cx.notify();
+                true
+            }
+            Some(SlashKeyAction::Accept)
+                if composer_enter_action(
+                    self.slash_menu == SlashMenuState::Open,
+                    matches.len(),
+                ) == ComposerEnterAction::AcceptCompletion =>
+            {
+                if let Some(command) = matches.get(self.slash_selected) {
+                    let command = command.clone();
+                    self.accept_slash_command(&command, cx);
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -1106,12 +1239,139 @@ fn select_dialog_options(dialog: &UiDialog) -> Vec<String> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlashKeyAction {
+    Up,
+    Down,
+    Accept,
+    Dismiss,
+}
+
+fn slash_key_action(key: &str) -> Option<SlashKeyAction> {
+    match key {
+        "up" | "arrowup" => Some(SlashKeyAction::Up),
+        "down" | "arrowdown" => Some(SlashKeyAction::Down),
+        "enter" | "return" => Some(SlashKeyAction::Accept),
+        "escape" | "esc" => Some(SlashKeyAction::Dismiss),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerEnterAction {
+    AcceptCompletion,
+    Send,
+}
+
+fn composer_enter_action(menu_open: bool, match_count: usize) -> ComposerEnterAction {
+    if menu_open && match_count > 0 {
+        ComposerEnterAction::AcceptCompletion
+    } else {
+        ComposerEnterAction::Send
+    }
+}
+
+fn slash_draft_is_open(text: &str) -> bool {
+    let Some(command) = text.trim_start().strip_prefix('/') else {
+        return false;
+    };
+    command
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn normalize_slash_name(name: &str) -> Option<String> {
+    let name = name.trim().trim_start_matches('/');
+    (!name.is_empty()).then(|| format!("/{name}"))
+}
+
+fn parse_slash_command(raw: &serde_json::Value) -> Option<SlashCommand> {
+    if let Some(name) = raw.as_str() {
+        return Some(SlashCommand {
+            name: normalize_slash_name(name)?,
+            description: String::new(),
+            aliases: Vec::new(),
+        });
+    }
+
+    let name = raw.get("name").and_then(serde_json::Value::as_str)?;
+    let name = normalize_slash_name(name)?;
+    let description = raw
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(String::new, |description| description.trim().to_owned());
+    let mut aliases = Vec::new();
+    if let Some(raw_aliases) = raw.get("aliases") {
+        let values: Vec<&str> = raw_aliases
+            .as_array()
+            .map(|aliases| {
+                aliases
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect()
+            })
+            .or_else(|| raw_aliases.as_str().map(|alias| vec![alias]))
+            .unwrap_or_default();
+        for alias in values {
+            let Some(alias) = normalize_slash_name(alias) else {
+                continue;
+            };
+            if alias != name && !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+
+    Some(SlashCommand {
+        name,
+        description,
+        aliases,
+    })
+}
+
+fn parse_slash_commands(raw: Option<&serde_json::Value>) -> Vec<SlashCommand> {
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+    let entries: &[serde_json::Value] = raw
+        .as_array()
+        .or_else(|| raw.get("commands").and_then(serde_json::Value::as_array))
+        .map_or(&[], Vec::as_slice);
+    entries.iter().filter_map(parse_slash_command).collect()
+}
+
+fn slash_command_matches(command: &SlashCommand, query: &str) -> bool {
+    let query = query.trim_start().to_ascii_lowercase();
+    command.name.to_ascii_lowercase().starts_with(&query)
+        || command
+            .aliases
+            .iter()
+            .any(|alias| alias.to_ascii_lowercase().starts_with(&query))
+}
+
+fn filter_slash_commands(commands: &[SlashCommand], query: &str) -> Vec<SlashCommand> {
+    commands
+        .iter()
+        .filter(|command| slash_command_matches(command, query))
+        .take(SLASH_COMMAND_VISIBLE_CAP)
+        .cloned()
+        .collect()
+}
+
+fn slash_completion_text(command: &SlashCommand) -> String {
+    format!("{} ", command.name)
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 
 impl Render for SessionView {
     #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.clear_composer {
+        if let Some(value) = self.pending_composer_value.take() {
+            self.composer.update(cx, |input, cx| {
+                input.set_value(value, window, cx);
+            });
+        } else if self.clear_composer {
             self.clear_composer = false;
             self.composer.update(cx, |input, cx| {
                 input.set_value("", window, cx);
@@ -1162,13 +1422,27 @@ impl Render for SessionView {
             String::new()
         };
         let view = cx.entity();
+        let composer_text = self.composer.read(cx).value().to_string();
+        let slash_menu_visible =
+            self.slash_menu == SlashMenuState::Open && slash_draft_is_open(&composer_text);
+        let slash_matches = if slash_menu_visible {
+            self.filtered_slash_commands(&composer_text)
+        } else {
+            Vec::new()
+        };
+        self.slash_selected = self
+            .slash_selected
+            .min(slash_matches.len().saturating_sub(1));
+        let slash_has_matches = !slash_matches.is_empty();
 
         v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
-            .capture_key_down(cx.listener(|this, event, _window, cx| {
-                if this.handle_dialog_key(event, cx) {
+            .capture_key_down(cx.listener(|this, event, window, cx| {
+                let handled =
+                    this.handle_dialog_key(event, cx) || this.handle_slash_key(event, window, cx);
+                if handled {
                     cx.stop_propagation();
                 }
             }))
@@ -1367,11 +1641,83 @@ impl Render for SessionView {
                     .border_t_1()
                     .border_color(theme.border)
                     .child(
-                        div().flex_1().child(
-                            Input::new(&self.composer)
-                                .appearance(false)
-                                .focus_bordered(false),
-                        ),
+                        div()
+                            .relative()
+                            .flex_1()
+                            .child(
+                                Input::new(&self.composer)
+                                    .appearance(false)
+                                    .focus_bordered(false),
+                            )
+                            .when(slash_menu_visible, |parent| {
+                                parent.child(
+                                    v_flex()
+                                        .absolute()
+                                        .bottom_full()
+                                        .left_0()
+                                        .right_0()
+                                        .max_h(px(280.))
+                                        .overflow_y_scrollbar()
+                                        .gap_0()
+                                        .p_1()
+                                        .bg(theme.background)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .children(slash_matches.iter().enumerate().map(
+                                            |(ix, command)| {
+                                                let command_for_click = command.clone();
+                                                Button::new(("slash-command", ix))
+                                                    .ghost()
+                                                    .small()
+                                                    .w_full()
+                                                    .when(ix == self.slash_selected, |button| {
+                                                        button.bg(theme.secondary)
+                                                    })
+                                                    .on_click(window.listener_for(
+                                                        &view,
+                                                        move |this, _, _window, cx| {
+                                                            this.accept_slash_command(
+                                                                &command_for_click,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        h_flex()
+                                                            .w_full()
+                                                            .gap_2()
+                                                            .child(
+                                                                Label::new(command.name.clone())
+                                                                    .text_sm(),
+                                                            )
+                                                            .when(
+                                                                !command.description.is_empty(),
+                                                                |row| {
+                                                                    row.child(
+                                                                        Label::new(
+                                                                            command
+                                                                                .description
+                                                                                .clone(),
+                                                                        )
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            theme.muted_foreground,
+                                                                        ),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    )
+                                            },
+                                        ))
+                                        .when(!slash_has_matches, |panel| {
+                                            panel.child(
+                                                Label::new("(no matches)")
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        }),
+                                )
+                            }),
                     )
                     .child(
                         Button::new("send")
@@ -2775,6 +3121,89 @@ mod tests {
         assert_ne!(id, code_block_copy_id(3, Some("python"), "fn main() {}"));
         assert_ne!(id, code_block_copy_id(3, Some("rust"), "print()"));
         assert_ne!(id, code_block_copy_id(3, None, "fn main() {}"));
+    }
+
+    #[test]
+    fn slash_commands_normalize_names_and_wrapper_shapes() {
+        let raw = serde_json::json!({
+            "commands": [
+                {
+                    "name": "help",
+                    "description": " Show help ",
+                    "aliases": ["h", "/help", "h"]
+                },
+                "status"
+            ]
+        });
+        let commands = parse_slash_commands(Some(&raw));
+        assert_eq!(
+            commands,
+            vec![
+                SlashCommand {
+                    name: "/help".into(),
+                    description: "Show help".into(),
+                    aliases: vec!["/h".into()],
+                },
+                SlashCommand {
+                    name: "/status".into(),
+                    description: String::new(),
+                    aliases: Vec::new(),
+                },
+            ]
+        );
+
+        let array = serde_json::json!([{ "name": "/quit", "aliases": ["q"] }]);
+        assert_eq!(parse_slash_commands(Some(&array))[0].name, "/quit");
+    }
+
+    #[test]
+    fn slash_filter_matches_aliases_and_caps_results() {
+        let commands = (0..(SLASH_COMMAND_VISIBLE_CAP + 2))
+            .map(|ix| SlashCommand {
+                name: format!("/command-{ix}"),
+                description: String::new(),
+                aliases: if ix == 0 {
+                    vec!["/go".into()]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect::<Vec<_>>();
+        let matches = filter_slash_commands(&commands, "/GO");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "/command-0");
+
+        let capped = filter_slash_commands(&commands, "/");
+        assert_eq!(capped.len(), SLASH_COMMAND_VISIBLE_CAP);
+    }
+
+    #[test]
+    fn slash_draft_predicate_requires_a_slash_only_draft() {
+        assert!(slash_draft_is_open("/"));
+        assert!(slash_draft_is_open("  /build-2"));
+        assert!(!slash_draft_is_open("build /"));
+        assert!(!slash_draft_is_open("/build "));
+        assert!(!slash_draft_is_open("/build.task"));
+    }
+
+    #[test]
+    fn slash_enter_accepts_only_when_menu_has_matches() {
+        assert_eq!(
+            composer_enter_action(true, 1),
+            ComposerEnterAction::AcceptCompletion
+        );
+        assert_eq!(composer_enter_action(true, 0), ComposerEnterAction::Send);
+        assert_eq!(composer_enter_action(false, 1), ComposerEnterAction::Send);
+    }
+
+    #[test]
+    fn slash_completion_uses_primary_name_with_trailing_space() {
+        let command = SlashCommand {
+            name: "/help".into(),
+            description: String::new(),
+            aliases: vec!["/h".into()],
+        };
+        assert_eq!(slash_completion_text(&command), "/help ");
     }
 
     #[test]
