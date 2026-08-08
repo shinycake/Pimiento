@@ -10,6 +10,16 @@ pub(crate) const ABORT_ARM_STATUS: &str = "Press Esc again to abort";
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 480.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 320.0;
 pub(crate) static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(crate) type ConnectionResult = Result<
+    (
+        RpcClient,
+        SessionProjection,
+        String,
+        Vec<ModelChoice>,
+        Option<String>,
+    ),
+    String,
+>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlashCommand {
@@ -62,6 +72,7 @@ pub(crate) struct SessionView {
     pub(crate) slash_selected: usize,
     pub(crate) status_message: String,
     pub(crate) omp_version: Option<String>,
+    pub(crate) version_gate_notice: Option<String>,
     pub(crate) abort_arm: Option<AbortArm>,
     pub(crate) abort_arm_generation: u64,
     pub(crate) available_models: Vec<ModelChoice>,
@@ -167,6 +178,7 @@ impl SessionView {
             slash_selected: 0,
             status_message: status,
             omp_version,
+            version_gate_notice: None,
             abort_arm: None,
             abort_arm_generation: 0,
             available_models,
@@ -249,6 +261,7 @@ impl SessionView {
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
+        self.version_gate_notice = None;
         self.launcher_phase = LauncherPhase::Connecting;
         if launcher_mode {
             self.launcher_cwd.clone_from(&cwd);
@@ -297,7 +310,7 @@ impl SessionView {
 
     pub(crate) fn finish_connection(
         &mut self,
-        result: Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String>,
+        result: ConnectionResult,
         cwd: PathBuf,
         launcher_mode: bool,
         cx: &mut Context<Self>,
@@ -308,10 +321,11 @@ impl SessionView {
             LauncherPhase::Hidden
         };
         match result {
-            Ok((client, projection, status, models)) => {
+            Ok((client, projection, status, models, version_gate_notice)) => {
                 self.available_models = models;
                 self.projection = projection;
                 self.omp_version = Some(status.clone());
+                self.version_gate_notice = version_gate_notice;
                 self.status_message = status;
                 self.client = Some(client.clone());
                 self.session_cwd = Some(cwd);
@@ -2332,6 +2346,7 @@ impl Render for SessionView {
         let retrying = matches!(self.projection.run_phase, RunPhase::Retrying);
         let fallback_banner = self.projection.fallback_banner.clone();
         let show_activity_banner = compacting || retrying || fallback_banner.is_some();
+        let version_gate_notice = self.version_gate_notice.clone();
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -2610,6 +2625,18 @@ impl Render for SessionView {
                                 )
                             }),
                     )
+                    .when_some(version_gate_notice, |parent, notice| {
+                        parent.child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .py_1()
+                                .gap_2()
+                                .bg(theme.warning)
+                                .text_xs()
+                                .child(notice),
+                        )
+                    })
                     .when(show_activity_banner, |parent| {
                         parent.child(
                             div()
@@ -3299,7 +3326,7 @@ pub(crate) fn try_connect_omp(
     cwd: Option<PathBuf>,
     resume: Option<&Path>,
     persistence: &SessionPersistence,
-) -> Result<(RpcClient, SessionProjection, String, Vec<ModelChoice>), String> {
+) -> ConnectionResult {
     let inputs = DiscoveryInputs {
         override_bin: std::env::var_os("PIMIENTO_OMP_BIN")
             .map(PathBuf::from)
@@ -3375,6 +3402,16 @@ pub(crate) fn try_connect_omp(
     let models = Vec::new();
 
     let status = discovered.version_text.trim().to_owned();
+    let version_gate_notice = format_version_gate_notice(discovered.version);
 
-    Ok((client, proj, status, models))
+    Ok((client, proj, status, models, version_gate_notice))
+}
+
+pub(crate) fn format_version_gate_notice(version: OmpVersion) -> Option<String> {
+    match version.support() {
+        VersionSupport::Supported => None,
+        VersionSupport::BelowMinimum | VersionSupport::Newer => Some(format!(
+            "Pimiento was tested with omp {MIN_SUPPORTED}+; you have {version} — unknown events will still render"
+        )),
+    }
 }

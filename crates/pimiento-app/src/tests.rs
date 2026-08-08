@@ -13,6 +13,36 @@ fn composer_steers_only_while_streaming() {
     assert!(!composer_uses_steer(&RunPhase::Idle));
     assert!(!composer_uses_steer(&RunPhase::Dead));
 }
+
+#[test]
+fn version_gate_notice_only_formats_outside_tested_baseline() {
+    assert_eq!(format_version_gate_notice(MIN_SUPPORTED), None);
+
+    let below = OmpVersion {
+        major: 17,
+        minor: 2,
+        patch: 9,
+    };
+    assert_eq!(
+        format_version_gate_notice(below).as_deref(),
+        Some(
+            "Pimiento was tested with omp 17.2.10+; you have 17.2.9 — unknown events will still render"
+        )
+    );
+
+    let newer = OmpVersion {
+        major: 17,
+        minor: 3,
+        patch: 0,
+    };
+    assert_eq!(
+        format_version_gate_notice(newer).as_deref(),
+        Some(
+            "Pimiento was tested with omp 17.2.10+; you have 17.3.0 — unknown events will still render"
+        )
+    );
+}
+
 #[test]
 fn workspace_digit_key_maps_one_through_nine() {
     assert_eq!(workspace_digit_key("1"), Some(1));
