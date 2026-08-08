@@ -800,6 +800,17 @@ fn hydrate_get_state_promotes_scalars_and_marks_durable() {
 }
 
 #[test]
+fn hydrate_get_state_reads_top_level_fast_mode_booleans() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "fastModeEnabled": false,
+        "fastModeActive": true,
+    }));
+    assert_eq!(p.state.fast_mode_enabled, Some(false));
+    assert_eq!(p.state.fast_mode_active, Some(true));
+}
+
+#[test]
 fn hydrate_available_commands_stores_raw() {
     let mut p = SessionProjection::new();
     p.hydrate_available_commands(&json!({ "commands": [ {"name":"/compact"} ] }));

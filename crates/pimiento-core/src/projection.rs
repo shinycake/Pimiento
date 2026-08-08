@@ -950,9 +950,17 @@ impl SessionProjection {
         if let Some(s) = str_field("parentSession") {
             self.state.parent_session = Some(s);
         }
+        // OMP 17.2.10 `get_state` publishes top-level `fastModeEnabled` /
+        // `fastModeActive`; older fixtures used nested `fastMode.{enabled,active}`.
         if let Some(fm) = state.get("fastMode") {
             self.state.fast_mode_enabled = fm.get("enabled").and_then(Value::as_bool);
             self.state.fast_mode_active = fm.get("active").and_then(Value::as_bool);
+        }
+        if let Some(b) = bool_field("fastModeEnabled") {
+            self.state.fast_mode_enabled = Some(b);
+        }
+        if let Some(b) = bool_field("fastModeActive") {
+            self.state.fast_mode_active = Some(b);
         }
         if let Some(t) = val_field("tokens").or_else(|| val_field("usage")) {
             self.state.tokens = Some(t);
