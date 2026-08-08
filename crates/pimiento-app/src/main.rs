@@ -1175,17 +1175,25 @@ fn try_connect_omp(
         (!raw.is_empty()).then(|| PathBuf::from(raw))
     });
 
-    let cfg = ClientConfig {
+    let mut cfg = ClientConfig {
         program: discovered.path,
         env: discovered.env,
         cwd,
         no_session: false,
-        resume,
+        resume: resume.clone(),
         ..Default::default()
     };
 
-    let client = smol::block_on(async { RpcClient::connect(cfg).await })
-        .map_err(|e| format!("OMP connect failed: {e}"))?;
+    let client = match smol::block_on(async { RpcClient::connect(cfg.clone()).await }) {
+        Ok(c) => c,
+        Err(e) if resume.is_some() => {
+            let _ = std::fs::remove_file(last_session_path());
+            cfg.resume = None;
+            smol::block_on(async { RpcClient::connect(cfg).await })
+                .map_err(|e2| format!("OMP connect failed (resume {e}; fresh {e2})"))?
+        }
+        Err(e) => return Err(format!("OMP connect failed: {e}")),
+    };
 
     let get_state = smol::block_on(async { client.send(RpcCommandBody::GetState).await });
     let avail = smol::block_on(async { client.send(RpcCommandBody::GetAvailableCommands).await });
