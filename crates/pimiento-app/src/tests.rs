@@ -145,12 +145,12 @@ fn rail_attention_prioritizes_activity_then_unread() {
 #[test]
 fn workspace_title_includes_authoritative_name_and_phase() {
     assert_eq!(
-        workspace_window_title("Fix renderer", &RunPhase::Streaming),
-        "Pimiento — Fix renderer · streaming"
+        workspace_window_title("Pimiento", &RunPhase::Idle),
+        "Pimiento · idle"
     );
     assert_eq!(
-        workspace_window_title("Pimiento", &RunPhase::Idle),
-        "Pimiento — Pimiento · idle"
+        workspace_window_title("Fix renderer", &RunPhase::Streaming),
+        "Pimiento — Fix renderer · streaming"
     );
 }
 

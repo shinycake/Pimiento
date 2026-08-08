@@ -40,7 +40,7 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
         PaletteEntry {
             id: PaletteActionId::ToggleTodos,
             label: "Show checklist in inspector",
-            hint: "todos checklist",
+            hint: "checklist",
         },
         PaletteEntry {
             id: PaletteActionId::ToggleAgents,

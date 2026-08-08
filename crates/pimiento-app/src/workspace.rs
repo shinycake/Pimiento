@@ -27,7 +27,11 @@ pub(crate) fn workspace_window_title(session_name: &str, phase: &RunPhase) -> St
         RunPhase::Restarting => "restarting",
         RunPhase::Dead => "dead",
     };
-    format!("Pimiento — {session_name} · {phase}")
+    if session_name == "Pimiento" || session_name.trim().is_empty() {
+        format!("Pimiento · {phase}")
+    } else {
+        format!("Pimiento — {session_name} · {phase}")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,13 +649,6 @@ pub(crate) fn render_inspector(
                         )
                         .child(Tag::secondary().small().child(todo_count.to_string())),
                 )
-                .when(todo_phases.is_empty(), |section| {
-                    section.child(
-                        Label::new("No checklist")
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
-                    )
-                })
                 .children(todo_phases.iter().map(|phase| {
                     v_flex()
                         .w_full()
@@ -701,13 +698,17 @@ pub(crate) fn render_inspector(
                                 )),
                         ),
                 )
-                .when(!subagent_status.is_empty(), |section| {
-                    section.child(
-                        Label::new(subagent_status.clone())
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
-                    )
-                })
+                .when(
+                    !(subagent_status.is_empty()
+                        || subagent_rows.is_empty() && subagent_status == "No agents reported"),
+                    |section| {
+                        section.child(
+                            Label::new(subagent_status.clone())
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    },
+                )
                 .children(subagent_rows.iter().enumerate().map(|(ix, (id, summary))| {
                     let id = id.clone();
                     let selected = selected_subagent_id.as_deref() == Some(id.as_str());
@@ -739,18 +740,6 @@ pub(crate) fn render_inspector(
                                     .text_color(theme.muted_foreground)
                             },
                         ))
-                    },
-                )
-                .when(
-                    subagent_rows.is_empty()
-                        && fallback_subagent_events.is_empty()
-                        && subagent_status.is_empty(),
-                    |section| {
-                        section.child(
-                            Label::new("No agents")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
                     },
                 ),
         )
