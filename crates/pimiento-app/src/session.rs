@@ -2997,8 +2997,9 @@ impl Render for SessionView {
                                 .children(palette_matches.iter().enumerate().map(|(ix, entry)| {
                                     let id = entry.id;
                                     let selected = ix == palette_selected;
+                                    let theme_pref = cx.global::<ThemePreferenceState>().0;
                                     Button::new(("palette-entry", ix))
-                                        .label(format!("{} · {}", entry.label, entry.hint))
+                                        .label(palette_entry_display_label(entry, theme_pref))
                                         .small()
                                         .w_full()
                                         .when(selected, Button::primary)

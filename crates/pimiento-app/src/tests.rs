@@ -260,6 +260,21 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
+fn palette_theme_entry_shows_current_preference() {
+    assert_eq!(
+        palette_entry_display_label(
+            &PaletteEntry {
+                id: PaletteActionId::ToggleTheme,
+                label: "Theme",
+                hint: "cycle",
+            },
+            ThemePreference::Light
+        ),
+        "Theme: Light · cycle system → light → dark"
+    );
+}
+
+#[test]
 fn groups_sessions_by_workspace_name_and_preserves_session_order() {
     let entries = vec![
         RailEntry {
