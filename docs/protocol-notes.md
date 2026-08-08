@@ -164,3 +164,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `retry_fallback_applied` carries `{ from, to, role }`; `retry_fallback_succeeded` carries `{ model, role }`. Pimiento reads these only from the retained raw event JSON, emits human-readable retry rows, and omits missing values without guessing.
 - An applied fallback sets a wire-derived sticky banner (`Using fallback model …`); OMP's fallback-success or retry-end event clears it. `auto_retry_*` attempt counts are rendered only when supplied by the raw event.
 - `auto_compaction_start/end` render as `Compacting…` and `Compaction complete`, rather than debug enum names.
+
+## Transcript copy affordances — 2026-08-08
+
+- Error, notice, command-output, unknown-frame, and expanded tool rows expose small copy actions using only their projected text or JSON fields.
