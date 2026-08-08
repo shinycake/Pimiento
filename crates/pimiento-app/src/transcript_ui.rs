@@ -200,8 +200,8 @@ pub(crate) fn render_entry(
             let mount_noise = notice_looks_like_mount_event(text);
             div()
                 .w_full()
-                .when(mount_noise, |row| row.py_0p5())
-                .when(!mount_noise, |row| row.py_1())
+                .when(mount_noise, gpui::Styled::py_0p5)
+                .when(!mount_noise, gpui::Styled::py_1)
                 .child(
                     h_flex()
                         .w_full()
