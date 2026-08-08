@@ -3665,25 +3665,44 @@ fn render_entry(
                 )
                 .into_any_element()
         }
-        TranscriptEntry::AssistantText { markdown, .. } => div()
-            .w_full()
-            .py_1()
-            .child(
-                TextView::markdown(("assistant", row_ix), markdown.as_str())
-                    .selectable(true)
-                    .code_block_actions(move |code_block, _, _cx| {
-                        let code = code_block.code().to_string();
-                        let lang = code_block.lang().map(|lang| lang.to_string());
-                        Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
-                            .label("Copy")
-                            .small()
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                            })
-                    }),
-            )
-            .into_any_element(),
+        TranscriptEntry::AssistantText { markdown, .. } => {
+            let markdown_for_copy = markdown.as_str().to_owned();
+            h_flex()
+                .w_full()
+                .gap_2()
+                .py_1()
+                .child(
+                    div().flex_1().child(
+                        TextView::markdown(("assistant", row_ix), markdown.as_str())
+                            .selectable(true)
+                            .code_block_actions(move |code_block, _, _cx| {
+                                let code = code_block.code().to_string();
+                                let lang = code_block.lang().map(|lang| lang.to_string());
+                                Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
+                                    .label("Copy")
+                                    .small()
+                                    .ghost()
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            code.clone(),
+                                        ));
+                                    })
+                            }),
+                    ),
+                )
+                .child(
+                    Button::new(("copy-assistant", row_ix))
+                        .label("Copy")
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                markdown_for_copy.clone(),
+                            ));
+                        }),
+                )
+                .into_any_element()
+        }
         TranscriptEntry::Thinking {
             collapsed: true, ..
         } => {

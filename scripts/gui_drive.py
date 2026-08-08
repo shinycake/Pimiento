@@ -32,6 +32,13 @@ def ensure_alive() -> int:
 
 
 def frontmost() -> None:
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        if osa('tell application "System Events" to exists process "pimiento-app"') == "true":
+            break
+        time.sleep(0.1)
+    else:
+        raise SystemExit("pimiento-app did not appear in System Events within 3 seconds")
     osa('tell application "System Events" to set frontmost of process "pimiento-app" to true')
     time.sleep(0.12)
 
