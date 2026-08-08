@@ -7,7 +7,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui::{App, ClickEvent, Context, Render, Task, Window, WindowOptions, div, prelude::*, px};
+use gpui::{
+    App, ClickEvent, Context, KeyDownEvent, Render, Task, Window, WindowOptions, div, prelude::*,
+    px,
+};
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
     button::{Button, ButtonVariants as _},
@@ -450,6 +453,81 @@ impl SessionView {
             .any(|d| d.id == dialog_id);
         Some((client, exists))
     }
+
+    fn handle_dialog_key(&self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if event.keystroke.modifiers.modified() {
+            return false;
+        }
+        let Some(dialog) = self.projection.pending_dialogs.first() else {
+            return false;
+        };
+        let option_count = select_dialog_options(dialog).len();
+        let action =
+            dialog_key_action(&event.keystroke.key, &dialog.method, option_count).or_else(|| {
+                event
+                    .keystroke
+                    .key_char
+                    .as_deref()
+                    .and_then(|key| dialog_key_action(key, &dialog.method, option_count))
+            });
+        let Some(action) = action else {
+            return false;
+        };
+
+        let view = cx.entity().downgrade();
+        let id = dialog.id.clone();
+        match action {
+            DialogKeyAction::Confirm => {
+                let mut fields = serde_json::Map::new();
+                fields.insert("accepted".into(), serde_json::Value::Bool(true));
+                do_dialog_response(&view, &id, fields, cx);
+            }
+            DialogKeyAction::Deny => {
+                let mut fields = serde_json::Map::new();
+                fields.insert("accepted".into(), serde_json::Value::Bool(false));
+                do_dialog_response(&view, &id, fields, cx);
+            }
+            DialogKeyAction::Cancel => do_cancel_dialog(&view, &id, cx),
+            DialogKeyAction::Select(idx) => {
+                if let Some(opt) = select_dialog_options(dialog).into_iter().nth(idx) {
+                    let mut fields = serde_json::Map::new();
+                    fields.insert("value".into(), serde_json::Value::String(opt));
+                    do_dialog_response(&view, &id, fields, cx);
+                }
+            }
+        }
+        true
+    }
+
+    fn can_follow_up(&self, cx: &Context<Self>) -> bool {
+        self.client.is_some()
+            && matches!(self.projection.run_phase, RunPhase::Streaming)
+            && !self.composer.read(cx).value().trim().is_empty()
+    }
+
+    fn do_follow_up(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+
+        self.projection.push_user_message(text.clone());
+        self.clear_composer = true;
+        cx.notify();
+
+        cx.spawn(async move |_, _| {
+            let _ = client
+                .send(RpcCommandBody::FollowUp {
+                    message: text,
+                    images: None,
+                })
+                .await;
+        })
+        .detach();
+    }
 }
 
 // ── guards ────────────────────────────────────────────────────────────────
@@ -467,6 +545,40 @@ fn phase_allows_abort(phase: &RunPhase) -> bool {
         phase,
         RunPhase::Streaming | RunPhase::AwaitingResume | RunPhase::Compacting | RunPhase::Retrying
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogKeyAction {
+    Confirm,
+    Deny,
+    Cancel,
+    Select(usize),
+}
+
+fn dialog_key_action(key: &str, method: &str, option_count: usize) -> Option<DialogKeyAction> {
+    match key {
+        "escape" => Some(DialogKeyAction::Cancel),
+        "y" | "Y" if method == "confirm" => Some(DialogKeyAction::Confirm),
+        "n" | "N" if method == "confirm" => Some(DialogKeyAction::Deny),
+        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if method == "select" => {
+            let idx = key.chars().next()?.to_digit(10)? as usize - 1;
+            (idx < option_count).then_some(DialogKeyAction::Select(idx))
+        }
+        _ => None,
+    }
+}
+
+fn select_dialog_options(dialog: &UiDialog) -> Vec<String> {
+    dialog
+        .payload
+        .get("options")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ── render ────────────────────────────────────────────────────────────────
@@ -526,6 +638,11 @@ impl Render for SessionView {
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .capture_key_down(cx.listener(|this, event, _window, cx| {
+                if this.handle_dialog_key(event, cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 v_flex()
                     .w_full()
@@ -693,6 +810,19 @@ impl Render for SessionView {
                                     cx,
                                 );
                             })),
+                    )
+                    .when(
+                        matches!(self.projection.run_phase, RunPhase::Streaming),
+                        |parent| {
+                            parent.child(
+                                Button::new("follow-up")
+                                    .label("Follow-up")
+                                    .disabled(!self.can_follow_up(cx))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                        this.do_follow_up(cx);
+                                    })),
+                            )
+                        },
                     )
                     .when(self.can_abort(), |parent| {
                         parent.child(Button::new("abort").danger().label("Abort").on_click(
@@ -992,19 +1122,7 @@ fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyE
             },
         )
         .child(match dialog.method.as_str() {
-            "select" => {
-                let options: Vec<String> = dialog
-                    .payload
-                    .get("options")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                render_select_dialog(dialog, &options, cx)
-            }
+            "select" => render_select_dialog(dialog, &select_dialog_options(dialog), cx),
             "confirm" => render_confirm_dialog(dialog, cx),
             _ => render_cancel_button(dialog, cx),
         })
@@ -1346,6 +1464,49 @@ mod tests {
     fn phase_disallows_abort_dead() {
         assert!(!phase_allows_abort(&RunPhase::Dead));
     }
+    #[test]
+    fn dialog_key_confirm_yes_no_escape() {
+        assert_eq!(
+            dialog_key_action("y", "confirm", 0),
+            Some(DialogKeyAction::Confirm)
+        );
+        assert_eq!(
+            dialog_key_action("Y", "confirm", 0),
+            Some(DialogKeyAction::Confirm)
+        );
+        assert_eq!(
+            dialog_key_action("n", "confirm", 0),
+            Some(DialogKeyAction::Deny)
+        );
+        assert_eq!(
+            dialog_key_action("N", "confirm", 0),
+            Some(DialogKeyAction::Deny)
+        );
+        assert_eq!(
+            dialog_key_action("escape", "confirm", 0),
+            Some(DialogKeyAction::Cancel)
+        );
+        assert_eq!(dialog_key_action("1", "confirm", 0), None);
+    }
+
+    #[test]
+    fn dialog_key_select_digits_and_escape() {
+        assert_eq!(
+            dialog_key_action("1", "select", 3),
+            Some(DialogKeyAction::Select(0))
+        );
+        assert_eq!(
+            dialog_key_action("3", "select", 3),
+            Some(DialogKeyAction::Select(2))
+        );
+        assert_eq!(dialog_key_action("4", "select", 3), None);
+        assert_eq!(
+            dialog_key_action("escape", "select", 3),
+            Some(DialogKeyAction::Cancel)
+        );
+        assert_eq!(dialog_key_action("y", "select", 3), None);
+    }
+
     #[test]
     fn next_theme_mode_flips_both_ways() {
         assert_eq!(next_theme_mode(ThemeMode::Light), ThemeMode::Dark);
