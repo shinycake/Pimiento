@@ -261,6 +261,29 @@ impl SessionProjection {
         self.state.quality = StateQuality::Durable;
     }
 
+    /// Hydrate the ordered transcript from a `get_messages` response.
+    ///
+    /// The caller supplies a fresh projection. Tool calls are indexed while
+    /// walking the message history so later `toolResult` messages can update
+    /// the corresponding row in place.
+    pub fn hydrate_messages(&mut self, data: &Value) {
+        let Some(messages) = data.get("messages").and_then(Value::as_array) else {
+            return;
+        };
+
+        for message in messages {
+            match message.get("role").and_then(Value::as_str) {
+                Some("user") => {
+                    let text = message_content_text(message.get("content"));
+                    self.transcript.push(TranscriptEntry::User { text });
+                }
+                Some("assistant") => self.hydrate_assistant_message(message),
+                Some("toolResult") => self.hydrate_tool_result(message),
+                _ => self.push_unknown(message),
+            }
+        }
+    }
+
     /// Explicitly hydrate the `available_commands` snapshot from a
     /// `list_commands` (or equivalent) command response.
     pub fn hydrate_available_commands(&mut self, data: &Value) {
@@ -762,6 +785,106 @@ impl SessionProjection {
 
     // -------- Hydration --------
 
+    fn hydrate_assistant_message(&mut self, message: &Value) {
+        let Some(content) = message.get("content") else {
+            return;
+        };
+
+        match content {
+            Value::String(text) => {
+                if !text.is_empty() {
+                    self.transcript.push(TranscriptEntry::AssistantText {
+                        markdown: Markdown(text.clone()),
+                        streaming: false,
+                    });
+                }
+            }
+            Value::Array(parts) => {
+                for part in parts {
+                    match part.get("type").and_then(Value::as_str) {
+                        Some("thinking") => {
+                            let text = part
+                                .get("thinking")
+                                .or_else(|| part.get("text"))
+                                .and_then(Value::as_str);
+                            if let Some(text) = text.filter(|text| !text.is_empty()) {
+                                self.transcript.push(TranscriptEntry::Thinking {
+                                    text: text.to_owned(),
+                                    streaming: false,
+                                    collapsed: true,
+                                });
+                            }
+                        }
+                        Some("text") => {
+                            if let Some(text) = part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.is_empty())
+                            {
+                                self.transcript.push(TranscriptEntry::AssistantText {
+                                    markdown: Markdown(text.to_owned()),
+                                    streaming: false,
+                                });
+                            }
+                        }
+                        Some("toolCall") => self.hydrate_tool_call(part),
+                        _ => self.push_unknown(part),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn hydrate_tool_call(&mut self, part: &Value) {
+        let tool_call_id = part
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| part.get("toolCallId").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_owned();
+        let name = part
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let args = part.get("arguments").cloned().unwrap_or(Value::Null);
+        let idx = self.transcript.len();
+        self.transcript
+            .push(TranscriptEntry::ToolCall(ToolCall::new_running(
+                tool_call_id.clone(),
+                name,
+                args,
+            )));
+        self.tool_index.insert(tool_call_id, idx);
+    }
+
+    fn hydrate_tool_result(&mut self, message: &Value) {
+        let tool_call_id = message
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let text = message_content_text(message.get("content"));
+        let status = if message
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            ToolStatus::Err
+        } else {
+            ToolStatus::Ok
+        };
+
+        if let Some(idx) = self.tool_index.get(tool_call_id).copied()
+            && let Some(TranscriptEntry::ToolCall(call)) = self.transcript.get_mut(idx)
+        {
+            call.output.push_str(&text);
+            call.status = status;
+        } else {
+            self.transcript.push(TranscriptEntry::CommandOutput(text));
+        }
+    }
+
     fn hydrate_state_object(&mut self, data: &Value) {
         // Accept either `{state: {...}}` (get_state response envelope) or a
         // bare state object.
@@ -818,6 +941,32 @@ impl SessionProjection {
     fn push_unknown(&mut self, raw: &Value) {
         self.transcript
             .push(TranscriptEntry::Unknown { raw: raw.clone() });
+    }
+}
+
+fn message_content_text(content: Option<&Value>) -> String {
+    let Some(content) = content else {
+        return String::new();
+    };
+
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("type")
+                    .and_then(Value::as_str)
+                    .filter(|kind| *kind == "text")
+                    .and_then(|_| part.get("text"))
+                    .and_then(Value::as_str)
+            })
+            .collect(),
+        Value::Object(part) if part.get("type").and_then(Value::as_str) == Some("text") => part
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        _ => String::new(),
     }
 }
 

@@ -750,6 +750,207 @@ fn available_commands_update_frame_stores_raw() {
     assert!(p.available_commands_raw.is_some());
 }
 
+fn live_message_fixture() -> (Value, &'static str, String, &'static str) {
+    const TOOL_ID: &str = "tool_627fa889-d150-45ed-a3b8-8ee8eea17be";
+    const RUST_ANSWER: &str = "Here's a Rust fenced block:\n\n```rust\nfn main() {\n    println!(\"Hello, world!\");\n}\n```";
+    let ls_output = concat!(
+        "total 308\n",
+        "drwxr-xr-x 17 idan staff    544 Aug  7 18:38 .\n",
+        "drwxr-xr-x 15 idan staff    480 Aug  6 17:33 ..\n",
+        "-rw-r--r--  1 idan staff   6148 Aug  6 17:45 .DS_Store\n",
+        "drwxr-xr-x  3 idan staff     96 Aug  6 17:59 .cargo\n",
+        "drwxr-xr-x 14 idan staff    448 Aug  7 22:08 .git\n",
+        "-rw-r--r--  1 idan staff    305 Aug  6 17:59 .gitignore\n",
+        "-rw-r--r--  1 idan staff   7358 Aug  6 17:59 AGENTS.md\n",
+        "-rw-r--r--  1 idan staff 220803 Aug  6 21:20 Cargo.lock\n",
+        "-rw-r--r--  1 idan staff   3174 Aug  6 19:10 Cargo.toml\n",
+        "-rw-r--r--  1 idan staff  13602 Aug  6 17:46 KICKOFF-PROMPT.md\n",
+        "-rw-r--r--  1 idan staff  42986 Aug  6 17:46 PLAN.md\n",
+        "-rw-r--r--  1 idan staff   3461 Aug  6 17:46 README.md\n",
+        "drwxr-xr-x  5 idan staff    160 Aug  6 17:59 crates\n",
+        "drwxr-xr-x  3 idan staff     96 Aug  7 22:08 docs\n",
+        "-rw-r--r--  1 idan staff     83 Aug  6 17:59 rust-toolchain.toml\n",
+        "drwxr-xr-x  5 idan staff    160 Aug  6 17:59 scripts\n",
+        "drwxr-xr-x  8 idan staff    256 Aug  6 18:29 target\n",
+    );
+    let ls_answer = format!(
+        "Here is the output of `ls -la`:\n\n```\n{ls_output}\n```\n\nThis looks like a Rust workspace with `crates/`, `Cargo.toml`, and related project files."
+    );
+    let messages = json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "run `ls -la` and give me the output " }]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "Running `ls -la` to get the directory listing." },
+                    { "type": "text", "text": "Running `ls -la` in the workspace.\n" },
+                    {
+                        "type": "toolCall",
+                        "id": TOOL_ID,
+                        "name": "bash",
+                        "arguments": { "command": "ls -la" }
+                    },
+                    { "type": "thinking", "thinking": "The command completed successfully." },
+                    { "type": "text", "text": ls_answer }
+                ]
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": TOOL_ID,
+                "toolName": "bash",
+                "content": [{ "type": "text", "text": ls_output }],
+                "isError": false
+            },
+            {
+                "role": "user",
+                "content": [{ "type": "text", "text": "show me a  rust fenced block" }]
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    { "type": "thinking", "thinking": "Preparing a Rust fenced code block example." },
+                    { "type": "text", "text": RUST_ANSWER }
+                ]
+            }
+        ]
+    });
+    (messages, ls_output, ls_answer, RUST_ANSWER)
+}
+
+#[test]
+fn hydrate_messages_replays_live_tool_and_rust_turns() {
+    let (messages, ls_output, ls_answer, rust_answer) = live_message_fixture();
+    let mut p = SessionProjection::new();
+    p.hydrate_messages(&messages);
+
+    assert_eq!(p.transcript.len(), 9);
+    assert!(matches!(
+        &p.transcript[0],
+        TranscriptEntry::User { text } if text == "run `ls -la` and give me the output "
+    ));
+    assert!(matches!(
+        &p.transcript[1],
+        TranscriptEntry::Thinking { text, streaming: false, collapsed: true }
+            if text == "Running `ls -la` to get the directory listing."
+    ));
+    assert!(matches!(
+        &p.transcript[2],
+        TranscriptEntry::AssistantText { markdown, streaming: false }
+            if markdown.as_str() == "Running `ls -la` in the workspace.\n"
+    ));
+    match &p.transcript[3] {
+        TranscriptEntry::ToolCall(call) => {
+            assert_eq!(
+                call.tool_call_id,
+                "tool_627fa889-d150-45ed-a3b8-8ee8eea17be"
+            );
+            assert_eq!(call.name, "bash");
+            assert_eq!(call.args_json, json!({ "command": "ls -la" }));
+            assert_eq!(call.status, ToolStatus::Ok);
+            assert_eq!(call.output.render(), ls_output);
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+    assert!(matches!(
+        &p.transcript[4],
+        TranscriptEntry::Thinking { text, streaming: false, collapsed: true }
+            if text == "The command completed successfully."
+    ));
+    assert!(matches!(
+        &p.transcript[5],
+        TranscriptEntry::AssistantText { markdown, streaming: false }
+            if markdown.as_str() == ls_answer
+    ));
+    assert!(matches!(
+        &p.transcript[6],
+        TranscriptEntry::User { text } if text == "show me a  rust fenced block"
+    ));
+    assert!(matches!(
+        &p.transcript[7],
+        TranscriptEntry::Thinking { text, streaming: false, collapsed: true }
+            if text == "Preparing a Rust fenced code block example."
+    ));
+    assert!(matches!(
+        &p.transcript[8],
+        TranscriptEntry::AssistantText { markdown, streaming: false }
+            if markdown.as_str() == rust_answer
+    ));
+}
+
+#[test]
+fn hydrate_messages_handles_string_content_and_unmatched_results() {
+    let mut p = SessionProjection::new();
+    p.hydrate_messages(&json!({
+        "messages": [
+            { "role": "user", "content": "plain user content" },
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "toolCallId": "missing-id-form",
+                    "name": "read",
+                    "arguments": { "path": "README.md" }
+                }]
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "missing-id-form",
+                "content": "first",
+                "isError": false
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "missing-id-form",
+                "content": [{ "type": "text", "text": "second" }],
+                "isError": true
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "orphan",
+                "content": [{ "type": "text", "text": "orphan output" }],
+                "isError": false
+            },
+            { "role": "system", "content": "preserved" }
+        ]
+    }));
+
+    assert!(matches!(
+        &p.transcript[0],
+        TranscriptEntry::User { text } if text == "plain user content"
+    ));
+    match &p.transcript[1] {
+        TranscriptEntry::ToolCall(call) => {
+            assert_eq!(call.tool_call_id, "missing-id-form");
+            assert_eq!(call.status, ToolStatus::Err);
+            assert_eq!(call.output.render(), "firstsecond");
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+    assert!(matches!(
+        &p.transcript[2],
+        TranscriptEntry::CommandOutput(text) if text == "orphan output"
+    ));
+    assert!(matches!(
+        &p.transcript[3],
+        TranscriptEntry::Unknown { raw } if raw.get("role").and_then(Value::as_str) == Some("system")
+    ));
+}
+
+#[test]
+fn hydrate_messages_without_messages_is_a_noop() {
+    let mut p = SessionProjection::new();
+    p.push_user_message("already present".to_owned());
+    p.hydrate_messages(&json!({ "state": {} }));
+    assert_eq!(p.transcript.len(), 1);
+    assert!(matches!(
+        &p.transcript[0],
+        TranscriptEntry::User { text } if text == "already present"
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Explicit supervisor transitions
 // ---------------------------------------------------------------------------

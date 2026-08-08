@@ -2143,6 +2143,7 @@ fn try_connect_omp(
     };
 
     let get_state = smol::block_on(async { client.send(RpcCommandBody::GetState).await });
+    let messages = smol::block_on(async { client.send(RpcCommandBody::GetMessages).await });
     let avail = smol::block_on(async { client.send(RpcCommandBody::GetAvailableCommands).await });
     let _sub = smol::block_on(async {
         client
@@ -2165,6 +2166,12 @@ fn try_connect_omp(
             let name = projection_session_name(&proj, cwd);
             persistence.remember_recent_session(Some(session_file), Some(cwd), Some(&name));
         }
+    }
+    if let Ok(r) = &messages
+        && r.success
+        && let Some(data) = &r.data
+    {
+        proj.hydrate_messages(data);
     }
     if let Ok(r) = &avail
         && r.success

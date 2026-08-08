@@ -97,6 +97,10 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Recent pointers live in `recent.json` as `{sessionFile, cwd, name, lastUsed}`; `PIMIENTO_AUTO_CONNECT=1` preserves the one-shot eager-connect escape hatch.
 - `PIMIENTO_HOME` overrides the `~/.pimiento` directory used for `last-session` and `recent.json`.
 
+## Message history hydration — 2026-08-08
+
+- `get_messages` returns `{ messages: AgentMessage[] }`; message content may be a string or typed parts. Pimiento hydrates the full response in order and pairs `toolResult` rows to `toolCall` rows by `toolCallId` (unmatched results remain visible as command output).
+
 ## Assistant code block copy — 2026-08-08
 
 - Assistant Markdown code blocks expose a small `Copy` action that writes the rendered code to the host clipboard.
