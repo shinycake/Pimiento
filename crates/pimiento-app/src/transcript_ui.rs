@@ -86,6 +86,15 @@ pub(crate) fn render_entry(
                 .into_any_element()
         }
         TranscriptEntry::Thinking {
+            text,
+            streaming: false,
+            ..
+        } if text.trim().is_empty() => {
+            // Empty completed thinking blocks are wire noise (start/end with no
+            // deltas). Keep the list index but render nothing.
+            div().w_full().into_any_element()
+        }
+        TranscriptEntry::Thinking {
             collapsed: true,
             text,
             ..
