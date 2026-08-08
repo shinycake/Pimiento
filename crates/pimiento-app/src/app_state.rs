@@ -93,6 +93,8 @@ pub(crate) struct PersistedUi {
     #[serde(default = "default_inspector_open")]
     pub(crate) inspector_open: bool,
     #[serde(default)]
+    pub(crate) rail_collapsed: bool,
+    #[serde(default)]
     pub(crate) theme: ThemePreference,
 }
 
@@ -100,6 +102,7 @@ impl Default for PersistedUi {
     fn default() -> Self {
         Self {
             inspector_open: default_inspector_open(),
+            rail_collapsed: false,
             theme: ThemePreference::System,
         }
     }
@@ -248,6 +251,16 @@ impl SessionPersistence {
     pub(crate) fn save_inspector_open(&self, inspector_open: bool) {
         let mut ui = self.load_ui();
         ui.inspector_open = inspector_open;
+        self.save_ui(ui);
+    }
+
+    pub(crate) fn load_rail_collapsed(&self) -> bool {
+        self.load_ui().rail_collapsed
+    }
+
+    pub(crate) fn save_rail_collapsed(&self, rail_collapsed: bool) {
+        let mut ui = self.load_ui();
+        ui.rail_collapsed = rail_collapsed;
         self.save_ui(ui);
     }
 

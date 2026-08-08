@@ -2711,21 +2711,9 @@ impl Render for SessionView {
                                         .items_center()
                                         .justify_center()
                                         .child(
-                                            v_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(
-                                                    Label::new("Start the conversation")
-                                                        .text_sm()
-                                                        .text_color(theme.muted_foreground),
-                                                )
-                                                .child(
-                                                    Label::new(
-                                                        "Enter to send · ⌘Enter forces send",
-                                                    )
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground),
-                                                ),
+                                            Label::new("Start a conversation.")
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground),
                                         ),
                                 )
                             })

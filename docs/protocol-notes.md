@@ -255,3 +255,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - `PIMIENTO_THEME=system|light|dark` selects the initial theme preference at process start (default `system`). Palette **Toggle theme** still cycles at runtime. This is disposable display state only.
 - Without that environment override, startup reads `theme` from `ui.json`; palette changes write it immediately, while an environment override never overwrites the stored preference.
 - The collapsed session rail now keeps a full-height 64 px restore target labeled **Show Sessions** with a muted `⌘B` hint.
+
+## Rail persistence + streaming polish — 2026-08-08
+
+- Session-rail visibility is disposable layout state stored as `{ "rail_collapsed": bool }` in `ui.json`; missing state defaults to expanded.
+- An empty projected assistant row renders a quiet muted ellipsis only while its wire-derived `streaming` flag is true. The cue contains no inferred assistant content and does not duplicate the toolbar phase.
+- The empty transcript presents one short sentence without key-command tips.

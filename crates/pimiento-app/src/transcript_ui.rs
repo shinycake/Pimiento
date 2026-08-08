@@ -39,31 +39,37 @@ pub(crate) fn render_entry(
                 )
                 .into_any_element()
         }
-        TranscriptEntry::AssistantText { markdown, .. } => {
+        TranscriptEntry::AssistantText {
+            markdown,
+            streaming,
+        } => {
             let markdown_for_copy = markdown.as_str().to_owned();
+            let assistant_content = if *streaming && markdown.as_str().trim().is_empty() {
+                Label::new("…")
+                    .text_sm()
+                    .text_color(theme.muted_foreground)
+                    .into_any_element()
+            } else {
+                TextView::markdown(("assistant", row_ix), markdown.as_str())
+                    .selectable(true)
+                    .code_block_actions(move |code_block, _, _cx| {
+                        let code = code_block.code().to_string();
+                        let lang = code_block.lang().map(|lang| lang.to_string());
+                        Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
+                            .label("Copy")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            })
+                    })
+                    .into_any_element()
+            };
             h_flex()
                 .w_full()
                 .gap_2()
                 .py_2()
-                .child(
-                    div().flex_1().child(
-                        TextView::markdown(("assistant", row_ix), markdown.as_str())
-                            .selectable(true)
-                            .code_block_actions(move |code_block, _, _cx| {
-                                let code = code_block.code().to_string();
-                                let lang = code_block.lang().map(|lang| lang.to_string());
-                                Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
-                                    .label("Copy")
-                                    .small()
-                                    .ghost()
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            code.clone(),
-                                        ));
-                                    })
-                            }),
-                    ),
-                )
+                .child(div().flex_1().child(assistant_content))
                 .child(
                     Button::new(("copy-assistant", row_ix))
                         .label("Copy")
