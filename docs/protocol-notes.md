@@ -168,3 +168,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Transcript copy affordances — 2026-08-08
 
 - Error, notice, command-output, unknown-frame, and expanded tool rows expose small copy actions using only their projected text or JSON fields.
+- User rows expose the same ghost `Copy` action and copy only the submitted user text.
+
+## Esc abort arming — 2026-08-08
+
+- When OMP's run phase allows abort, the first unmodified Esc shows `Press Esc again to abort`; a second Esc within 1.2 seconds sends the existing `abort` RPC. Palette, dialog, and slash-menu Esc handling runs first, so a lone Esc continues to dismiss those surfaces.

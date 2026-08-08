@@ -8,7 +8,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, KeyDownEvent,
@@ -66,6 +66,8 @@ const THINKING_LEVELS: &[&str] = &[
 const MAX_RECENT_SESSIONS: usize = 12;
 const MAX_DISCOVERED_SESSIONS: usize = 24;
 const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
+const ABORT_ARM_WINDOW: Duration = Duration::from_millis(1200);
+const ABORT_ARM_STATUS: &str = "Press Esc again to abort";
 static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +82,12 @@ enum SlashMenuState {
     Closed,
     Open,
     Dismissed,
+}
+
+struct AbortArm {
+    generation: u64,
+    deadline: Instant,
+    previous_status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +235,8 @@ struct SessionView {
     slash_menu: SlashMenuState,
     slash_selected: usize,
     status_message: String,
+    abort_arm: Option<AbortArm>,
+    abort_arm_generation: u64,
     available_models: Vec<ModelChoice>,
     expanded_tools: HashSet<String>,
     clear_composer: bool,
@@ -325,6 +335,8 @@ impl SessionView {
             slash_menu: SlashMenuState::Closed,
             slash_selected: 0,
             status_message: status,
+            abort_arm: None,
+            abort_arm_generation: 0,
             available_models,
             expanded_tools: HashSet::new(),
             clear_composer: false,
@@ -377,6 +389,9 @@ impl SessionView {
                             );
                         }
                     }
+                    if !this.can_abort() {
+                        this.clear_abort_arm();
+                    }
                     cx.notify();
                 });
             }
@@ -394,6 +409,7 @@ impl SessionView {
         if self.launcher_phase == LauncherPhase::Connecting {
             return;
         }
+        self.clear_abort_arm();
         self.client.take();
         self.pump.take();
         self.launcher_phase = LauncherPhase::Connecting;
@@ -533,6 +549,7 @@ impl SessionView {
     }
 
     fn return_to_launcher(&mut self, cx: &mut Context<Self>) {
+        self.clear_abort_arm();
         self.client.take();
         self.pump.take();
         self.model_picker_open = false;
@@ -1389,7 +1406,64 @@ impl SessionView {
         self.client.is_some() && phase_allows_abort(&self.projection.run_phase)
     }
 
-    fn do_abort(&self, cx: &mut Context<Self>) {
+    fn clear_abort_arm(&mut self) {
+        let Some(arm) = self.abort_arm.take() else {
+            return;
+        };
+        if self.status_message == ABORT_ARM_STATUS {
+            self.status_message = arm.previous_status;
+        }
+    }
+
+    fn arm_abort(&mut self, cx: &mut Context<Self>) {
+        self.clear_abort_arm();
+        self.abort_arm_generation = self.abort_arm_generation.wrapping_add(1);
+        let generation = self.abort_arm_generation;
+        self.abort_arm = Some(AbortArm {
+            generation,
+            deadline: Instant::now() + ABORT_ARM_WINDOW,
+            previous_status: std::mem::replace(
+                &mut self.status_message,
+                ABORT_ARM_STATUS.to_owned(),
+            ),
+        });
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            smol::Timer::after(ABORT_ARM_WINDOW).await;
+            let _ = view.update(cx, |this, cx| {
+                if this.abort_arm.as_ref().map(|arm| arm.generation) == Some(generation) {
+                    this.clear_abort_arm();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn handle_abort_esc_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if event.keystroke.modifiers.modified()
+            || !matches!(event.keystroke.key.as_str(), "escape" | "esc")
+            || !self.can_abort()
+        {
+            return false;
+        }
+
+        if self
+            .abort_arm
+            .as_ref()
+            .is_some_and(|arm| Instant::now() < arm.deadline)
+        {
+            self.do_abort(cx);
+        } else {
+            self.arm_abort(cx);
+        }
+        true
+    }
+
+    fn do_abort(&mut self, cx: &mut Context<Self>) {
+        self.clear_abort_arm();
+        cx.notify();
         let Some(client) = self.client.clone() else {
             return;
         };
@@ -1948,6 +2022,7 @@ impl SessionView {
     }
 
     fn shutdown_session(&mut self, cx: &mut Context<Self>) {
+        self.clear_abort_arm();
         self.client.take();
         self.pump.take();
         cx.notify();
@@ -2753,6 +2828,7 @@ impl Render for SessionView {
                         let handled = this.handle_palette_key(event, window, cx)
                             || this.handle_dialog_key(event, cx)
                             || this.handle_slash_key(event, window, cx)
+                            || this.handle_abort_esc_key(event, cx)
                             || this.handle_transcript_nav_key(event, window, cx);
                         if handled {
                             cx.stop_propagation();
@@ -3561,21 +3637,34 @@ fn render_entry(
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
     match entry {
-        TranscriptEntry::User { text } => h_flex()
-            .w_full()
-            .justify_end()
-            .py_1()
-            .child(
-                div()
-                    .max_w(px(480.))
-                    .px_3()
-                    .py_1p5()
-                    .rounded_md()
-                    .bg(theme.primary)
-                    .text_color(theme.primary_foreground)
-                    .child(text.clone()),
-            )
-            .into_any_element(),
+        TranscriptEntry::User { text } => {
+            let text_for_copy = text.clone();
+            h_flex()
+                .w_full()
+                .justify_end()
+                .gap_2()
+                .py_1()
+                .child(
+                    div()
+                        .max_w(px(480.))
+                        .px_3()
+                        .py_1p5()
+                        .rounded_md()
+                        .bg(theme.primary)
+                        .text_color(theme.primary_foreground)
+                        .child(text.clone()),
+                )
+                .child(
+                    Button::new(("copy-user", row_ix))
+                        .label("Copy")
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
+                        }),
+                )
+                .into_any_element()
+        }
         TranscriptEntry::AssistantText { markdown, .. } => div()
             .w_full()
             .py_1()
