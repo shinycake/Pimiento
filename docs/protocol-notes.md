@@ -152,3 +152,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Edit/write tool cards expose **Revert file…** → confirm card showing `git restore --worktree -- '<path>'` → `bash` RPC.
 - Cmd/Ctrl+K opens an in-app command palette (type to filter, Enter runs). Cmd/Ctrl+T/W/B = new/close/toggle rail.
 - Tool output JSON is parsed when present so `details.diff` coloring still works for structured results.
+
+## Subagent drawer tail + transcript paging — 2026-08-08
+
+- `get_subagents` returns `{ subagents: RpcSubagentSnapshot[] }`; the Agents drawer renders each snapshot tolerantly, preserving raw values rather than assuming every optional field exists.
+- `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back on refresh for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied.
+- PageUp/PageDown/Home/End navigate the transcript `ListState`; PageUp/PageDown/Home leave tail-follow mode and End re-enables it at the transcript tail. Keys are ignored while the composer or model-search input is focused so Home/End still move the caret.
