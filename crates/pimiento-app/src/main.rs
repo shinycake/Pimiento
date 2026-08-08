@@ -362,25 +362,28 @@ impl SessionView {
 
     fn can_restart(&self) -> bool {
         matches!(self.projection.run_phase, RunPhase::Dead)
-            && self
-                .projection
-                .state
-                .session_file
-                .as_ref()
-                .is_some_and(|s| !s.is_empty())
+    }
+
+    fn restart_resume_path(&self) -> Option<PathBuf> {
+        if let Some(session) = self.projection.state.session_file.as_ref()
+            && !session.is_empty()
+        {
+            return Some(PathBuf::from(session));
+        }
+        let raw = std::fs::read_to_string(last_session_path()).ok()?;
+        let raw = raw.trim();
+        (!raw.is_empty()).then(|| PathBuf::from(raw))
     }
 
     fn do_restart(&mut self, cx: &mut Context<Self>) {
-        let Some(session) = self.projection.state.session_file.clone() else {
-            return;
-        };
+        let resume = self.restart_resume_path();
         self.projection.mark_restarting();
         self.client = None;
         self.pump = None;
         "Restarting session…".clone_into(&mut self.status_message);
         cx.notify();
 
-        match try_connect_omp(Some(PathBuf::from(session))) {
+        match try_connect_omp(resume) {
             Ok((client, proj, status, models)) => {
                 self.available_models = models;
                 self.projection = proj;
