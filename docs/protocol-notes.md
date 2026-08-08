@@ -225,3 +225,9 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - Command-palette **Reveal logs** opens the existing Pimiento persistence root (`~/.pimiento` or `PIMIENTO_HOME`) with `open` on macOS or `xdg-open` on Linux; `scripts/reveal_logs.sh` provides the same terminal dogfood action without reading or printing stored data.
 - The inspector keeps the authoritative `ctx:N%` text and adds a thin progress bar for the same clamped `contextUsage.percent` value.
 - Inspector tool chips default collapsed when OMP reports more than eight tools; **Tools (N)** expands the existing capped chip list.
+
+## Rail attention + window title — 2026-08-08
+
+- Rail dots use only projected state: info for Streaming/AwaitingResume/Compacting/Retrying, warning for unread transcript rows while inactive, and no dot otherwise.
+- The primary window title follows the active session's OMP-published name (cwd fallback) and projected run phase. GPUI's `Window::set_window_title` is called only when the computed title changes.
+- The composer Abort action was already always visible for abortable phases and danger-styled; the unread-tail pill was already primary-styled as `N new ↓`.
