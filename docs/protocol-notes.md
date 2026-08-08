@@ -96,3 +96,8 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 - The launcher opens before spawning OMP; its working directory comes from the picker or an existing recent pointer, with `PIMIENTO_CWD` as the initial override.
 - Recent pointers live in `recent.json` as `{sessionFile, cwd, name, lastUsed}`; `PIMIENTO_AUTO_CONNECT=1` preserves the one-shot eager-connect escape hatch.
 - `PIMIENTO_HOME` overrides the `~/.pimiento` directory used for `last-session` and `recent.json`.
+
+## Assistant code block copy — 2026-08-08
+
+- Assistant Markdown code blocks expose a small `Copy` action that writes the rendered code to the host clipboard.
+- Copy button IDs hash the transcript row index, language, and code so repeated blocks remain distinct.

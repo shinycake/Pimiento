@@ -4,13 +4,14 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, ClickEvent, Context, FollowMode, KeyDownEvent, ListAlignment, ListState,
-    PathPromptOptions, Render, Task, Window, WindowOptions, div, list, prelude::*, px,
+    App, ClickEvent, ClipboardItem, Context, ElementId, FollowMode, KeyDownEvent, ListAlignment,
+    ListState, PathPromptOptions, Render, Task, Window, WindowOptions, div, list, prelude::*, px,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -1244,7 +1245,7 @@ impl Render for SessionView {
                             view.update(cx, |this, cx| {
                                 this.projection.transcript.get(ix).map_or_else(
                                     || div().into_any_element(),
-                                    |e| render_entry(e, &this.expanded_tools, cx),
+                                    |e| render_entry(ix, e, &this.expanded_tools, cx),
                                 )
                             })
                             .unwrap_or_else(|_| div().into_any_element())
@@ -1362,6 +1363,7 @@ impl Render for SessionView {
 
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
 fn render_entry(
+    row_ix: usize,
     entry: &TranscriptEntry,
     expanded: &HashSet<String>,
     cx: &mut Context<SessionView>,
@@ -1386,7 +1388,21 @@ fn render_entry(
         TranscriptEntry::AssistantText { markdown, .. } => div()
             .w_full()
             .py_1()
-            .child(TextView::markdown("assistant", markdown.as_str()).selectable(true))
+            .child(
+                TextView::markdown(("assistant", row_ix), markdown.as_str())
+                    .selectable(true)
+                    .code_block_actions(move |code_block, _, _cx| {
+                        let code = code_block.code().to_string();
+                        let lang = code_block.lang().map(|lang| lang.to_string());
+                        Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
+                            .label("Copy")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
+                            })
+                    }),
+            )
             .into_any_element(),
         TranscriptEntry::Thinking {
             collapsed: true, ..
@@ -1491,6 +1507,12 @@ fn render_entry(
             )
             .into_any_element(),
     }
+}
+
+fn code_block_copy_id(row_ix: usize, lang: Option<&str>, code: &str) -> ElementId {
+    let mut hasher = DefaultHasher::new();
+    (row_ix, lang, code).hash(&mut hasher);
+    ElementId::Name(format!("code-block-copy-{}", hasher.finish()).into())
 }
 
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
@@ -2428,6 +2450,16 @@ mod tests {
             next_theme_mode(next_theme_mode(ThemeMode::Light)),
             ThemeMode::Light
         );
+    }
+
+    #[test]
+    fn code_block_copy_ids_are_stable_and_distinct() {
+        let id = code_block_copy_id(3, Some("rust"), "fn main() {}");
+        assert_eq!(id, code_block_copy_id(3, Some("rust"), "fn main() {}"));
+        assert_ne!(id, code_block_copy_id(4, Some("rust"), "fn main() {}"));
+        assert_ne!(id, code_block_copy_id(3, Some("python"), "fn main() {}"));
+        assert_ne!(id, code_block_copy_id(3, Some("rust"), "print()"));
+        assert_ne!(id, code_block_copy_id(3, None, "fn main() {}"));
     }
 
     #[test]
