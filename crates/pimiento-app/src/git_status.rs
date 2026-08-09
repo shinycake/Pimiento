@@ -165,7 +165,15 @@ fn probe_git_inspector_uncached(cwd: &Path) -> Option<GitInspectorInfo> {
         }
     };
 
-    let upstream = git_in(cwd, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
+    let upstream = git_in(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    );
     let remote = upstream
         .as_deref()
         .and_then(|up| up.split('/').next())
@@ -222,9 +230,8 @@ fn probe_git_inspector_uncached(cwd: &Path) -> Option<GitInspectorInfo> {
     let unstaged_diff = parse_numstat(git_in(cwd, &["diff", "--numstat"]).as_deref());
     let staged_diff = parse_numstat(git_in(cwd, &["diff", "--cached", "--numstat"]).as_deref());
 
-    let (head_short, head_subject) = parse_head_oneline(
-        git_in(cwd, &["log", "-1", "--format=%h\t%s"]).as_deref(),
-    );
+    let (head_short, head_subject) =
+        parse_head_oneline(git_in(cwd, &["log", "-1", "--format=%h\t%s"]).as_deref());
 
     let stash_count = git_in(cwd, &["stash", "list"]).map_or(0, |out| {
         u32::try_from(out.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(u32::MAX)
@@ -332,11 +339,7 @@ fn fetch_head_age(cwd: &Path) -> Option<String> {
     let path = git_in(cwd, &["rev-parse", "--git-path", "FETCH_HEAD"])?;
     let fetch_path = {
         let p = PathBuf::from(&path);
-        if p.is_absolute() {
-            p
-        } else {
-            cwd.join(p)
-        }
+        if p.is_absolute() { p } else { cwd.join(p) }
     };
     let meta = std::fs::metadata(&fetch_path).ok()?;
     if meta.len() == 0 {
@@ -460,10 +463,7 @@ mod tests {
     fn parse_head_oneline_splits_hash_and_subject() {
         assert_eq!(
             parse_head_oneline(Some("abc1234\tfix the rename modal")),
-            (
-                Some("abc1234".into()),
-                Some("fix the rename modal".into())
-            )
+            (Some("abc1234".into()), Some("fix the rename modal".into()))
         );
     }
 
