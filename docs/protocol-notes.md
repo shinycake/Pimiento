@@ -370,3 +370,10 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - The Agents strip renders retained `get_subagents` snapshots first and falls back to retained `subagent_*` events. Its inspector control cycles the existing `set_subagent_subscription` wire levels `off → progress → events`.
 - Palette **Share session** sends a regular `prompt` carrying `/share`; Pimiento does not infer or persist a share URL and waits for OMP output.
 - Inspector tool grouping is display-only: a fixed known-builtin allowlist is labeled **Builtin**, and all unknown names remain visible under **Extensions / MCP**. Computer/browser/vision tags are best-effort presence indicators from `dumpTools` names or display-widget keys, not connection-health claims.
+
+## Hub / task / bash tool polish — 2026-08-09
+
+- `hub` tool cards render a Jobs summary only from fields present on args/results (`op`, job id, status, command, or a `jobs[]` array). Unparseable payloads keep the generic card.
+- `task` cards show **Open agents** only when a `subagentId`/`agentId` (wire spellings) is present; the button opens the existing Agents inspector focus and does not invent linkage.
+- `eval` uses a short code/expression digest when those fields exist on args.
+- **Abort bash** appears only on a **running** `bash` tool card. `abort_bash` has no id on the wire; the running bash card is the only correlation we trust.

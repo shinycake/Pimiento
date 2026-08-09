@@ -1598,3 +1598,49 @@ fn display_status_lines_skip_empty() {
     let lines = display_status_lines(&display);
     assert_eq!(lines, vec![("k".into(), "hello".into())]);
 }
+
+#[test]
+fn hub_job_summary_reads_wire_fields_only() {
+    let args = serde_json::json!({"op": "jobs"});
+    let result = serde_json::json!({
+        "details": {
+            "op": "jobs",
+            "jobs": [
+                {"id": "j1", "status": "running", "command": "cargo test"},
+                {"jobId": "j2", "status": "done"}
+            ]
+        }
+    });
+    let summary = parse_hub_job_summary("hub", &args, &result).expect("hub summary");
+    assert_eq!(summary.op.as_deref(), Some("jobs"));
+    assert_eq!(summary.jobs[0].id.as_deref(), Some("j1"));
+    let lines = hub_job_summary_display_lines(&summary);
+    assert!(lines.iter().any(|line| line.contains("j1")));
+    assert!(parse_hub_job_summary("bash", &args, &result).is_none());
+}
+
+#[test]
+fn bash_abort_only_when_running_bash_card() {
+    assert!(bash_abort_is_correlatable("bash", ToolStatus::Running));
+    assert!(bash_abort_is_correlatable("Bash", ToolStatus::Running));
+    assert!(!bash_abort_is_correlatable("bash", ToolStatus::Ok));
+    assert!(!bash_abort_is_correlatable("hub", ToolStatus::Running));
+}
+
+#[test]
+fn task_and_eval_digests_require_wire_fields() {
+    assert_eq!(
+        task_linkage_id(
+            "task",
+            &serde_json::json!({"subagentId": "sa-1"}),
+            &serde_json::json!({})
+        )
+        .as_deref(),
+        Some("sa-1")
+    );
+    assert!(task_linkage_id("task", &serde_json::json!({}), &serde_json::json!({})).is_none());
+    let eval = parse_eval_card_summary("eval", &serde_json::json!({"code": "1 + 1"}))
+        .expect("eval summary");
+    assert!(eval.digest.contains("1 + 1"));
+    assert!(parse_eval_card_summary("bash", &serde_json::json!({"code": "1 + 1"})).is_none());
+}

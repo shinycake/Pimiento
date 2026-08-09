@@ -510,6 +510,188 @@ pub(crate) fn code_block_copy_id(row_ix: usize, lang: Option<&str>, code: &str) 
     ElementId::Name(format!("code-block-copy-{}", hasher.finish()).into())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HubJobSummary {
+    pub(crate) op: Option<String>,
+    pub(crate) jobs: Vec<HubJobSummaryRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HubJobSummaryRow {
+    pub(crate) id: Option<String>,
+    pub(crate) status: Option<String>,
+    pub(crate) command: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvalCardSummary {
+    pub(crate) title: String,
+    pub(crate) digest: String,
+}
+
+fn nonempty_wire_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn wire_snippet(value: &str, max_chars: usize) -> String {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut snippet = compact.chars().take(max_chars).collect::<String>();
+    if compact.chars().count() > max_chars {
+        snippet.push('…');
+    }
+    snippet
+}
+
+fn hub_job_command(job: &serde_json::Value) -> Option<String> {
+    if let Some(command) = nonempty_wire_string(job.get("command").or_else(|| job.get("label"))) {
+        return Some(wire_snippet(&command, 96));
+    }
+
+    let application = nonempty_wire_string(job.get("application"))?;
+    let args = job
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .map(|args| {
+            args.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|args| !args.is_empty());
+    Some(wire_snippet(
+        &args.map_or(application.clone(), |args| format!("{application} {args}")),
+        96,
+    ))
+}
+
+/// Parse OMP's structured `hub jobs` result without deriving any missing state.
+pub(crate) fn parse_hub_job_summary(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<HubJobSummary> {
+    if !tool_name.eq_ignore_ascii_case("hub") {
+        return None;
+    }
+
+    let details = result.get("details").unwrap_or(result);
+    let op =
+        nonempty_wire_string(details.get("op")).or_else(|| nonempty_wire_string(args.get("op")));
+    let jobs_value = details.get("jobs").or_else(|| result.get("jobs"));
+    let is_jobs_op = op
+        .as_deref()
+        .is_some_and(|op| matches!(op.to_ascii_lowercase().as_str(), "jobs" | "wait" | "cancel"));
+    if jobs_value.is_none() && !is_jobs_op {
+        return None;
+    }
+
+    let jobs = jobs_value
+        .and_then(serde_json::Value::as_array)
+        .map(|jobs| {
+            jobs.iter()
+                .filter(|job| job.is_object())
+                .map(|job| HubJobSummaryRow {
+                    id: nonempty_wire_string(job.get("id").or_else(|| job.get("jobId"))),
+                    status: nonempty_wire_string(job.get("status")),
+                    command: hub_job_command(job),
+                })
+                .filter(|job| job.id.is_some() || job.status.is_some() || job.command.is_some())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(HubJobSummary { op, jobs })
+}
+
+fn eval_language_label(language: Option<&str>) -> Option<&'static str> {
+    match language? {
+        "py" | "python" => Some("Python"),
+        "js" | "javascript" => Some("JavaScript"),
+        "rb" | "ruby" => Some("Ruby"),
+        "jl" | "julia" => Some("Julia"),
+        _ => None,
+    }
+}
+
+/// Derive a compact eval label from the title/language/code supplied by OMP.
+pub(crate) fn parse_eval_card_summary(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Option<EvalCardSummary> {
+    if !tool_name.eq_ignore_ascii_case("eval") {
+        return None;
+    }
+
+    let first_cell = args
+        .get("cells")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|cells| cells.iter().find(|cell| cell.is_object()));
+    let title = nonempty_wire_string(args.get("title"))
+        .or_else(|| first_cell.and_then(|cell| nonempty_wire_string(cell.get("title"))));
+    let language = nonempty_wire_string(args.get("language"))
+        .or_else(|| first_cell.and_then(|cell| nonempty_wire_string(cell.get("language"))));
+    let code = nonempty_wire_string(args.get("code"))
+        .or_else(|| first_cell.and_then(|cell| nonempty_wire_string(cell.get("code"))));
+    let language_label = eval_language_label(language.as_deref());
+
+    if title.is_none() && language_label.is_none() && code.is_none() {
+        return None;
+    }
+
+    let heading = title
+        .as_deref()
+        .or(language_label)
+        .map_or_else(|| "Eval".to_owned(), |label| format!("Eval · {label}"));
+    let digest = [
+        title
+            .is_some()
+            .then(|| language_label.map(str::to_owned))
+            .flatten(),
+        code.as_deref().map(|code| wire_snippet(code, 80)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" · ");
+
+    Some(EvalCardSummary {
+        title: heading,
+        digest,
+    })
+}
+
+fn find_named_linkage(value: &serde_json::Value) -> Option<String> {
+    const LINKAGE_KEYS: [&str; 4] = ["subagentId", "subagent_id", "toolCallId", "tool_call_id"];
+    match value {
+        serde_json::Value::Object(fields) => {
+            for key in LINKAGE_KEYS {
+                if let Some(id) = nonempty_wire_string(fields.get(key)) {
+                    return Some(id);
+                }
+            }
+            fields.values().find_map(find_named_linkage)
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(find_named_linkage),
+        _ => None,
+    }
+}
+
+/// Return only an explicit task/subagent linkage field already present on wire data.
+pub(crate) fn task_linkage_id(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: &serde_json::Value,
+) -> Option<String> {
+    tool_name
+        .eq_ignore_ascii_case("task")
+        .then(|| find_named_linkage(args).or_else(|| find_named_linkage(result)))
+        .flatten()
+}
+
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
 pub(crate) fn render_tool_card(
     row_ix: usize,
@@ -547,6 +729,17 @@ pub(crate) fn render_tool_card(
                 lines,
             })
     });
+    let hub_summary = parse_hub_job_summary(&tc.name, &tc.args_json, &output_value);
+    let hub_lines = hub_summary
+        .as_ref()
+        .map(hub_job_summary_display_lines)
+        .unwrap_or_default();
+    let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
+    let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
+    let show_abort_bash = bash_abort_is_correlatable(&tc.name, tc.status);
+    let tool_title = eval_summary
+        .as_ref()
+        .map_or_else(|| tc.name.clone(), |summary| summary.title.clone());
     let arg_digest: String = edit_diff
         .as_ref()
         .and_then(|diff| {
@@ -561,6 +754,13 @@ pub(crate) fn render_tool_card(
                 )
             })
         })
+        .or_else(|| {
+            eval_summary
+                .as_ref()
+                .map(|summary| summary.digest.clone())
+                .filter(|digest| !digest.is_empty())
+        })
+        .or_else(|| hub_lines.first().cloned())
         .unwrap_or_else(|| tc.args_json.to_string().chars().take(80).collect());
     let duration_str = tc
         .duration_ms
@@ -579,6 +779,8 @@ pub(crate) fn render_tool_card(
     let view = cx.entity().downgrade();
     let view_for_toggle = view.clone();
     let view_for_revert = view.clone();
+    let view_for_abort = view.clone();
+    let view_for_agents = view.clone();
     let tc_id_for_toggle = tc_id.clone();
 
     v_flex()
@@ -614,7 +816,7 @@ pub(crate) fn render_tool_card(
                     div()
                         .text_sm()
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(tc.name.clone()),
+                        .child(tool_title),
                 )
                 .child(
                     div()
@@ -676,11 +878,28 @@ pub(crate) fn render_tool_card(
                         }),
                 ),
         )
-        .when(tc.status == ToolStatus::Running, |card| {
+        .when(
+            tc.status == ToolStatus::Running && !show_abort_bash,
+            |card| {
+                card.child(
+                    Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+            },
+        )
+        .when(!hub_lines.is_empty(), |card| {
             card.child(
-                Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
+                v_flex()
+                    .w_full()
+                    .gap_0p5()
+                    .px_1()
+                    .children(hub_lines.into_iter().map(|line| {
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(line)
+                    })),
             )
         })
         .when(expanded, |parent| {
@@ -782,6 +1001,32 @@ pub(crate) fn render_tool_card(
                                         output_text.clone(),
                                     ));
                                 }
+                            }),
+                    )
+                })
+                .when(show_abort_bash, |controls| {
+                    controls.child(
+                        Button::new(("abort-bash", row_ix))
+                            .label("Abort bash")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                let _ = view_for_abort.update(cx, |this, cx| {
+                                    this.request_abort_bash(cx);
+                                });
+                            }),
+                    )
+                })
+                .when(task_subagent.is_some(), |controls| {
+                    controls.child(
+                        Button::new(("open-agents", row_ix))
+                            .label("Open agents")
+                            .small()
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                let _ = view_for_agents.update(cx, |this, cx| {
+                                    this.request_inspector_focus(PaletteActionId::ToggleAgents, cx);
+                                });
                             }),
                     )
                 })
@@ -1527,4 +1772,33 @@ pub(crate) fn do_dialog_response(
             cx.notify();
         });
     }
+}
+
+/// `abort_bash` has no id on the wire. Only surface it when OMP itself is
+/// projecting a running `bash` tool card — that is the correlation we trust.
+pub(crate) fn bash_abort_is_correlatable(name: &str, status: ToolStatus) -> bool {
+    status == ToolStatus::Running && name.eq_ignore_ascii_case("bash")
+}
+
+pub(crate) fn hub_job_summary_display_lines(summary: &HubJobSummary) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(op) = &summary.op {
+        lines.push(format!("op: {op}"));
+    }
+    for job in &summary.jobs {
+        let mut parts = Vec::new();
+        if let Some(id) = &job.id {
+            parts.push(format!("job: {id}"));
+        }
+        if let Some(status) = &job.status {
+            parts.push(status.clone());
+        }
+        if let Some(command) = &job.command {
+            parts.push(command.clone());
+        }
+        if !parts.is_empty() {
+            lines.push(parts.join(" · "));
+        }
+    }
+    lines
 }
