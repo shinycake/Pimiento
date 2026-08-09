@@ -2,6 +2,8 @@
 
 Run this checklist for every release and every GPUI/gpui-component pin bump. Record the OS, display backend, OMP version, and result separately for each test run.
 
+IME and popup placement are known platform-sensitive areas. Before testing, read `docs/protocol-notes.md` § “D4 IME composition” and § “D4 semantic rows and platform QA”; attach Linux Wayland/X11 and macOS evidence through `docs/sh-proofs.md`.
+
 - [ ] **High-rate streaming:** stream a long response and confirm progressive text stays smooth without visible stalls.
 - [ ] **Abort, steer, and follow-up:** steer during a run, queue a follow-up, and complete a double-Esc abort.
 - [ ] **Keyboard-only dialogs:** complete confirm, select, input, and cancel flows without using the pointer.

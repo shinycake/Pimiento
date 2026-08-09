@@ -1,7 +1,7 @@
 [protocol-notes.md#E3A8]
 1:# Pimiento protocol notes
 2:
-3:Authoritative development target: locally installed `omp/17.2.10`.
+3:Wire extraction baseline: locally installed `omp/17.2.10`. Compatibility has also been exercised against **omp 17.2.11**; the documented tested range is **17.2.10–17.2.11**.
 4:
 5:Canonical sources inspected on 2026-08-06:
 6:
@@ -250,7 +250,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - Launcher and inline-dialog changes are presentation-only. Dialog responses, Esc cancellation, and `open_url` copy/open behavior retain their existing RPC shapes.
 - App sources were modularized for maintainability without changing protocol or runtime behavior.
 - Visual-hierarchy polish (rail affordance, transcript spacing, inspector emphasis, and empty-state copy) changes presentation only; all displayed session facts remain OMP-authoritative.
-- Versions below or newer than the tested `omp 17.2.10+` baseline proceed with a warning banner; the exact discovered semantic version comes from startup discovery.
+- Versions outside the documented tested range `omp 17.2.10–17.2.11` should proceed with a warning banner; the exact discovered semantic version comes from startup discovery.
 
 ## D4 light-theme transcript audit — 2026-08-08
 
@@ -272,9 +272,18 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 
 - The About overlay includes a compact keymap cheat-sheet (palette, sessions rail, inspector, new/close, send, abort). Presentation-only.
 
-## Window appearance sync — 2026-08-08
+## Quiet Pepper Console — 2026-08-09
 
-- Explicit Light/Dark theme preferences call GPUI `App::set_window_appearance` so macOS native titlebar chrome matches the content theme. System preference clears the override (`None`) and resumes OS follow.
+- Brand tokens live in `crates/pimiento-app/src/tokens.rs` (paprika identity / ember action). `apply_pimiento_brand` remaps gpui-component `primary`/`ring`/`accent` after every theme preference change.
+- Status pills use a fixed taxonomy (working / awaiting / busy / idle / error) via `Tag::custom`, not brand paprika.
+- Composer band uses `shadow_lg` as the sole docked elevation exception (parity-plan Wave U2).
+- Inspector **Queue** section writes `set_steering_mode` / `set_follow_up_mode` / `set_interrupt_mode` / `set_auto_compaction` / `set_auto_retry`. Promoted `RuntimeState` fields hydrate from `get_state` camelCase keys; optimistic UI reverts on RPC failure.
+- `queuedMessageCount` surfaces as a composer `queue:N` chip when > 0 and in inspector extras.
+- Wave A session controls use existing typed RPC shapes: `compact { customInstructions? }`, `get_session_stats`, and `handoff { customInstructions? }`. Empty compact input omits `customInstructions`; stats and handoff response data render losslessly as pretty JSON notices.
+- **Fresh session** deliberately sends the dynamic slash command `/fresh` through `prompt` while idle; it does not invent a client-owned session reset.
+- An idle `contextUsage.percent >= 80` shows a soft compact CTA. The threshold is display policy only; the percentage remains OMP-authoritative.
+
+
 
 ## Rail persistence + streaming polish — 2026-08-08
 
@@ -333,3 +342,37 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - `input` / `editor` responses carry `value: string`. Pimiento renders a text field + Submit (and Cancel) for those methods; Cancel alone is not enough.
 - Non-dialog display methods (`setTitle` / `setStatus` / `setWidget` / `set_editor_text`) project into `DisplayState` and surface in the status strip / inspector only when present. OS window title follows `setTitle` only when `PI_RPC_EMIT_TITLE` is truthy (OMP's emit gate).
 - `image_end` projects to a visible `TranscriptEntry::Notice` with mime/type summary so image blocks are never dropped silently.
+
+## Wave E3 upstream IME API ask — 2026-08-09
+
+- **Blocked upstream:** Pimiento needs gpui-component `InputState::is_composing()` (or an equivalent composition flag on the submit event) so Enter can commit an active IME candidate without also sending the composer.
+- The pinned component keeps `ime_marked_range` private, so Pimiento cannot implement a reliable app-level guard without a fork. Do not infer composition state from key timing or text changes.
+- No upstream completion is claimed here. Until the public API lands and the pin is updated, CJK IME remains required manual QA on macOS, Linux X11, and Linux Wayland.
+
+## Quiet Pepper execute waves — 2026-08-09
+
+- Wave 0 documentation now reflects image attachments as shipped, records the **omp 17.2.10–17.2.11** tested range, and separates D1–D4 code completion from still-open dogfood and platform QA.
+- Wave E adds a minimal Linux personal-dogfood release tarball path. AppImage, `.deb`, signing, and Windows remain deferred; Pimiento still neither bundles nor installs `omp`.
+- Wave U5 has a dedicated motion and screenshot checklist in `docs/quiet-pepper-qa.md`; durations and reduced-motion behavior are recommendations until implemented and manually verified.
+- SH proof templates live in `docs/sh-proofs.md`. No SH proof is complete merely because its slot exists; Linux is environment-ready pending live dogfood, and macOS requires the user's machine.
+- This entry summarizes the Quiet Pepper execute integration change set; it does not assert a hosted PR or completed QA in this local-only repository.
+
+## Experimental host tool bridge — 2026-08-09
+
+- `PIMIENTO_HOST_BRIDGE=1` registers `pimiento.open_file` with `set_host_tools`; every other value leaves the bridge off and sends no registration.
+- OMP 17.2.11 expects `{name,label?,description,parameters,hidden?,loadMode?}` definitions. Results are fire-and-forget `host_tool_result` frames whose `result` is an `AgentToolResult` such as `{content:[{type:"text",text:"…"}]}`; failures also set top-level `isError:true`.
+- Host calls remain visible as Unknown transcript rows and additionally become foreground-owned approval cards. Denial is the default; approval requires an existing absolute file path. `host_tool_cancel.targetId` dismisses pending work and suppresses late results.
+- No host URI scheme is registered yet. Unexpected URI requests remain visible Unknown rows and additionally get a deny-only card; `host_uri_cancel` dismisses that pending card and suppresses late results.
+
+## Rail density + Wave D surfaces — 2026-08-09
+
+- Rail rows and workspace headers derive status pills only from each session's projected `RunPhase`; workspace rollup priority is dead/error, awaiting input, active/busy, then idle.
+- The Agents strip renders retained `get_subagents` snapshots first and falls back to retained `subagent_*` events. Its inspector control cycles the existing `set_subagent_subscription` wire levels `off → progress → events`.
+- Palette **Share session** sends a regular `prompt` carrying `/share`; Pimiento does not infer or persist a share URL and waits for OMP output.
+- Inspector tool grouping is display-only: a fixed known-builtin allowlist is labeled **Builtin**, and all unknown names remain visible under **Extensions / MCP**. Computer/browser/vision tags are best-effort presence indicators from `dumpTools` names or display-widget keys, not connection-health claims.
+
+## Hub / task / bash tool polish — 2026-08-09
+
+- `hub` tool cards render a Jobs summary only from fields present on args/results (`op`, job id, status, command, or a `jobs[]` array). Unparseable payloads keep the generic card.
+- `task` cards show **Open agents** only when a named `subagentId`/`toolCallId` linkage field is present; the button opens the existing Agents inspector focus and does not invent linkage. `eval` titles/digests use only supplied title, language, and code.
+- `abort_bash` is targetless (`{type:"abort_bash"}`), while transcript bash rows are identified by `tool_execution_* .toolCallId`; no safe correlation exists, so no per-card Abort button renders.

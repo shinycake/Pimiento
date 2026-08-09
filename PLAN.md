@@ -65,7 +65,7 @@ Pimiento is a **frontend for the OMP the user already has**. This is a hard prod
 
 **Sessions:** OMP owns the session store. Pimiento persists only lightweight pointers app-side: `{sessionFile, cwd, name, lastUsed}` for its "recent" list, and resumes via `--resume <sessionFile>`. If OMP refuses (lock, missing file), show OMP's error verbatim.
 
-**Version gate, not version bundling:** on startup run `omp --version`; maintain a tested range (start: the version you develop against, e.g. ≥17.x). Outside range → yellow banner "Pimiento was tested with omp X–Y; you have Z — unknown events will still render" and proceed. `ready.supportedProtocolVersions` must include 2; if not, hard-fail with a clear card.
+**Version gate, not version bundling:** on startup run `omp --version`; the currently documented tested range is **17.2.10–17.2.11**. Outside range → yellow banner "Pimiento was tested with omp X–Y; you have Z — unknown events will still render" and proceed. `ready.supportedProtocolVersions` must include 2; if not, hard-fail with a clear card.
 
 **Missing OMP:** show a card with the official install one-liner (`curl -fsSL https://omp.sh/install | sh`) as *text for the user to run* + a "re-detect" button. Never auto-install, never shell out to install.
 
@@ -118,7 +118,9 @@ Ranked *within* the tier by how immediately their absence breaks the loop:
 
 ### Tier 4 — Later / explicitly deferred
 
-Packaging & signing · Windows · host tools/URI registration (wire plumbing ships in Tier 0 types; registration UI later) · images in prompts · ACP mode (multi-harness) · cross-message text selection (GPUI lacks it; copy affordances instead) · TUI-session takeover/handoff (needs upstream authority surface).
+Packaging/signing beyond local dogfood archives · Windows · host tools/URI registration (wire plumbing ships in Tier 0 types; registration UI later) · ACP mode (multi-harness) · cross-message text selection (GPUI lacks it; copy affordances instead) · TUI-session takeover/handoff (needs upstream authority surface).
+
+Images in prompts are implemented: the composer supports image attachments on prompt/steer/follow-up. See `docs/protocol-notes.md` § “UI depth + composer band” for the shipped attachment behavior.
 
 ---
 
@@ -350,19 +352,27 @@ Implements Tier 1 (§2) end-to-end:
 - SH-5: A `cargo build` producing >1 MiB output renders (elided) without UI stall — proving chunking + BoundedText + batching under load.
 - SH-6: Full loop on both macOS and Linux (either X11 or Wayland at SH; both by D4).
 
-### D1 — Dogfood wave 1: daily-driver comfort (1–1.5 weeks, built via Pimiento)
-Tier 2 in order: 2.1 slash completion → 2.2 (done as SH-1) → 2.3 model/thinking pickers → 2.6 history hydration (`get_messages_page`, `session_busy`/`stale_cursor` handling) → 2.5 todo panel → 2.7 fast-mode toggle.
+### D1 — Dogfood wave 1: daily-driver comfort — code-complete; proof/QA open
+Tier 2 in order: 2.1 slash completion → 2.2 (code present; designated for the still-open SH-1 proof) → 2.3 model/thinking pickers → 2.6 history hydration (`get_messages_page`, `session_busy`/`stale_cursor` handling) → 2.5 todo panel → 2.7 fast-mode toggle.
 **Verify:** each feature's branch was authored in a Pimiento session and merged after the gate script passed; fixture added per feature.
 
-### D2 — Dogfood wave 2: multi-session (1 week)
+The feature surface is present in the repository. The original Pimiento-authorship and per-feature fixture record has not been reconstructed as proof; treat that operational criterion as open.
+
+### D2 — Dogfood wave 2: multi-session — code-complete; stress QA open
 Tier 2.4: WorkspaceEntity with N sessions (one child each); rail (name, cwd, phase badge, unread/attention dot; inline rename → `set_session_name`); Cmd/Ctrl+1..9/T/W; per-session display state preserved across switches.
 **Verify:** 3 concurrent streaming sessions, no jank; killing one child affects only its session. Dogfood pattern: one session implements, a second session reviews (`/review`).
 
-### D3 — Dogfood wave 3: power (1.5 weeks)
+The multi-session code surface is present. The three-concurrent-session isolation/jank run remains open manual QA.
+
+### D3 — Dogfood wave 3: power — code-complete; dogfood QA open
 Tier 3: diff rows (parse `edit`/`write`/`ast_edit` results at pinned version; raw fallback when parsing fails; read-only + "Revert file…" flow = show exact `git` command in a confirm card → execute via RPC `bash` → show output) · subagent strip + drawer (`fromByte`/`nextByte`, `reset:true`) · compaction/retry UX · `export_html`.
 
-### D4 — Polish & hardening (1 week)
+The listed power features are present. Recorded end-to-end dogfood evidence remains open.
+
+### D4 — Polish & hardening — code-complete; cross-platform visual/IME QA open
 Tier 3.5: semantic theme tokens, light/dark follow + override; full keymap (Cmd/Ctrl+K palette, Cmd/Ctrl+B rail, PageUp/Down/Home/End); copy affordances audit; IME QA (CJK composition) on all OSes; Wayland + X11 popup audit; manual QA checklist (§10.4) green everywhere.
+
+The code-side polish is present, but light/dark visual inspection, CJK IME, Wayland/X11 popup behavior, and the full cross-platform checklist are not yet green on record. Track evidence in `docs/sh-proofs.md` and `docs/sh-artifacts/`.
 
 ### D5 — Packaging (3–5 days, optional for personal use)
 macOS .app/dmg; Linux AppImage/.deb; "Reveal logs" menu; first-run omp-detection card (§1). No auto-install, no bundled omp — ever.
@@ -450,6 +460,7 @@ Keymap (final, D4): Cmd/Ctrl+K palette · Cmd/Ctrl+B rail · Cmd/Ctrl+1..9 sessi
 
 ## 12. Appendix: sources
 
+- **Living parity gap plan (post-D4):** [`docs/parity-plan.md`](docs/parity-plan.md) — OMP 17.2.11 feature inventory vs Pimiento, remaining waves A–E. Prefer that doc for “what’s still missing”; this PLAN remains doctrine + original milestone canon.
 - **OMP** (MIT): https://github.com/can1357/oh-my-pi — `docs/rpc.md` (wire contract), `packages/coding-agent/src/modes/rpc/rpc-types.ts` (canonical types), `rpc-frame.ts` (chunk decoder), tests `packages/coding-agent/test/rpc-*.test.ts`; Python reference client `docs/python/omp-rpc/`. Install: https://omp.sh
 - **GPUI** (Apache-2.0): https://www.gpui.rs/ · https://docs.rs/gpui · `crates/gpui/src/elements/list.rs` (variable-height list) · `crates/gpui/examples/` (input, uniform_list, list, window). Zed's `ui`/`editor`/`terminal_view`/`agent_ui` are GPL-3.0-or-later: patterns only, never code.
 - **gpui-component** (Apache-2.0): https://github.com/longbridge/gpui-component · https://longbridge.github.io/gpui-component/docs/getting-started — 60+ controls incl. Markdown, virtualized list/table, dock, theming, Rope/Tree-sitter editor.

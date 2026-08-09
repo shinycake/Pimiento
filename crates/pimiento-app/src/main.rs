@@ -34,9 +34,12 @@ use gpui_component::{
 use omp_rpc_client::{
     client::{ClientConfig, ClientEvent, RpcClient},
     discovery::{
-        DiscoveryInputs, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport, discover,
+        DiscoveryInputs, MAX_SUPPORTED, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport,
+        discover,
     },
-    frames::{RpcCommandBody, SubagentSubscriptionLevel},
+    frames::{
+        InterruptMode, QueueMode, RpcCommandBody, StreamingBehavior, SubagentSubscriptionLevel,
+    },
 };
 use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
@@ -50,9 +53,11 @@ use serde::{Deserialize, Serialize};
 
 mod app_state;
 mod git_status;
+mod host_bridge;
 mod models;
 mod palette;
 mod session;
+mod tokens;
 mod transcript_ui;
 mod workspace;
 
@@ -63,11 +68,15 @@ use app_state::*;
 #[allow(clippy::wildcard_imports)]
 use git_status::*;
 #[allow(clippy::wildcard_imports)]
+use host_bridge::*;
+#[allow(clippy::wildcard_imports)]
 use models::*;
 #[allow(clippy::wildcard_imports)]
 use palette::*;
 #[allow(clippy::wildcard_imports)]
 use session::*;
+#[allow(clippy::wildcard_imports)]
+use tokens::*;
 #[allow(clippy::wildcard_imports)]
 use transcript_ui::*;
 #[allow(clippy::wildcard_imports)]
@@ -119,6 +128,7 @@ fn main() {
                             cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
                         if follows_system {
                             Theme::sync_system_appearance(Some(window), cx);
+                            apply_pimiento_brand(cx);
                         }
                     })
                     .detach();

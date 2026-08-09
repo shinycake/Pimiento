@@ -14,9 +14,13 @@ pub(crate) enum PaletteActionId {
     CycleModel,
     CycleThinking,
     Compact,
+    SessionStats,
+    FreshSession,
+    Handoff,
     AbortRetry,
     AbortAndPrompt,
     ExportHtml,
+    ShareSession,
     RenameSession,
     AbortRun,
     SessionsLauncher,
@@ -89,8 +93,23 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
         },
         PaletteEntry {
             id: PaletteActionId::Compact,
-            label: "Compact context",
-            hint: "compact rpc",
+            label: "Compact…",
+            hint: "compact context with optional instructions",
+        },
+        PaletteEntry {
+            id: PaletteActionId::SessionStats,
+            label: "Session stats",
+            hint: "messages tokens cost context usage",
+        },
+        PaletteEntry {
+            id: PaletteActionId::FreshSession,
+            label: "Fresh session",
+            hint: "start fresh via /fresh",
+        },
+        PaletteEntry {
+            id: PaletteActionId::Handoff,
+            label: "Handoff to TUI…",
+            hint: "continue this session in the terminal",
         },
         PaletteEntry {
             id: PaletteActionId::AbortRetry,
@@ -108,6 +127,11 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
             hint: "export",
         },
         PaletteEntry {
+            id: PaletteActionId::ShareSession,
+            label: "Share session",
+            hint: "run /share with OMP",
+        },
+        PaletteEntry {
             id: PaletteActionId::RenameSession,
             label: "Rename session",
             hint: "rename",
@@ -119,8 +143,8 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
         },
         PaletteEntry {
             id: PaletteActionId::BranchSession,
-            label: "Branch into new tab",
-            hint: "get_branch_messages fork",
+            label: "Branch from turn…",
+            hint: "choose a prior turn and open the branch in a new tab",
         },
         PaletteEntry {
             id: PaletteActionId::LoginProviders,

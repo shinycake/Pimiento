@@ -592,6 +592,113 @@ fn notice_error_becomes_error_entry() {
 }
 
 #[test]
+fn todo_reminder_projects_best_effort_text_as_notice() {
+    for (payload, expected) in [
+        (
+            json!({ "type": "todo_reminder", "message": "Finish the active task" }),
+            "Todo reminder: Finish the active task",
+        ),
+        (
+            json!({ "type": "todo_reminder", "text": "Run the tests" }),
+            "Todo reminder: Run the tests",
+        ),
+        (
+            json!({ "type": "todo_reminder", "goal": "Complete Wave B" }),
+            "Todo reminder: Complete Wave B",
+        ),
+        (
+            json!({
+                "type": "todo_reminder",
+                "todos": [{ "content": "canonical OMP todo payload" }],
+                "attempt": 1,
+                "maxAttempts": 3
+            }),
+            "Todo reminder",
+        ),
+    ] {
+        let mut p = SessionProjection::new();
+        apply(&mut p, payload);
+        assert_eq!(
+            p.transcript,
+            vec![TranscriptEntry::Notice(expected.to_owned())]
+        );
+    }
+}
+
+#[test]
+fn ttsr_triggered_projects_quiet_notice() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "ttsr_triggered", "message": "Matched safety rule" }),
+    );
+    apply(
+        &mut p,
+        json!({ "type": "ttsr_triggered", "rules": [{ "name": "canonical" }] }),
+    );
+
+    assert_eq!(
+        p.transcript,
+        vec![
+            TranscriptEntry::Notice("TTSR triggered: Matched safety rule".to_owned()),
+            TranscriptEntry::Notice("TTSR triggered".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn goal_updated_projects_objective_and_clear() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({
+            "type": "goal_updated",
+            "goal": {
+                "id": "goal-1",
+                "objective": "Ship projection foundations",
+                "status": "active"
+            }
+        }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("Ship projection foundations"));
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text))
+            if text == "Goal updated: Ship projection foundations"
+    ));
+
+    apply(&mut p, json!({ "type": "goal_updated", "goal": null }));
+    assert_eq!(p.goal, None);
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text)) if text == "Goal cleared"
+    ));
+}
+
+#[test]
+fn goal_updated_accepts_text_fallbacks_without_erasing_on_malformed_payload() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "goal_updated", "text": "First goal" }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("First goal"));
+
+    apply(
+        &mut p,
+        json!({ "type": "goal_updated", "message": "Second goal" }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("Second goal"));
+
+    apply(&mut p, json!({ "type": "goal_updated", "goal": {} }));
+    assert_eq!(p.goal.as_deref(), Some("Second goal"));
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text)) if text == "Goal updated"
+    ));
+}
+
+#[test]
 fn extension_error_becomes_error_entry() {
     let mut p = SessionProjection::new();
     apply(
@@ -829,6 +936,28 @@ fn hydrate_get_state_reads_top_level_fast_mode_booleans() {
     }));
     assert_eq!(p.state.fast_mode_enabled, Some(false));
     assert_eq!(p.state.fast_mode_active, Some(true));
+}
+
+#[test]
+fn hydrate_get_state_promotes_queue_and_auto_fields() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "state": {
+            "steeringMode": "all",
+            "followUpMode": "one-at-a-time",
+            "interruptMode": "wait",
+            "autoCompactionEnabled": true,
+            "autoRetryEnabled": false,
+            "queuedMessageCount": 3,
+        }
+    }));
+
+    assert_eq!(p.state.steering_mode.as_deref(), Some("all"));
+    assert_eq!(p.state.follow_up_mode.as_deref(), Some("one-at-a-time"));
+    assert_eq!(p.state.interrupt_mode.as_deref(), Some("wait"));
+    assert_eq!(p.state.auto_compaction_enabled, Some(true));
+    assert_eq!(p.state.auto_retry_enabled, Some(false));
+    assert_eq!(p.state.queued_message_count, Some(3));
 }
 
 #[test]
@@ -1211,13 +1340,7 @@ fn unknown_frame_type_is_visible() {
 #[test]
 fn unhandled_known_frames_stay_visible_as_unknown() {
     let mut p = SessionProjection::new();
-    for ty in [
-        "ttsr_triggered",
-        "todo_reminder",
-        "irc_message",
-        "goal_updated",
-        "config_update",
-    ] {
+    for ty in ["irc_message", "config_update"] {
         apply(&mut p, json!({ "type": ty }));
     }
     let unknowns = p
@@ -1225,7 +1348,7 @@ fn unhandled_known_frames_stay_visible_as_unknown() {
         .iter()
         .filter(|e| matches!(e, TranscriptEntry::Unknown { .. }))
         .count();
-    assert_eq!(unknowns, 5);
+    assert_eq!(unknowns, 2);
 }
 
 // ---------------------------------------------------------------------------

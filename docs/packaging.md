@@ -35,12 +35,35 @@ a Gatekeeper warning when it is moved to another machine.
 
 ## Linux
 
-AppImage / `.deb` packaging is deferred. On Linux, dogfood with:
+For personal dogfood, build a release binary and portable tarball with:
 
 ```sh
-cargo build -p pimiento-app
-./scripts/run_app.sh
+scripts/package_linux.sh
 ```
 
-Pimiento still discovers `omp` via the login-shell PATH and never bundles or
-installs it.
+Outputs are written under `dist/pimiento-linux/`:
+
+- `pimiento-app` — the unpacked release binary
+- `README.txt` — runtime and launch instructions
+- `pimiento-linux-<arch>.tar.gz` — those two files in a `pimiento/` directory
+
+This tarball is the minimal E1 personal-dogfood path, not a system package.
+AppImage / `.deb`, desktop integration, signing, and update delivery remain
+deferred. That is an explicit waiver for personal dogfood only; a distributable
+Linux release still requires one of those packaging formats plus platform QA.
+
+The archive does not bundle system libraries. Build it on a compatible Linux
+system, extract it, ensure `omp` is available on the login-shell `PATH`, and run
+`./pimiento/pimiento-app`. Pimiento never bundles or installs `omp`.
+
+## IME API dependency (E3)
+
+The Enter-while-composing guard is blocked on a public gpui-component
+composition API. The upstream ask is an `InputState::is_composing()` query or
+equivalent submit-event flag; see `docs/protocol-notes.md` § “Wave E3 upstream
+IME API ask”. No upstream fix is claimed yet.
+
+## Windows
+
+Windows packaging is optional and deferred by `PLAN.md`; no support claim is
+made by these scripts.

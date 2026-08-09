@@ -10,8 +10,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use omp_rpc_client::discovery::{
-    CapturedOutput, CommandRunner, DiscoveryInputs, MIN_SUPPORTED, OmpVersion, VersionSupport,
-    discover,
+    CapturedOutput, CommandRunner, DiscoveryInputs, MAX_SUPPORTED, MIN_SUPPORTED, OmpVersion,
+    VersionSupport, discover,
 };
 use omp_rpc_client::error::RpcError;
 
@@ -101,6 +101,13 @@ fn version_parses_installed_banner() {
     assert_eq!(v, MIN_SUPPORTED);
     assert_eq!(v.support(), VersionSupport::Supported);
     assert_eq!(v.to_string(), "17.2.10");
+}
+
+#[test]
+fn version_upper_bound_is_supported() {
+    let v = OmpVersion::parse("omp/17.2.11").expect("test fixture operation must succeed");
+    assert_eq!(v, MAX_SUPPORTED);
+    assert_eq!(v.support(), VersionSupport::Supported);
 }
 
 #[test]

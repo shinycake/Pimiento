@@ -1,4 +1,126 @@
 use super::*;
+
+#[test]
+fn host_bridge_flag_is_explicit_opt_in() {
+    assert!(host_bridge_enabled_value(Some(OsStr::new("1"))));
+    assert!(!host_bridge_enabled_value(None));
+    assert!(!host_bridge_enabled_value(Some(OsStr::new("true"))));
+    assert!(!host_bridge_enabled_value(Some(OsStr::new("0"))));
+}
+
+#[test]
+fn open_file_host_tool_registration_matches_omp_schema() {
+    assert_eq!(
+        host_tool_definitions(),
+        serde_json::json!([{
+            "name": "pimiento.open_file",
+            "label": "Open File in Pimiento",
+            "description": "Request that Pimiento open an existing absolute local file in the host's default application. The user must approve every request.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute path of the existing local file to open"
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        }])
+    );
+}
+
+#[test]
+fn host_tool_call_is_queued_only_when_bridge_is_enabled_and_cancel_dismisses_it() {
+    let call = omp_rpc_client::frames::decode_frame(serde_json::json!({
+        "type": "host_tool_call",
+        "id": "host-1",
+        "toolCallId": "tool-1",
+        "toolName": "pimiento.open_file",
+        "arguments": {"path": "/tmp/example.txt"}
+    }))
+    .expect("host tool call decodes");
+    let cancel = omp_rpc_client::frames::decode_frame(serde_json::json!({
+        "type": "host_tool_cancel",
+        "id": "cancel-1",
+        "targetId": "host-1"
+    }))
+    .expect("host tool cancel decodes");
+
+    let mut disabled = HostBridgeState::new(false);
+    disabled.observe_frame(&call);
+    assert!(disabled.pending_calls.is_empty());
+
+    let mut enabled = HostBridgeState::new(true);
+    enabled.observe_frame(&call);
+    assert_eq!(enabled.pending_calls.len(), 1);
+    assert_eq!(enabled.pending_calls[0].tool_call_id, "tool-1");
+    enabled.observe_frame(&cancel);
+    assert!(enabled.pending_calls.is_empty());
+}
+
+#[test]
+fn unsupported_host_uri_request_waits_for_deny_and_cancel_dismisses_it() {
+    let request = omp_rpc_client::frames::decode_frame(serde_json::json!({
+        "type": "host_uri_request",
+        "id": "uri-1",
+        "operation": "read",
+        "url": "example://resource"
+    }))
+    .expect("host URI request decodes");
+    let cancel = omp_rpc_client::frames::decode_frame(serde_json::json!({
+        "type": "host_uri_cancel",
+        "id": "uri-cancel-1",
+        "targetId": "uri-1"
+    }))
+    .expect("host URI cancel decodes");
+
+    let mut state = HostBridgeState::new(true);
+    state.observe_frame(&request);
+    assert!(state.has_pending_requests());
+    assert_eq!(state.pending_uri_requests[0].operation, "read");
+    state.observe_frame(&cancel);
+    assert!(!state.has_pending_requests());
+    assert_eq!(
+        host_uri_denied_frame("uri-1", "unsupported"),
+        serde_json::json!({
+            "type": "host_uri_result",
+            "id": "uri-1",
+            "isError": true,
+            "error": "unsupported"
+        })
+    );
+}
+
+#[test]
+fn host_tool_result_and_open_file_arguments_are_strict() {
+    assert_eq!(
+        open_file_path(&serde_json::json!({"path": "/tmp/a.txt"})),
+        Ok(PathBuf::from("/tmp/a.txt"))
+    );
+    assert!(open_file_path(&serde_json::json!({"path": "relative.txt"})).is_err());
+    assert!(open_file_path(&serde_json::json!({"path": 7})).is_err());
+
+    assert_eq!(
+        host_tool_result_frame("host-1", "denied", true),
+        serde_json::json!({
+            "type": "host_tool_result",
+            "id": "host-1",
+            "result": {"content": [{"type": "text", "text": "denied"}]},
+            "isError": true
+        })
+    );
+    assert_eq!(
+        host_tool_result_frame("host-1", "opened", false),
+        serde_json::json!({
+            "type": "host_tool_result",
+            "id": "host-1",
+            "result": {"content": [{"type": "text", "text": "opened"}]}
+        })
+    );
+}
+
 #[test]
 fn phase_allows_send_idle() {
     assert!(phase_allows_send(&RunPhase::Idle));
@@ -15,8 +137,24 @@ fn composer_steers_only_while_streaming() {
 }
 
 #[test]
+fn queue_mode_cycles_between_all_and_one_at_a_time() {
+    assert_eq!(cycle_queue_mode(Some("all")), QueueMode::OneAtATime);
+    assert_eq!(cycle_queue_mode(Some("one-at-a-time")), QueueMode::All);
+    assert_eq!(cycle_queue_mode(None), QueueMode::OneAtATime);
+    assert_eq!(cycle_queue_mode(Some("future-mode")), QueueMode::OneAtATime);
+}
+
+#[test]
+fn interrupt_mode_cycles_between_immediate_and_wait() {
+    assert_eq!(cycle_interrupt_mode(Some("immediate")), InterruptMode::Wait);
+    assert_eq!(cycle_interrupt_mode(Some("wait")), InterruptMode::Immediate);
+    assert_eq!(cycle_interrupt_mode(None), InterruptMode::Immediate);
+}
+
+#[test]
 fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(format_version_gate_notice(MIN_SUPPORTED), None);
+    assert_eq!(format_version_gate_notice(MAX_SUPPORTED), None);
 
     let below = OmpVersion {
         major: 17,
@@ -26,7 +164,7 @@ fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(
         format_version_gate_notice(below).as_deref(),
         Some(
-            "Pimiento was tested with omp 17.2.10+; you have 17.2.9 — unknown events will still render"
+            "Pimiento was tested with omp 17.2.10–17.2.11; you have 17.2.9 — unknown events will still render"
         )
     );
 
@@ -38,7 +176,7 @@ fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(
         format_version_gate_notice(newer).as_deref(),
         Some(
-            "Pimiento was tested with omp 17.2.10+; you have 17.3.0 — unknown events will still render"
+            "Pimiento was tested with omp 17.2.10–17.2.11; you have 17.3.0 — unknown events will still render"
         )
     );
 }
@@ -423,6 +561,17 @@ fn context_and_tps_labels() {
 }
 
 #[test]
+fn context_high_starts_at_eighty_percent() {
+    assert!(!context_high(None));
+    assert!(!context_high(Some(&serde_json::json!({"percent": 79.99}))));
+    assert!(context_high(Some(&serde_json::json!({"percent": 80.0}))));
+    assert!(context_high(Some(&serde_json::json!(95.0))));
+    assert!(!context_high(Some(
+        &serde_json::json!({"percent": "unknown"})
+    )));
+}
+
+#[test]
 fn phase_disallows_send_dead() {
     assert!(!phase_allows_send(&RunPhase::Dead));
 }
@@ -551,6 +700,14 @@ fn filter_palette_entries_matches_label_and_hint() {
     );
     let hits = filter_palette_entries("home folder");
     assert!(hits.iter().any(|e| e.id == PaletteActionId::RevealLogs));
+    let hits = filter_palette_entries("tokens cost");
+    assert!(hits.iter().any(|e| e.id == PaletteActionId::SessionStats));
+    let hits = filter_palette_entries("terminal");
+    assert!(hits.iter().any(|e| e.id == PaletteActionId::Handoff));
+    let hits = filter_palette_entries("share");
+    assert!(hits.iter().any(|e| e.id == PaletteActionId::ShareSession));
+    let hits = filter_palette_entries("branch from turn");
+    assert!(hits.iter().any(|e| e.id == PaletteActionId::BranchSession));
     assert!(filter_palette_entries("zzzz-nope").is_empty());
 }
 
@@ -600,7 +757,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
         RailEntry {
             ix: 2,
             label: "later".to_owned(),
-            phase: "idle".to_owned(),
+            phase: RunPhase::Idle,
             cwd: PathBuf::from("/tmp/zulu"),
             attention: RailAttention::Quiet,
             session_file: None,
@@ -608,7 +765,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
         RailEntry {
             ix: 1,
             label: "second".to_owned(),
-            phase: "stream".to_owned(),
+            phase: RunPhase::Streaming,
             cwd: PathBuf::from("/tmp/alpha"),
             attention: RailAttention::Active,
             session_file: None,
@@ -616,7 +773,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
         RailEntry {
             ix: 0,
             label: "first".to_owned(),
-            phase: "idle".to_owned(),
+            phase: RunPhase::Idle,
             cwd: PathBuf::from("/tmp/alpha"),
             attention: RailAttention::Unread,
             session_file: None,
@@ -633,6 +790,87 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
     );
     assert_eq!(groups[1].0, PathBuf::from("/tmp/zulu"));
     assert_eq!(groups[1].1[0].ix, 2);
+}
+
+#[test]
+fn workspace_status_rollup_uses_child_phase_priority() {
+    let entry = |ix, phase| RailEntry {
+        ix,
+        label: format!("session-{ix}"),
+        phase,
+        cwd: PathBuf::from("/tmp/workspace"),
+        attention: RailAttention::Quiet,
+        session_file: None,
+    };
+    let entries = vec![
+        entry(0, RunPhase::Idle),
+        entry(1, RunPhase::Streaming),
+        entry(2, RunPhase::AwaitingResume),
+        entry(3, RunPhase::Dead),
+    ];
+    assert_eq!(workspace_status_for_entries(&entries), StatusKind::Error);
+    assert_eq!(
+        workspace_status_for_entries(&entries[..3]),
+        StatusKind::AwaitingInput
+    );
+    assert_eq!(
+        workspace_status_for_entries(&entries[..2]),
+        StatusKind::Working
+    );
+    assert_eq!(
+        workspace_status_for_entries(&entries[..1]),
+        StatusKind::Idle
+    );
+}
+
+#[test]
+fn inspector_groups_known_tools_and_detects_mode_tags() {
+    let names = vec![
+        "bash".to_owned(),
+        "read".to_owned(),
+        "mcp_linear".to_owned(),
+        "browser_open".to_owned(),
+    ];
+    let groups = group_tool_names(&names);
+    assert_eq!(groups.builtin, vec!["bash", "read"]);
+    assert_eq!(groups.extensions, vec!["mcp_linear", "browser_open"]);
+    assert_eq!(
+        mode_indicators(&names, &["computer-status".to_owned(), "vision".to_owned()]),
+        vec!["Computer", "Browser", "Vision"]
+    );
+}
+
+#[test]
+fn subagent_subscription_cycles_off_progress_events() {
+    assert_eq!(
+        next_subagent_subscription_level(&SubagentSubscriptionLevel::Off),
+        SubagentSubscriptionLevel::Progress
+    );
+    assert_eq!(
+        next_subagent_subscription_level(&SubagentSubscriptionLevel::Progress),
+        SubagentSubscriptionLevel::Events
+    );
+    assert_eq!(
+        next_subagent_subscription_level(&SubagentSubscriptionLevel::Events),
+        SubagentSubscriptionLevel::Off
+    );
+}
+
+#[test]
+fn subagent_strip_prefers_snapshots_and_falls_back_to_events() {
+    let snapshots = vec![serde_json::json!({
+        "id": "worker-1",
+        "agent": "task",
+        "status": "working",
+        "description": "Reviewing the UI"
+    })];
+    let events = vec![serde_json::json!({
+        "type": "subagent_progress",
+        "subagentId": "worker-2",
+        "message": "Running checks"
+    })];
+    assert_eq!(subagent_strip_rows(&snapshots, &events)[0].0, "worker-1");
+    assert_eq!(subagent_strip_rows(&[], &events)[0].0, "worker-2");
 }
 
 #[test]
@@ -1195,6 +1433,117 @@ fn model_sort_current_then_cursor_then_alpha() {
         ["alpha/a", "cursor/composer-2.5", "cursor/other", "zeta/z"]
     );
 }
+#[test]
+fn tool_group_positions_preserve_one_row_per_entry() {
+    let transcript = vec![
+        TranscriptEntry::Notice("before".into()),
+        TranscriptEntry::ToolCall(pimiento_core::transcript::ToolCall::new_running(
+            "tool-1",
+            "read",
+            serde_json::json!({"path": "a.rs"}),
+        )),
+        TranscriptEntry::ToolCall(pimiento_core::transcript::ToolCall::new_running(
+            "tool-2",
+            "bash",
+            serde_json::json!({"command": "cargo check"}),
+        )),
+        TranscriptEntry::Notice("after".into()),
+    ];
+
+    assert_eq!(
+        tool_group_position(&transcript, 1),
+        ToolGroupPosition {
+            grouped: true,
+            first: true
+        }
+    );
+    assert_eq!(
+        tool_group_position(&transcript, 2),
+        ToolGroupPosition {
+            grouped: true,
+            first: false
+        }
+    );
+    assert_eq!(
+        tool_group_position(&transcript, 0),
+        ToolGroupPosition {
+            grouped: false,
+            first: false
+        }
+    );
+}
+
+#[test]
+fn dialog_questions_parse_descriptions_and_recommendations() {
+    let dialog = UiDialog {
+        id: "ask-1".into(),
+        method: "select".into(),
+        payload: serde_json::json!({
+            "questions": [
+                {
+                    "header": "Approach",
+                    "question": "Which implementation?",
+                    "description": "Choose one path.",
+                    "recommended": 1,
+                    "options": [
+                        {"label": "Small patch", "description": "Minimal surface", "value": "small"},
+                        {"label": "Full pass", "preview": "Includes tests", "value": "full"}
+                    ]
+                },
+                {
+                    "question": "Run checks?",
+                    "options": [
+                        {"label": "Yes", "recommended": true},
+                        {"label": "No"}
+                    ]
+                }
+            ]
+        }),
+        timeout_ms: None,
+    };
+
+    let questions = dialog_questions(&dialog);
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0].header.as_deref(), Some("Approach"));
+    assert_eq!(
+        questions[0].prompt.as_deref(),
+        Some("Which implementation?")
+    );
+    assert_eq!(questions[0].recommended, Some(1));
+    assert_eq!(
+        questions[0].options[0].description.as_deref(),
+        Some("Minimal surface")
+    );
+    assert_eq!(
+        questions[0].options[1].description.as_deref(),
+        Some("Includes tests")
+    );
+    assert_eq!(questions[1].recommended, Some(0));
+}
+
+#[test]
+fn dialog_primary_options_keep_wire_values_for_keyboard_selection() {
+    let dialog = UiDialog {
+        id: "ask-2".into(),
+        method: "select".into(),
+        payload: serde_json::json!({
+            "options": [
+                {"label": "Readable label", "description": "More context", "value": "wire-value"},
+                "plain"
+            ],
+            "recommended": "wire-value"
+        }),
+        timeout_ms: None,
+    };
+
+    assert_eq!(
+        select_dialog_options(&dialog),
+        vec!["wire-value".to_owned(), "plain".to_owned()]
+    );
+    let options = dialog_primary_options(&dialog);
+    assert_eq!(dialog_recommended_index(&dialog.payload, &options), Some(0));
+}
+
 #[cfg(test)]
 mod open_url_tests {
     use super::*;
@@ -1249,4 +1598,63 @@ fn display_status_lines_skip_empty() {
     display.statuses.insert("cleared".into(), None);
     let lines = display_status_lines(&display);
     assert_eq!(lines, vec![("k".into(), "hello".into())]);
+}
+
+#[test]
+fn hub_job_summary_reads_wire_fields_only() {
+    let args = serde_json::json!({"op": "jobs"});
+    let result = serde_json::json!({
+        "details": {
+            "op": "jobs",
+            "jobs": [
+                {"id": "j1", "status": "running", "command": "cargo test"},
+                {"jobId": "j2", "status": "done"}
+            ]
+        }
+    });
+    let summary = parse_hub_job_summary("hub", &args, &result).expect("hub summary");
+    assert_eq!(summary.op.as_deref(), Some("jobs"));
+    assert_eq!(summary.jobs[0].id.as_deref(), Some("j1"));
+    let lines = hub_job_summary_display_lines(&summary);
+    assert!(lines.iter().any(|line| line.contains("j1")));
+    assert!(parse_hub_job_summary("bash", &args, &result).is_none());
+}
+
+#[test]
+fn abort_bash_has_no_correlatable_target_field() {
+    assert_eq!(
+        serde_json::to_value(RpcCommandBody::AbortBash).expect("serialize abort_bash"),
+        serde_json::json!({"type": "abort_bash"})
+    );
+}
+
+#[test]
+fn task_and_eval_digests_require_wire_fields() {
+    assert_eq!(
+        task_linkage_id(
+            "task",
+            &serde_json::json!({"subagentId": "sa-1"}),
+            &serde_json::json!({})
+        )
+        .as_deref(),
+        Some("sa-1")
+    );
+    assert_eq!(
+        task_linkage_id(
+            "TASK",
+            &serde_json::json!({}),
+            &serde_json::json!({"details": {"toolCallId": "call-2"}})
+        )
+        .as_deref(),
+        Some("call-2")
+    );
+    assert!(task_linkage_id("task", &serde_json::json!({}), &serde_json::json!({})).is_none());
+    let eval = parse_eval_card_summary(
+        "eval",
+        &serde_json::json!({"language": "py", "title": "imports", "code": "import json"}),
+    )
+    .expect("eval summary");
+    assert_eq!(eval.title, "Eval · imports");
+    assert_eq!(eval.digest, "Python · import json");
+    assert!(parse_eval_card_summary("bash", &serde_json::json!({"code": "1 + 1"})).is_none());
 }
