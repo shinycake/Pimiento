@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
-# scripts/run_app.sh — daemonize pimiento-app so Cursor shell exit cannot SIGHUP it.
+# scripts/run_app.sh — build (unless skipped) then daemonize pimiento-app so
+# Cursor shell exit cannot SIGHUP it. Always launches a freshly built binary by
+# default so "run the app" never resurrects a stale target/debug artifact.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PIDFILE="${PIMIENTO_PIDFILE:-/tmp/pimiento-app.pid}"
 LOG="${PIMIENTO_LOG:-/tmp/pimiento-app.log}"
 BIN="${PIMIENTO_BIN:-$ROOT/target/debug/pimiento-app}"
-
-if [[ ! -x "$BIN" ]]; then
-  echo "missing binary: $BIN (run: cargo build -p pimiento-app)" >&2
-  exit 1
-fi
 
 bring_to_front() {
   local pid="$1"
@@ -25,7 +22,7 @@ bring_to_front() {
   esac
 }
 
-if [[ "${PIMIENTO_RESTART:-}" == "1" ]]; then
+stop_running() {
   if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
     sleep 0.3
@@ -33,13 +30,30 @@ if [[ "${PIMIENTO_RESTART:-}" == "1" ]]; then
   pkill -f '/target/debug/pimiento-app' 2>/dev/null || true
   sleep 0.2
   rm -f "$PIDFILE"
+}
+
+if [[ "${PIMIENTO_SKIP_BUILD:-}" != "1" ]]; then
+  # Default: rebuild so pulled main / local edits are what actually runs.
+  (cd "$ROOT" && cargo build -p pimiento-app)
+elif [[ ! -x "$BIN" ]]; then
+  echo "missing binary: $BIN (run without PIMIENTO_SKIP_BUILD=1, or: cargo build -p pimiento-app)" >&2
+  exit 1
 fi
 
-if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+# After a build the on-disk binary may have changed; replace any live process.
+# PIMIENTO_RESTART=1 remains supported as an explicit kill even with SKIP_BUILD.
+if [[ "${PIMIENTO_SKIP_BUILD:-}" != "1" || "${PIMIENTO_RESTART:-}" == "1" ]]; then
+  stop_running
+elif [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   pid="$(cat "$PIDFILE")"
-  echo "already running pid=${pid}"
+  echo "already running pid=${pid} (set PIMIENTO_RESTART=1 to replace, or omit PIMIENTO_SKIP_BUILD to rebuild)"
   bring_to_front "$pid"
   exit 0
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "missing binary after build: $BIN" >&2
+  exit 1
 fi
 
 python3 - "$BIN" "$PIDFILE" "$LOG" "${PIMIENTO_CWD:-$ROOT}" <<'PY'
