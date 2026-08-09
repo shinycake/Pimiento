@@ -6827,7 +6827,7 @@ pub(crate) fn format_version_gate_notice(version: OmpVersion) -> Option<String> 
     match version.support() {
         VersionSupport::Supported => None,
         VersionSupport::BelowMinimum | VersionSupport::Newer => Some(format!(
-            "Pimiento was tested with omp {MIN_SUPPORTED}+; you have {version} — unknown events will still render"
+            "Pimiento was tested with omp {MIN_SUPPORTED}–{MAX_SUPPORTED}; you have {version} — unknown events will still render"
         )),
     }
 }

@@ -34,7 +34,8 @@ use gpui_component::{
 use omp_rpc_client::{
     client::{ClientConfig, ClientEvent, RpcClient},
     discovery::{
-        DiscoveryInputs, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport, discover,
+        DiscoveryInputs, MAX_SUPPORTED, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport,
+        discover,
     },
     frames::{
         InterruptMode, QueueMode, RpcCommandBody, StreamingBehavior, SubagentSubscriptionLevel,

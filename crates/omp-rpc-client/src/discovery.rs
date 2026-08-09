@@ -29,15 +29,22 @@ use std::process::Command;
 
 use crate::error::RpcError;
 
-/// Minimum OMP version this build was developed against.
+/// Inclusive lower bound of the documented tested OMP range.
 ///
-/// Newer versions are accepted; the app surfaces an "outside tested
-/// range" banner elsewhere (PLAN.md §1, "version gate, not version
-/// bundling").
+/// Versions outside [`MIN_SUPPORTED`]..=[`MAX_SUPPORTED`] are still accepted;
+/// the app surfaces an "outside tested range" banner elsewhere (PLAN.md §1,
+/// "version gate, not version bundling").
 pub const MIN_SUPPORTED: OmpVersion = OmpVersion {
     major: 17,
     minor: 2,
     patch: 10,
+};
+
+/// Inclusive upper bound of the documented tested OMP range.
+pub const MAX_SUPPORTED: OmpVersion = OmpVersion {
+    major: 17,
+    minor: 2,
+    patch: 11,
 };
 
 /// Marker line separating `command -v omp` from the environment dump in
@@ -101,14 +108,17 @@ impl OmpVersion {
         })
     }
 
-    /// Classify against [`MIN_SUPPORTED`]. Newer versions are accepted;
-    /// only strictly-below-minimum is a hard `BelowMinimum`.
+    /// Classify against the inclusive tested range
+    /// [`MIN_SUPPORTED`]..=[`MAX_SUPPORTED`]. Outside versions are accepted
+    /// with an app-layer warning.
     #[must_use]
     pub fn support(self) -> VersionSupport {
-        match self.cmp(&MIN_SUPPORTED) {
-            std::cmp::Ordering::Less => VersionSupport::BelowMinimum,
-            std::cmp::Ordering::Equal => VersionSupport::Supported,
-            std::cmp::Ordering::Greater => VersionSupport::Newer,
+        if self < MIN_SUPPORTED {
+            VersionSupport::BelowMinimum
+        } else if self > MAX_SUPPORTED {
+            VersionSupport::Newer
+        } else {
+            VersionSupport::Supported
         }
     }
 }
@@ -131,9 +141,9 @@ fn parse_component(part: Option<&str>, dotted: &str) -> Result<u32, RpcError> {
 /// Support classification of a probed OMP against the tested range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionSupport {
-    /// Exactly the version this build was developed against.
+    /// Inside the inclusive tested range [`MIN_SUPPORTED`]..=[`MAX_SUPPORTED`].
     Supported,
-    /// Newer than [`MIN_SUPPORTED`] — accept, warn at the app layer.
+    /// Above [`MAX_SUPPORTED`] — accept, warn at the app layer.
     Newer,
     /// Below [`MIN_SUPPORTED`] — accept, warn at the app layer.
     BelowMinimum,

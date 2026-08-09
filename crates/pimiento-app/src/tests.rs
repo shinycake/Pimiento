@@ -154,6 +154,7 @@ fn interrupt_mode_cycles_between_immediate_and_wait() {
 #[test]
 fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(format_version_gate_notice(MIN_SUPPORTED), None);
+    assert_eq!(format_version_gate_notice(MAX_SUPPORTED), None);
 
     let below = OmpVersion {
         major: 17,
@@ -163,7 +164,7 @@ fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(
         format_version_gate_notice(below).as_deref(),
         Some(
-            "Pimiento was tested with omp 17.2.10+; you have 17.2.9 — unknown events will still render"
+            "Pimiento was tested with omp 17.2.10–17.2.11; you have 17.2.9 — unknown events will still render"
         )
     );
 
@@ -175,7 +176,7 @@ fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(
         format_version_gate_notice(newer).as_deref(),
         Some(
-            "Pimiento was tested with omp 17.2.10+; you have 17.3.0 — unknown events will still render"
+            "Pimiento was tested with omp 17.2.10–17.2.11; you have 17.3.0 — unknown events will still render"
         )
     );
 }
