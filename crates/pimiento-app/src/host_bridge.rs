@@ -3,14 +3,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use gpui::{
-    ClickEvent, Context, IntoElement as _, ParentElement as _, Styled as _,
-    prelude::FluentBuilder as _,
+    ClickEvent, Context, IntoElement as _, ParentElement as _, Styled as _, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     label::Label,
+    scroll::ScrollableElement as _,
     v_flex,
 };
 use omp_rpc_client::{
@@ -304,14 +305,7 @@ pub(crate) fn host_uri_denied_frame(request_id: &str, message: &str) -> Value {
 }
 
 pub(crate) fn host_arguments_summary(arguments: &Value) -> String {
-    const LIMIT: usize = 240;
-    let summary = serde_json::to_string(arguments).unwrap_or_else(|_| "<invalid JSON>".to_owned());
-    if summary.chars().count() <= LIMIT {
-        return summary;
-    }
-    let mut truncated = summary.chars().take(LIMIT).collect::<String>();
-    truncated.push('…');
-    truncated
+    serde_json::to_string_pretty(arguments).unwrap_or_else(|_| "<invalid JSON>".to_owned())
 }
 
 impl SessionView {
@@ -484,15 +478,24 @@ pub(crate) fn render_host_tool_call(
                 .font_weight(gpui::FontWeight::SEMIBOLD),
         )
         .child(
-            Label::new(call.tool_name.clone())
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_x_scrollbar()
                 .text_xs()
-                .font_family(theme.mono_font_family.clone()),
+                .font_family(theme.mono_font_family.clone())
+                .child(call.tool_name.clone()),
         )
         .child(
-            Label::new(host_arguments_summary(&call.arguments))
+            div()
+                .w_full()
+                .min_w_0()
+                .max_h(px(240.))
+                .overflow_scrollbar()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .font_family(theme.mono_font_family.clone()),
+                .font_family(theme.mono_font_family.clone())
+                .child(host_arguments_summary(&call.arguments)),
         )
         .when(!supported, |card| {
             card.child(
@@ -504,6 +507,7 @@ pub(crate) fn render_host_tool_call(
         .child(
             h_flex()
                 .w_full()
+                .flex_wrap()
                 .justify_end()
                 .gap_2()
                 .child(
@@ -550,9 +554,13 @@ pub(crate) fn render_host_uri_request(
                 .font_weight(gpui::FontWeight::SEMIBOLD),
         )
         .child(
-            Label::new(format!("{} {}", request.operation, request.url))
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_x_scrollbar()
                 .text_xs()
-                .font_family(theme.mono_font_family.clone()),
+                .font_family(theme.mono_font_family.clone())
+                .child(format!("{} {}", request.operation, request.url)),
         )
         .child(
             Label::new("No host URI scheme is registered. Deny this request to return an error.")

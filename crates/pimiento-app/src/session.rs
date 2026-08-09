@@ -412,10 +412,7 @@ impl SessionView {
                             this.host_bridge.reset();
                             this.dialog_timeout_gens.clear();
                             this.dialog_input_bound_id = None;
-                            this.status_message = format!(
-                                "OMP closed — {}",
-                                info.stderr_tail.chars().take(256).collect::<String>()
-                            );
+                            this.status_message = format!("OMP closed — {}", info.stderr_tail);
                         }
                     }
                     this.sync_running_tools(cx);
@@ -2764,11 +2761,12 @@ impl SessionView {
                                     .py_2()
                                     .rounded_sm()
                                     .bg(theme.background)
-                                    .child(cwd),
+                                    .child(soft_wrap_dynamic_text(&cwd)),
                             ),
                     )
                     .child(
                         h_flex()
+                            .flex_wrap()
                             .gap_2()
                             .child(
                                 Button::new("start-working-directory")
@@ -2806,7 +2804,7 @@ impl SessionView {
                                 .bg(theme.danger)
                                 .text_color(theme.danger_foreground)
                                 .text_xs()
-                                .child(error)
+                                .child(soft_wrap_dynamic_text(&error))
                                 .child(
                                     Label::new(
                                         "If omp is missing, install manually: curl -fsSL https://omp.sh/install | sh",
@@ -2869,9 +2867,9 @@ impl SessionView {
                                         })
                                         .child(
                                             Button::new(("recent-session", ix))
-                                                .label(label)
                                                 .ghost()
                                                 .w_full()
+                                                .child(wrapped_button_text(label))
                                                 .disabled(connecting)
                                                 .on_click(cx.listener(
                                                     move |this, _: &ClickEvent, window, cx| {
@@ -4835,10 +4833,10 @@ pub(crate) fn render_todo_task_editable(
                 "todo-toggle",
                 phase_ix.saturating_mul(10_000).saturating_add(task_ix),
             ))
-            .label(label)
             .small()
             .ghost()
             .w_full()
+            .child(wrapped_button_text(label))
             .disabled(!connected)
             .on_click(window.listener_for(
                 session,
@@ -5116,13 +5114,26 @@ impl Render for SessionView {
                                     .w_full()
                                     .px_3()
                                     .py_2()
+                                    .items_start()
+                                    .flex_wrap()
                                     .gap_4()
                                     .child(
                                         h_flex()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .items_start()
                                             .gap_2()
                                             .child(
-                                                Label::new(self.status_message.clone())
+                                                div()
+                                                    .w_full()
+                                                    .max_h(px(96.))
+                                                    .overflow_y_scrollbar()
                                                     .text_xs()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(soft_wrap_dynamic_text(
+                                                        &self.status_message,
+                                                    ))
                                                     .when(
                                                         self.status_message == ABORT_ARM_STATUS,
                                                         |label| label.text_color(theme.warning),
@@ -5137,6 +5148,8 @@ impl Render for SessionView {
                                     .child(
                                         h_flex()
                                             .flex_1()
+                                            .min_w_0()
+                                            .flex_wrap()
                                             .justify_center()
                                             .gap_2()
                                             // When the Context inspector is open it already
@@ -5161,6 +5174,7 @@ impl Render for SessionView {
                                     )
                                     .child(
                                         h_flex()
+                                            .flex_wrap()
                                             .justify_end()
                                             .gap_2()
                                             .when(!self.inspector_open, |group| {
@@ -5231,7 +5245,9 @@ impl Render for SessionView {
                                         .flex_wrap()
                                         .children(display_statuses.into_iter().map(
                                             |(key, text)| {
-                                                Label::new(format!("{key}: {text}"))
+                                                Label::new(soft_wrap_dynamic_text(&format!(
+                                                    "{key}: {text}"
+                                                )))
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
                                             },
@@ -5251,7 +5267,9 @@ impl Render for SessionView {
                                                     .w_full()
                                                     .gap_0p5()
                                                     .child(
-                                                        Label::new(format!("widget:{key}"))
+                                                        Label::new(soft_wrap_dynamic_text(&format!(
+                                                            "widget:{key}"
+                                                        )))
                                                             .text_xs()
                                                             .text_color(theme.muted_foreground),
                                                     )
@@ -5263,7 +5281,8 @@ impl Render for SessionView {
                                                         )
                                                     })
                                                     .children(lines.into_iter().map(|line| {
-                                                        Label::new(line).text_xs()
+                                                        Label::new(soft_wrap_dynamic_text(&line))
+                                                            .text_xs()
                                                     }))
                                             },
                                         )),
@@ -5276,11 +5295,17 @@ impl Render for SessionView {
                                 .w_full()
                                 .px_3()
                                 .py_1()
+                                .items_start()
                                 .gap_2()
                                 .bg(theme.warning)
                                 .text_color(theme.warning_foreground)
                                 .text_xs()
-                                .child(div().flex_1().child(notice))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(soft_wrap_dynamic_text(&notice)),
+                                )
                                 .child(
                                     Button::new("dismiss-version-gate")
                                         .label("Dismiss")
@@ -5301,6 +5326,7 @@ impl Render for SessionView {
                                 .w_full()
                                 .px_3()
                                 .py_1()
+                                .items_start()
                                 .gap_2()
                                 .bg(theme.secondary)
                                 .border_b_1()
@@ -5309,6 +5335,7 @@ impl Render for SessionView {
                                 .child(
                                     div()
                                         .flex_1()
+                                        .min_w_0()
                                         .text_color(theme.warning)
                                         .child("Context is high. Compact before a long turn."),
                                 )
@@ -5434,12 +5461,14 @@ impl Render for SessionView {
                             .border_t_1()
                             .border_color(theme.border)
                             .child(
-                                Label::new(format!("Revert file {path}?"))
+                                Label::new(soft_wrap_dynamic_text(&format!(
+                                    "Revert file {path}?"
+                                )))
                                     .text_sm()
                                     .font_weight(gpui::FontWeight::MEDIUM),
                             )
                             .child(
-                                Label::new(format!("Runs: {command}"))
+                                Label::new(soft_wrap_dynamic_text(&format!("Runs: {command}")))
                                     .text_xs()
                                     .font_family(theme.mono_font_family.clone()),
                             )
@@ -5474,6 +5503,8 @@ impl Render for SessionView {
                         parent.child(
                             v_flex()
                                 .w_full()
+                                .max_h(gpui::relative(0.4))
+                                .overflow_y_scrollbar()
                                 .px_3()
                                 .py_2()
                                 .gap_2()
@@ -5497,6 +5528,8 @@ impl Render for SessionView {
                             parent.child(
                                 v_flex()
                                     .w_full()
+                                    .max_h(gpui::relative(0.4))
+                                    .overflow_y_scrollbar()
                                     .px_3()
                                     .py_2()
                                     .gap_2()
@@ -5519,6 +5552,8 @@ impl Render for SessionView {
                         parent.child(
                             v_flex()
                                 .w_full()
+                                .max_h(gpui::relative(0.4))
+                                .overflow_y_scrollbar()
                                 .px_3()
                                 .py_2()
                                 .gap_2()
@@ -5565,12 +5600,13 @@ impl Render for SessionView {
                                     .pt_2()
                                     .pb_1()
                                     .gap_2()
-                                    .items_center()
+                                    .items_start()
+                                    .flex_wrap()
                                     .child(
                                         Button::new("composer-model-picker")
-                                            .label(model_button_label.clone())
                                             .small()
                                             .ghost()
+                                            .child(wrapped_button_text(model_button_label.clone()))
                                             .disabled(!can_pick)
                                             .on_click(cx.listener(
                                                 |this, _: &ClickEvent, _window, cx| {
@@ -5587,15 +5623,17 @@ impl Render for SessionView {
                                         .map(|role| {
                                             role_color_tag(role.color)
                                                 .small()
-                                                .child(role.display_name.clone())
+                                                .child(soft_wrap_dynamic_text(&role.display_name))
                                         }),
                                     )
                                     .when(show_thinking_control, |row| {
                                         row.child(
                                             Button::new("composer-thinking-picker")
-                                                .label(thinking_button_label.clone())
                                                 .small()
                                                 .ghost()
+                                                .child(wrapped_button_text(
+                                                    thinking_button_label.clone(),
+                                                ))
                                                 .disabled(!can_pick)
                                                 .on_click(cx.listener(
                                                     |this, _: &ClickEvent, _window, cx| {
@@ -5696,9 +5734,9 @@ impl Render for SessionView {
                                                                             "omp-role-assign",
                                                                             ix,
                                                                         ))
-                                                                        .label(label)
                                                                         .small()
                                                                         .ghost()
+                                                                        .child(wrapped_button_text(label))
                                                                         .on_click(window.listener_for(
                                                                             &view,
                                                                             move |this,
@@ -5758,9 +5796,9 @@ impl Render for SessionView {
                                                                                     "omp-role-switch",
                                                                                     ix,
                                                                                 ))
-                                                                                .label(chip)
                                                                                 .small()
                                                                                 .ghost()
+                                                                                .child(wrapped_button_text(chip))
                                                                                 .on_click(window.listener_for(
                                                                                     &view,
                                                                                     move |this,
@@ -5802,9 +5840,9 @@ impl Render for SessionView {
                                                                     model_label.as_str()
                                                                         == label.as_str();
                                                                 Button::new(("model-choice", ix))
-                                                                    .label(label)
                                                                     .small()
                                                                     .w_full()
+                                                                    .child(wrapped_button_text(label))
                                                                     .when(current, Button::primary)
                                                                     .when(!current, Button::ghost)
                                                                     .on_click(window.listener_for(
@@ -5855,9 +5893,9 @@ impl Render for SessionView {
                                             |(ix, level)| {
                                                 let level = level.clone();
                                                 Button::new(("thinking-choice", ix))
-                                                    .label(level.clone())
                                                     .ghost()
                                                     .small()
+                                                    .child(wrapped_button_text(level.clone()))
                                                     .on_click(window.listener_for(
                                                         &view,
                                                         move |this, _, _window, cx| {
@@ -5886,6 +5924,7 @@ impl Render for SessionView {
                                                 let label =
                                                     format!("{kind} {}", attachment.chip_label());
                                                 h_flex()
+                                                                    .flex_wrap()
                                                     .gap_1()
                                                     .px_2()
                                                     .py_0p5()
@@ -5893,7 +5932,10 @@ impl Render for SessionView {
                                                     .bg(theme.background)
                                                     .border_1()
                                                     .border_color(theme.border)
-                                                    .child(Label::new(label).text_xs())
+                                                    .child(
+                                                        Label::new(soft_wrap_dynamic_text(&label))
+                                                            .text_xs(),
+                                                    )
                                                     .child(
                                                         Button::new(("remove-attachment", ix))
                                                             .label("×")
@@ -5919,11 +5961,14 @@ impl Render for SessionView {
                                     .w_full()
                                     .px_3()
                                     .py_2()
+                                    .items_end()
+                                    .flex_wrap()
                                     .gap_2()
                                     .child(
                                         div()
                                             .relative()
                                             .flex_1()
+                                            .min_w_0()
                                             .child(
                                                 Input::new(&self.composer)
                                                     .appearance(false)
@@ -6079,6 +6124,9 @@ impl Render for SessionView {
                                                         .child(
                                                             h_flex()
                                                                 .w_full()
+                                                                .items_start()
+                                                                .flex_wrap()
+                                                                .gap_2()
                                                                 .justify_between()
                                                                 .px_2()
                                                                 .py_1()
@@ -6122,6 +6170,7 @@ impl Render for SessionView {
                                                         )
                                                         .child(
                                                             h_flex()
+                                                                .flex_wrap()
                                                                 .gap_1()
                                                                 .child(
                                                                     Button::new("large-paste-wrap")
@@ -6218,6 +6267,7 @@ impl Render for SessionView {
                                                                     .ghost()
                                                                     .small()
                                                                     .w_full()
+                                                                    .child(wrapped_button_text(label))
                                                                     .when(
                                                                         ix == at_mention_selected,
                                                                         |button| {
@@ -6226,7 +6276,6 @@ impl Render for SessionView {
                                                                             )
                                                                         },
                                                                     )
-                                                                    .label(label)
                                                                     .on_click(window.listener_for(
                                                                         &view,
                                                                         move |this,
@@ -6343,6 +6392,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -6351,8 +6401,8 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("subagent-modal-panel")
-                                .w(px(720.))
-                                .max_w(gpui::relative(0.92))
+                                .w_full()
+                                .max_w(px(720.))
                                 .max_h(gpui::relative(0.74))
                                 .gap_3()
                                 .p_4()
@@ -6373,6 +6423,7 @@ impl Render for SessionView {
                                         .gap_3()
                                         .child(
                                             v_flex()
+                                                .flex_1()
                                                 .min_w_0()
                                                 .gap_1()
                                                 .child(
@@ -6383,7 +6434,9 @@ impl Render for SessionView {
                                                         ),
                                                 )
                                                 .child(
-                                                    Label::new(agent_summary)
+                                                    Label::new(soft_wrap_dynamic_text(
+                                                        &agent_summary,
+                                                    ))
                                                         .text_sm()
                                                         .text_color(theme.muted_foreground),
                                                 )
@@ -6394,7 +6447,7 @@ impl Render for SessionView {
                                                             theme.mono_font_family.clone(),
                                                         )
                                                         .text_color(theme.muted_foreground)
-                                                        .child(agent_id),
+                                                        .child(soft_wrap_dynamic_text(&agent_id)),
                                                 ),
                                         )
                                         .child(
@@ -6418,7 +6471,9 @@ impl Render for SessionView {
                                         .overflow_y_scrollbar()
                                         .gap_2()
                                         .child(
-                                            Label::new(subagent_modal_status)
+                                            Label::new(soft_wrap_dynamic_text(
+                                                &subagent_modal_status,
+                                            ))
                                                 .text_xs()
                                                 .text_color(theme.muted_foreground),
                                         )
@@ -6437,6 +6492,7 @@ impl Render for SessionView {
                                                 .bg(theme.secondary)
                                                 .text_xs()
                                                 .font_family(theme.mono_font_family.clone())
+                                                .overflow_x_scrollbar()
                                                 .child(line)
                                         })),
                                 ),
@@ -6452,6 +6508,7 @@ impl Render for SessionView {
                         .flex()
                         .items_start()
                         .justify_center()
+                        .px_4()
                         .pt_16()
                         .bg(theme.overlay)
                         .cursor_pointer()
@@ -6461,7 +6518,8 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("theme-picker-panel")
-                                .w(px(520.))
+                                .w_full()
+                                .max_w(px(520.))
                                 .max_h(px(520.))
                                 .gap_2()
                                 .p_3()
@@ -6476,11 +6534,20 @@ impl Render for SessionView {
                                 .child(
                                     h_flex()
                                         .w_full()
+                                        .items_start()
+                                        .flex_wrap()
+                                        .gap_2()
                                         .justify_between()
-                                        .child(Label::new("Theme").text_sm())
+                                        .child(
+                                            Label::new("Theme")
+                                                .text_sm()
+                                                .flex_shrink_0(),
+                                        )
                                         .child(
                                             Label::new("↑↓ choose · Enter apply · Esc close")
                                                 .text_xs()
+                                                .flex_1()
+                                                .min_w_0()
                                                 .text_color(theme.muted_foreground),
                                         ),
                                 )
@@ -6528,6 +6595,7 @@ impl Render for SessionView {
                                                     .id(("theme-picker-entry", ix))
                                                     .w_full()
                                                     .min_h(px(44.))
+                                                    .items_start()
                                                     .gap_2()
                                                     .px_3()
                                                     .py_2()
@@ -6540,6 +6608,7 @@ impl Render for SessionView {
                                                     .child(
                                                         div()
                                                             .w(px(18.))
+                                                            .flex_shrink_0()
                                                             .text_sm()
                                                             .text_color(theme.primary)
                                                             .child(if active { "✓" } else { "" }),
@@ -6560,11 +6629,13 @@ impl Render for SessionView {
                                                                 div()
                                                                     .w_full()
                                                                     .text_sm()
-                                                                    .child(label),
+                                                                    .child(soft_wrap_dynamic_text(
+                                                                        &label,
+                                                                    )),
                                                             ),
                                                     )
                                                     .child(
-                                                        h_flex().gap_1().children(
+                                                        h_flex().flex_shrink_0().gap_1().children(
                                                             swatches
                                                                 .into_iter()
                                                                 .flatten()
@@ -6615,6 +6686,7 @@ impl Render for SessionView {
                         .flex()
                         .items_start()
                         .justify_center()
+                        .px_4()
                         .pt_16()
                         .bg(theme.overlay)
                         .cursor_pointer()
@@ -6624,7 +6696,8 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("command-palette-panel")
-                                .w(px(480.))
+                                .w_full()
+                                .max_w(px(480.))
                                 .max_h(px(420.))
                                 .gap_1()
                                 .p_3()
@@ -6658,9 +6731,11 @@ impl Render for SessionView {
                                                     let id = entry.id;
                                                     let selected = ix == palette_selected;
                                                     Button::new(("palette-entry", ix))
-                                                        .label(palette_entry_display_label(entry))
                                                         .small()
                                                         .w_full()
+                                                        .child(wrapped_button_text(
+                                                            palette_entry_display_label(entry),
+                                                        ))
                                                         .when(selected, Button::primary)
                                                         .when(!selected, Button::ghost)
                                                         .on_click(cx.listener(
@@ -6700,6 +6775,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -6708,7 +6784,10 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("about-panel")
-                                .w(px(420.))
+                                .w_full()
+                                .max_w(px(420.))
+                                .max_h(gpui::relative(0.84))
+                                .overflow_y_scroll()
                                 .gap_3()
                                 .p_5()
                                 .rounded_lg()
@@ -6763,6 +6842,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -6771,7 +6851,10 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("compact-panel")
-                                .w(px(420.))
+                                .w_full()
+                                .max_w(px(420.))
+                                .max_h(gpui::relative(0.84))
+                                .overflow_y_scroll()
                                 .gap_3()
                                 .p_4()
                                 .rounded_lg()
@@ -6803,15 +6886,19 @@ impl Render for SessionView {
                                     h_flex()
                                         .w_full()
                                         .justify_between()
-                                        .items_center()
+                                        .items_start()
+                                        .flex_wrap()
                                         .gap_2()
                                         .child(
                                             Label::new("Enter compacts · Shift+Enter adds a line")
                                                 .text_xs()
+                                                .flex_1()
+                                                .min_w_0()
                                                 .text_color(theme.muted_foreground),
                                         )
                                         .child(
                                             h_flex()
+                                                .flex_wrap()
                                                 .gap_2()
                                                 .child(
                                                     Button::new("compact-cancel")
@@ -6847,6 +6934,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -6855,7 +6943,10 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("handoff-panel")
-                                .w(px(420.))
+                                .w_full()
+                                .max_w(px(420.))
+                                .max_h(gpui::relative(0.84))
+                                .overflow_y_scroll()
                                 .gap_3()
                                 .p_4()
                                 .rounded_lg()
@@ -6916,6 +7007,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _w, cx| {
@@ -6924,7 +7016,10 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("rename-panel")
-                                .w(px(420.))
+                                .w_full()
+                                .max_w(px(420.))
+                                .max_h(gpui::relative(0.84))
+                                .overflow_y_scroll()
                                 .gap_3()
                                 .p_4()
                                 .rounded_lg()
@@ -6991,6 +7086,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -6999,7 +7095,8 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("branch-panel")
-                                .w(px(440.))
+                                .w_full()
+                                .max_w(px(440.))
                                 .max_h(px(420.))
                                 .gap_2()
                                 .p_4()
@@ -7035,9 +7132,9 @@ impl Render for SessionView {
                                                 let label =
                                                     format!("{} · {preview}", msg.entry_id);
                                                 Button::new(("branch-msg", ix))
-                                                    .label(label)
                                                     .small()
                                                     .w_full()
+                                                    .child(wrapped_button_text(label))
                                                     .when(ix == selected, Button::primary)
                                                     .when(ix != selected, Button::ghost)
                                                     .on_click(cx.listener(
@@ -7064,6 +7161,7 @@ impl Render for SessionView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .cursor_pointer()
                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -7072,7 +7170,8 @@ impl Render for SessionView {
                         .child(
                             v_flex()
                                 .id("login-panel")
-                                .w(px(400.))
+                                .w_full()
+                                .max_w(px(400.))
                                 .max_h(px(360.))
                                 .gap_2()
                                 .p_4()
@@ -7110,9 +7209,9 @@ impl Render for SessionView {
                                                     provider.name
                                                 );
                                                 Button::new(("login-provider", ix))
-                                                    .label(label)
                                                     .small()
                                                     .w_full()
+                                                    .child(wrapped_button_text(label))
                                                     .disabled(!provider.available)
                                                     .when(ix == selected, Button::primary)
                                                     .when(ix != selected, Button::ghost)
@@ -7234,7 +7333,7 @@ pub(crate) fn subagent_message_digest(message: &serde_json::Value) -> String {
 }
 
 pub(crate) fn compact_subagent_value(value: &serde_json::Value) -> String {
-    let text = match value {
+    match value {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Array(parts) => parts
             .iter()
@@ -7245,8 +7344,7 @@ pub(crate) fn compact_subagent_value(value: &serde_json::Value) -> String {
             .and_then(serde_json::Value::as_str)
             .map_or_else(|| compact_json(value), str::to_owned),
         _ => compact_json(value),
-    };
-    truncate_subagent_text(&text, 120)
+    }
 }
 
 pub(crate) fn subagent_text_part(part: &serde_json::Value) -> Option<String> {
@@ -7266,16 +7364,6 @@ pub(crate) fn subagent_text_part(part: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn compact_json(value: &serde_json::Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<unrenderable JSON>".to_owned())
-}
-
-pub(crate) fn truncate_subagent_text(text: &str, limit: usize) -> String {
-    let mut chars = text.chars();
-    let prefix: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() {
-        format!("{prefix}…")
-    } else {
-        prefix
-    }
 }
 
 #[allow(clippy::too_many_lines)] // Match arms mirror transcript variants.

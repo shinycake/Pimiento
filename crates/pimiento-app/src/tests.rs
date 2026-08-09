@@ -749,6 +749,37 @@ fn thinking_collapse_preview_uses_first_wire_line() {
 }
 
 #[test]
+fn soft_wrap_dynamic_text_preserves_every_visible_character() {
+    let original =
+        "/very/long/path/with/a-model-name-that-keeps-going-without-visible-clipping.json";
+    let wrapped = soft_wrap_dynamic_text(original);
+    assert!(wrapped.contains('\u{200b}'));
+    assert_eq!(wrapped.replace('\u{200b}', ""), original);
+    assert!(!wrapped.contains('…'));
+}
+
+#[test]
+fn subagent_detail_helpers_keep_full_wire_text() {
+    let detail = "x".repeat(320);
+    let value = serde_json::json!({"text": detail});
+    assert_eq!(compact_subagent_value(&value), detail);
+
+    let message = serde_json::json!({"role": "assistant", "content": detail});
+    let digest = subagent_message_digest(&message);
+    assert_eq!(digest, format!("assistant: {detail}"));
+    assert!(!digest.contains('…'));
+}
+
+#[test]
+fn host_argument_detail_is_pretty_and_never_truncated() {
+    let detail = "argument".repeat(80);
+    let rendered = host_arguments_summary(&serde_json::json!({"path": detail}));
+    assert!(rendered.contains(&detail));
+    assert!(rendered.contains('\n'));
+    assert!(!rendered.contains('…'));
+}
+
+#[test]
 fn groups_sessions_by_workspace_name_and_preserves_session_order() {
     let entries = vec![
         RailEntry {

@@ -613,6 +613,43 @@ pub(crate) fn mode_indicators(tool_names: &[String], widget_keys: &[String]) -> 
         .collect()
 }
 
+/// Button content for user/OMP-provided labels must wrap instead of inheriting
+/// the button primitive's single-line label treatment.
+pub(crate) fn wrapped_button_text(text: impl Into<String>) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .child(soft_wrap_dynamic_text(&text.into()))
+}
+
+/// Add invisible wrap opportunities without removing any visible text.
+///
+/// GPUI wraps at whitespace but paths, model ids, URLs, and JSON tokens can be
+/// arbitrarily long. Break opportunities after separators and within long
+/// uninterrupted runs keep those values inside responsive containers.
+pub(crate) fn soft_wrap_dynamic_text(text: &str) -> String {
+    const LONG_RUN: usize = 24;
+    let mut wrapped = String::with_capacity(text.len());
+    let mut run = 0usize;
+    for ch in text.chars() {
+        wrapped.push(ch);
+        if ch == '\n' || ch.is_whitespace() {
+            run = 0;
+        } else {
+            run += 1;
+            let is_separator = matches!(
+                ch,
+                '/' | '\\' | '.' | '_' | '-' | ':' | '@' | '?' | '&' | '='
+            );
+            if is_separator || run >= LONG_RUN {
+                wrapped.push('\u{200b}');
+                run = 0;
+            }
+        }
+    }
+    wrapped
+}
+
 // Keeping the declarative pane together makes its visual section order auditable.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn render_inspector(
@@ -730,7 +767,6 @@ pub(crate) fn render_inspector(
     };
     let todo_count = todo_open_count(&todo_phases);
     let path = cwd.display().to_string();
-    let path = truncate_subagent_text(&path, 44);
     let refresh_session = session.clone();
     let subscription_session = session.clone();
     let steering_session = session.clone();
@@ -744,7 +780,7 @@ pub(crate) fn render_inspector(
     let phase_status = StatusKind::from_phase_label(&phase);
 
     v_flex()
-        .w(px(272.))
+        .w(px(248.))
         .h_full()
         .flex_shrink_0()
         .overflow_y_scrollbar()
@@ -797,6 +833,8 @@ pub(crate) fn render_inspector(
                     h_flex()
                         .w_full()
                         .justify_between()
+                        .items_start()
+                        .gap_2()
                         .child(
                             Label::new("Session")
                                 .text_xs()
@@ -805,15 +843,19 @@ pub(crate) fn render_inspector(
                         )
                         .child(phase_tag(&phase).small().child(phase_status.label())),
                 )
-                .child(Label::new(workspace_display_name(&cwd)).text_sm())
                 .child(
-                    Label::new(path)
+                    Label::new(soft_wrap_dynamic_text(&workspace_display_name(&cwd)))
+                        .text_sm()
+                        .w_full(),
+                )
+                .child(
+                    Label::new(soft_wrap_dynamic_text(&path))
                         .text_xs()
                         .text_color(theme.muted_foreground),
                 )
-                .child(Label::new(model).text_xs())
+                .child(Label::new(soft_wrap_dynamic_text(&model)).text_xs())
                 .child(
-                    Label::new(format!("Thinking: {thinking}"))
+                    Label::new(soft_wrap_dynamic_text(&format!("Thinking: {thinking}")))
                         .text_xs()
                         .text_color(theme.muted_foreground),
                 )
@@ -851,7 +893,7 @@ pub(crate) fn render_inspector(
                     )
                 })
                 .children(extra_status_lines.into_iter().map(|line| {
-                    Label::new(line)
+                    Label::new(soft_wrap_dynamic_text(&line))
                         .text_xs()
                         .text_color(theme.muted_foreground)
                 })),
@@ -883,13 +925,20 @@ pub(crate) fn render_inspector(
                     h_flex()
                         .w_full()
                         .justify_between()
-                        .items_center()
-                        .child(Label::new("Steering").text_xs())
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Label::new("Steering").text_xs()),
+                        )
                         .child(
                             Button::new("inspector-steering-mode")
-                                .label(steering_label)
                                 .small()
                                 .ghost()
+                                .max_w(gpui::relative(0.65))
+                                .child(wrapped_button_text(steering_label))
                                 .disabled(!connected)
                                 .on_click(cx.listener(
                                     move |_this, _: &ClickEvent, _window, cx| {
@@ -904,13 +953,20 @@ pub(crate) fn render_inspector(
                     h_flex()
                         .w_full()
                         .justify_between()
-                        .items_center()
-                        .child(Label::new("Follow-up").text_xs())
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Label::new("Follow-up").text_xs()),
+                        )
                         .child(
                             Button::new("inspector-follow-up-mode")
-                                .label(follow_up_label)
                                 .small()
                                 .ghost()
+                                .max_w(gpui::relative(0.65))
+                                .child(wrapped_button_text(follow_up_label))
                                 .disabled(!connected)
                                 .on_click(cx.listener(
                                     move |_this, _: &ClickEvent, _window, cx| {
@@ -925,13 +981,20 @@ pub(crate) fn render_inspector(
                     h_flex()
                         .w_full()
                         .justify_between()
-                        .items_center()
-                        .child(Label::new("Interrupt").text_xs())
+                        .items_start()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(Label::new("Interrupt").text_xs()),
+                        )
                         .child(
                             Button::new("inspector-interrupt-mode")
-                                .label(interrupt_label)
                                 .small()
                                 .ghost()
+                                .max_w(gpui::relative(0.65))
+                                .child(wrapped_button_text(interrupt_label))
                                 .disabled(!connected)
                                 .on_click(cx.listener(
                                     move |_this, _: &ClickEvent, _window, cx| {
@@ -1029,10 +1092,13 @@ pub(crate) fn render_inspector(
                                 .text_color(theme.muted_foreground),
                         )
                         .when_some(display_title, |section, title| {
-                            section.child(Label::new(format!("Title: {title}")).text_xs())
+                            section.child(
+                                Label::new(soft_wrap_dynamic_text(&format!("Title: {title}")))
+                                    .text_xs(),
+                            )
                         })
                         .children(display_statuses.into_iter().map(|(key, text)| {
-                            Label::new(format!("{key}: {text}"))
+                            Label::new(soft_wrap_dynamic_text(&format!("{key}: {text}")))
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                         }))
@@ -1041,7 +1107,7 @@ pub(crate) fn render_inspector(
                                 .w_full()
                                 .gap_0p5()
                                 .child(
-                                    Label::new(format!("widget:{key}"))
+                                    Label::new(soft_wrap_dynamic_text(&format!("widget:{key}")))
                                         .text_xs()
                                         .text_color(theme.muted_foreground),
                                 )
@@ -1052,7 +1118,9 @@ pub(crate) fn render_inspector(
                                             .text_color(theme.muted_foreground),
                                     )
                                 })
-                                .children(lines.into_iter().map(|line| Label::new(line).text_xs()))
+                                .children(lines.into_iter().map(|line| {
+                                    Label::new(soft_wrap_dynamic_text(&line)).text_xs()
+                                }))
                         }))
                         .when_some(display_editor_text, |section, text| {
                             section.child(
@@ -1065,7 +1133,9 @@ pub(crate) fn render_inspector(
                                             .text_color(theme.muted_foreground),
                                     )
                                     .child(
-                                        Label::new(truncate_subagent_text(&text, 240)).text_xs(),
+                                        Label::new(soft_wrap_dynamic_text(&text))
+                                            .text_xs()
+                                            .w_full(),
                                     ),
                             )
                         }),
@@ -1097,7 +1167,7 @@ pub(crate) fn render_inspector(
                             .w_full()
                             .gap_1()
                             .child(
-                                Label::new(phase.name.clone())
+                                Label::new(soft_wrap_dynamic_text(&phase.name))
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
                             )
@@ -1121,6 +1191,8 @@ pub(crate) fn render_inspector(
                     h_flex()
                         .w_full()
                         .justify_between()
+                        .items_start()
+                        .gap_2()
                         .child(
                             Label::new("Agents")
                                 .text_xs()
@@ -1129,13 +1201,18 @@ pub(crate) fn render_inspector(
                         )
                         .child(
                             h_flex()
-                                .items_center()
+                                .items_start()
+                                .flex_wrap()
+                                .justify_end()
                                 .gap_1()
                                 .child(
                                     Button::new("inspector-agents-subscription")
-                                        .label(format!("Subscription: {subagent_subscription}"))
                                         .small()
                                         .ghost()
+                                        .max_w(gpui::relative(0.72))
+                                        .child(wrapped_button_text(format!(
+                                            "Subscription: {subagent_subscription}"
+                                        )))
                                         .disabled(!connected)
                                         .on_click(window.listener_for(
                                             &subscription_session,
@@ -1164,7 +1241,7 @@ pub(crate) fn render_inspector(
                         || subagent_rows.is_empty() && subagent_status == "No agents reported"),
                     |section| {
                         section.child(
-                            Label::new(subagent_status.clone())
+                            Label::new(soft_wrap_dynamic_text(&subagent_status))
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
                         )
@@ -1173,10 +1250,10 @@ pub(crate) fn render_inspector(
                 .children(subagent_rows.iter().enumerate().map(|(ix, (id, summary))| {
                     let id = id.clone();
                     Button::new(("inspector-agent", ix))
-                        .label(summary.clone())
                         .small()
                         .w_full()
                         .ghost()
+                        .child(wrapped_button_text(summary.clone()))
                         .on_click(window.listener_for(
                             session,
                             move |this, _: &ClickEvent, _window, cx| {
@@ -1232,7 +1309,9 @@ pub(crate) fn render_inspector(
                                         )
                                         .child(h_flex().w_full().flex_wrap().gap_1().children(
                                             grouped.builtin.iter().take(12).map(|name| {
-                                                Tag::secondary().small().child(name.clone())
+                                                Tag::secondary()
+                                                    .small()
+                                                    .child(soft_wrap_dynamic_text(name))
                                             }),
                                         )),
                                 )
@@ -1249,7 +1328,9 @@ pub(crate) fn render_inspector(
                                         )
                                         .child(h_flex().w_full().flex_wrap().gap_1().children(
                                             grouped.extensions.iter().take(12).map(|name| {
-                                                Tag::secondary().small().child(name.clone())
+                                                Tag::secondary()
+                                                    .small()
+                                                    .child(soft_wrap_dynamic_text(name))
                                             }),
                                         )),
                                 )
@@ -1324,7 +1405,7 @@ impl Render for WorkspaceView {
             .when(!self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()
-                        .w(px(260.))
+                        .w(px(240.))
                         .h_full()
                         .p_2()
                         .gap_2()
@@ -1375,10 +1456,7 @@ impl Render for WorkspaceView {
                                         let cwd_for_add = cwd.clone();
                                         let display = workspace_display_name(&cwd);
                                         let group_status = workspace_status_for_entries(&entries);
-                                        let path_label = truncate_subagent_text(
-                                            &cwd.display().to_string(),
-                                            36,
-                                        );
+                                        let path_label = cwd.display().to_string();
                                         v_flex()
                                             .w_full()
                                             .gap_1()
@@ -1393,19 +1471,23 @@ impl Render for WorkspaceView {
                                                             .flex_1()
                                                             .min_w_0()
                                                             .child(
-                                                                Label::new(display)
+                                                                Label::new(soft_wrap_dynamic_text(
+                                                                    &display,
+                                                                ))
                                                                     .text_xs()
                                                                     .font_weight(
                                                                         gpui::FontWeight::SEMIBOLD,
                                                                     ),
                                                             )
                                                             .child(
-                                                                Label::new(path_label)
+                                                                Label::new(soft_wrap_dynamic_text(
+                                                                    &path_label,
+                                                                ))
                                                                     .text_xs()
                                                                     .text_color(
                                                                         theme.muted_foreground,
                                                                     )
-                                                                    .truncate(),
+                                                                    .w_full(),
                                                             ),
                                                     )
                                                     .child(
@@ -1450,7 +1532,7 @@ impl Render for WorkspaceView {
                                                     .group("rail-row")
                                                     .w_full()
                                                     .justify_between()
-                                                    .items_center()
+                                                    .items_start()
                                                     .gap_1()
                                                     .px_2()
                                                     .py_1()
@@ -1480,10 +1562,12 @@ impl Render for WorkspaceView {
                                                                 },
                                                             )
                                                             .child(
-                                                                Label::new(entry.label)
+                                                                Label::new(soft_wrap_dynamic_text(
+                                                                    &entry.label,
+                                                                ))
                                                                     .text_sm()
                                                                     .flex_1()
-                                                                    .truncate()
+                                                                    .min_w_0()
                                                                     .when(selected, |label| {
                                                                         label.font_weight(
                                                                             gpui::FontWeight::MEDIUM,
@@ -1605,7 +1689,7 @@ impl Render for WorkspaceView {
                         })),
                 )
             })
-            .child(div().flex_1().min_w(px(480.)).h_full().child(
+            .child(div().flex_1().min_w(px(0.)).h_full().child(
                 active_session.clone().map_or_else(
                     || div().into_any_element(),
                     gpui::IntoElement::into_any_element,
@@ -1666,10 +1750,12 @@ impl Render for WorkspaceView {
                         .flex()
                         .items_center()
                         .justify_center()
+                        .px_4()
                         .bg(theme.overlay)
                         .child(
                             v_flex()
-                                .w(px(360.))
+                                .w_full()
+                                .max_w(px(360.))
                                 .gap_3()
                                 .p_4()
                                 .rounded_md()
@@ -1737,11 +1823,16 @@ fn inspector_kv_row(
         .child(
             Label::new(key)
                 .text_xs()
-                .w(px(72.))
+                .w(px(64.))
                 .flex_shrink_0()
                 .text_color(theme.muted_foreground),
         )
-        .child(Label::new(value.into()).text_xs().flex_1().truncate())
+        .child(
+            Label::new(soft_wrap_dynamic_text(&value.into()))
+                .text_xs()
+                .flex_1()
+                .min_w_0(),
+        )
 }
 
 pub(crate) fn context_percent_label(v: Option<&serde_json::Value>) -> Option<String> {

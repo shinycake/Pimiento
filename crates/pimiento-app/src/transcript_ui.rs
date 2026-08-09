@@ -47,17 +47,19 @@ pub(crate) fn render_entry(
             let text_for_copy = text.clone();
             h_flex()
                 .w_full()
+                .items_start()
                 .gap_2()
                 .py_2()
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .border_l_2()
                         .border_color(theme.accent)
                         .pl_4()
                         .pr_3()
                         .py_1p5()
-                        .child(text.clone()),
+                        .child(soft_wrap_dynamic_text(text)),
                 )
                 .child(
                     Button::new(("copy-user", row_ix))
@@ -100,9 +102,10 @@ pub(crate) fn render_entry(
             };
             h_flex()
                 .w_full()
+                .items_start()
                 .gap_2()
                 .py_2()
-                .child(div().flex_1().child(assistant_content))
+                .child(div().flex_1().min_w_0().child(assistant_content))
                 .child(
                     Button::new(("copy-assistant", row_ix))
                         .label("Copy")
@@ -137,12 +140,14 @@ pub(crate) fn render_entry(
             let preview = thinking_collapse_preview(text);
             h_flex()
                 .w_full()
+                .items_start()
                 .gap_2()
                 .py_1()
                 .child(
                     div()
                         .id(("thinking-collapsed", row_ix))
                         .flex_1()
+                        .min_w_0()
                         .cursor_pointer()
                         .on_click(move |_, _, cx| {
                             let _ = view.update(cx, |this, cx| {
@@ -183,6 +188,7 @@ pub(crate) fn render_entry(
                         .gap_1()
                         .child(
                             h_flex()
+                                .flex_wrap()
                                 .gap_2()
                                 .child(
                                     Button::new(("thinking-collapse", row_ix))
@@ -240,6 +246,7 @@ pub(crate) fn render_entry(
                 .child(
                     h_flex()
                         .w_full()
+                        .items_start()
                         .gap_2()
                         .when(!mount_noise, |row| {
                             row.child(
@@ -251,10 +258,11 @@ pub(crate) fn render_entry(
                         .child(
                             div()
                                 .flex_1()
+                                .min_w_0()
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .opacity(if mount_noise { 0.72 } else { 1. })
-                                .child(text.clone()),
+                                .child(soft_wrap_dynamic_text(text)),
                         )
                         .child(
                             Button::new(("copy-notice", row_ix))
@@ -283,13 +291,20 @@ pub(crate) fn render_entry(
                 .child(
                     h_flex()
                         .w_full()
+                        .items_start()
                         .gap_2()
                         .px_2()
                         .py_1()
                         .rounded_sm()
                         .bg(theme.danger)
                         .text_color(theme.danger_foreground)
-                        .child(div().flex_1().text_sm().child(message.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_sm()
+                                .child(soft_wrap_dynamic_text(message)),
+                        )
                         .child(
                             Button::new(("copy-error", row_ix))
                                 .label("Copy")
@@ -314,6 +329,7 @@ pub(crate) fn render_entry(
                 .child(
                     h_flex()
                         .w_full()
+                        .items_start()
                         .gap_2()
                         .px_2()
                         .py_1()
@@ -321,7 +337,14 @@ pub(crate) fn render_entry(
                         .bg(theme.secondary)
                         .font_family(theme.mono_font_family.clone())
                         .text_size(theme.mono_font_size)
-                        .child(div().flex_1().child(text.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .max_h(px(320.))
+                                .overflow_scrollbar()
+                                .child(text.clone()),
+                        )
                         .child(
                             Button::new(("copy-command-output", row_ix))
                                 .label("Copy")
@@ -361,8 +384,9 @@ pub(crate) fn render_entry(
                         .child(
                             h_flex()
                                 .w_full()
+                                .items_start()
                                 .gap_2()
-                                .child(div().flex_1().child(label))
+                                .child(div().flex_1().min_w_0().child(label))
                                 .child(
                                     Button::new(("copy-compaction", row_ix))
                                         .label("Copy")
@@ -405,8 +429,14 @@ pub(crate) fn render_entry(
                         .child(
                             h_flex()
                                 .w_full()
+                                .items_start()
                                 .gap_2()
-                                .child(div().flex_1().child(detail.clone()))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(soft_wrap_dynamic_text(detail)),
+                                )
                                 .child(
                                     Button::new(("copy-retry-info", row_ix))
                                         .label("Copy")
@@ -434,6 +464,7 @@ pub(crate) fn render_entry(
                     .child(
                         h_flex()
                             .w_full()
+                            .items_start()
                             .gap_2()
                             .px_2()
                             .py_1()
@@ -444,9 +475,10 @@ pub(crate) fn render_entry(
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child(summary),
+                                    .child(soft_wrap_dynamic_text(&summary)),
                             )
                             .child(
                                 Button::new(("copy-file-mention", row_ix))
@@ -471,6 +503,7 @@ pub(crate) fn render_entry(
                 .child(
                     h_flex()
                         .w_full()
+                        .items_start()
                         .gap_2()
                         .px_2()
                         .py_1()
@@ -479,7 +512,12 @@ pub(crate) fn render_entry(
                         .text_color(theme.warning_foreground)
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
-                        .child(div().flex_1().child(format!("{raw:#}")))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(soft_wrap_dynamic_text(&format!("{raw:#}"))),
+                        )
                         .child(
                             Button::new(("copy-unknown", row_ix))
                                 .label("Copy")
@@ -709,7 +747,8 @@ pub(crate) fn render_tool_card(
     };
     let output_text = tc.output.to_string();
     let has_output = !tc.output.is_empty();
-    let args_text = compact_json(&tc.args_json);
+    let args_text =
+        serde_json::to_string_pretty(&tc.args_json).unwrap_or_else(|_| compact_json(&tc.args_json));
     let output_value = serde_json::from_str::<serde_json::Value>(&output_text)
         .unwrap_or_else(|_| serde_json::Value::String(output_text.clone()));
     let edit_diff = parse_edit_diff(&tc.name, &tc.args_json, &output_value).or_else(|| {
@@ -764,7 +803,7 @@ pub(crate) fn render_tool_card(
                 .filter(|digest| !digest.is_empty())
         })
         .or_else(|| hub_lines.first().cloned())
-        .unwrap_or_else(|| tc.args_json.to_string().chars().take(80).collect());
+        .unwrap_or_else(|| wire_snippet(&tc.args_json.to_string(), 80));
     let duration_str = tc
         .duration_ms
         .map(|ms| format!("{}.{:03}s", ms / 1000, ms % 1000))
@@ -813,35 +852,30 @@ pub(crate) fn render_tool_card(
         .child(
             h_flex()
                 .w_full()
+                .items_start()
                 .gap_1()
                 .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(tool_title),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("·"),
-                )
-                .child(
-                    div()
+                    v_flex()
                         .flex_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(arg_digest),
+                        .min_w_0()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .child(soft_wrap_dynamic_text(&tool_title)),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(soft_wrap_dynamic_text(&arg_digest)),
+                        ),
                 )
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child("·"),
-                )
-                .child(
-                    div()
+                        .flex_shrink_0()
                         .px_2()
                         .py_0p5()
                         .rounded_sm()
@@ -853,6 +887,7 @@ pub(crate) fn render_tool_card(
                 .when(!duration_str.is_empty(), |el| {
                     el.child(
                         h_flex()
+                            .flex_shrink_0()
                             .gap_1()
                             .child(
                                 div()
@@ -873,6 +908,7 @@ pub(crate) fn render_tool_card(
                         .label(if expanded { "⌄" } else { "›" })
                         .small()
                         .ghost()
+                        .flex_shrink_0()
                         .on_click(move |_, _, cx| {
                             let _ = view_for_toggle.update(cx, |this, cx| {
                                 this.toggle_tool_expanded(&tc_id_for_toggle, cx);
@@ -902,7 +938,7 @@ pub(crate) fn render_tool_card(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground)
-                            .child(line)
+                            .child(soft_wrap_dynamic_text(&line))
                     })),
             )
         })
@@ -915,8 +951,9 @@ pub(crate) fn render_tool_card(
                     .child(
                         h_flex()
                             .w_full()
+                            .items_start()
                             .gap_2()
-                            .child(div().flex_1().text_xs().child("Arguments"))
+                            .child(div().flex_1().min_w_0().text_xs().child("Arguments"))
                             .child(
                                 Button::new(("copy-tool-args", row_ix))
                                     .label("Copy")
@@ -935,7 +972,7 @@ pub(crate) fn render_tool_card(
                         div()
                             .w_full()
                             .max_h(px(320.))
-                            .overflow_y_scrollbar()
+                            .overflow_scrollbar()
                             .px_2()
                             .py_1()
                             .rounded_sm()
@@ -951,7 +988,7 @@ pub(crate) fn render_tool_card(
                 v_flex()
                     .w_full()
                     .max_h(px(320.))
-                    .overflow_y_scrollbar()
+                    .overflow_scrollbar()
                     .px_2()
                     .py_1()
                     .gap_0p5()
@@ -976,7 +1013,7 @@ pub(crate) fn render_tool_card(
                 div()
                     .w_full()
                     .max_h(px(320.))
-                    .overflow_y_scrollbar()
+                    .overflow_scrollbar()
                     .px_2()
                     .py_1()
                     .rounded_sm()
@@ -989,6 +1026,7 @@ pub(crate) fn render_tool_card(
         })
         .child(
             h_flex()
+                .flex_wrap()
                 .gap_2()
                 .when(has_output, |controls| {
                     controls.child(
@@ -1089,9 +1127,12 @@ pub(crate) fn render_crash_card(
                 )
                 .child(
                     div()
+                        .w_full()
+                        .max_h(px(240.))
+                        .overflow_scrollbar()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(detail),
+                        .child(soft_wrap_dynamic_text(&detail)),
                 )
                 .child(
                     h_flex()
@@ -1283,7 +1324,7 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
         .border_1()
         .border_color(theme.border)
         .child(
-            Label::new(gpui::SharedString::from(title.to_owned()))
+            Label::new(soft_wrap_dynamic_text(title))
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD),
         )
@@ -1298,7 +1339,7 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
-                        .child(msg),
+                        .child(soft_wrap_dynamic_text(&msg)),
                 )
             },
         )
@@ -1312,6 +1353,7 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
         .into_any_element()
 }
 
+#[allow(clippy::too_many_lines)] // Options keep full wrapping content and response wiring together.
 pub(crate) fn render_select_dialog(
     dialog: &UiDialog,
     questions: &[DialogQuestion],
@@ -1324,20 +1366,20 @@ pub(crate) fn render_select_dialog(
         let mut block = v_flex().w_full().gap_1();
         if let Some(header) = &question.header {
             block = block.child(
-                Label::new(header.clone())
+                Label::new(soft_wrap_dynamic_text(header))
                     .text_xs()
                     .font_weight(gpui::FontWeight::SEMIBOLD),
             );
         }
         if let Some(prompt) = &question.prompt {
-            block = block.child(div().text_sm().child(prompt.clone()));
+            block = block.child(div().text_sm().child(soft_wrap_dynamic_text(prompt)));
         }
         if let Some(description) = &question.description {
             block = block.child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(description.clone()),
+                    .child(soft_wrap_dynamic_text(description)),
             );
         }
         for (option_ix, option) in question.options.iter().take(9).enumerate() {
@@ -1366,6 +1408,7 @@ pub(crate) fn render_select_dialog(
                     .child(
                         div()
                             .w(px(20.))
+                            .flex_shrink_0()
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
@@ -1374,19 +1417,25 @@ pub(crate) fn render_select_dialog(
                     .child(
                         v_flex()
                             .flex_1()
+                            .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().child(option.label.clone()))
+                            .child(div().text_sm().child(soft_wrap_dynamic_text(&option.label)))
                             .when_some(option.description.clone(), |option, description| {
                                 option.child(
                                     div()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
-                                        .child(description),
+                                        .child(soft_wrap_dynamic_text(&description)),
                                 )
                             }),
                     )
                     .when(is_recommended, |row| {
-                        row.child(Tag::secondary().small().child("Recommended"))
+                        row.child(
+                            Tag::secondary()
+                                .small()
+                                .flex_shrink_0()
+                                .child("Recommended"),
+                        )
                     }),
             );
         }
@@ -1396,6 +1445,9 @@ pub(crate) fn render_select_dialog(
         .child(
             h_flex()
                 .w_full()
+                .items_start()
+                .flex_wrap()
+                .gap_2()
                 .justify_between()
                 .child(
                     Label::new("Press 1–9 · Esc cancel")
@@ -1463,6 +1515,7 @@ pub(crate) fn render_confirm_dialog(
                 .child(
                     div()
                         .w(px(20.))
+                        .flex_shrink_0()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.muted_foreground)
@@ -1471,19 +1524,25 @@ pub(crate) fn render_confirm_dialog(
                 .child(
                     v_flex()
                         .flex_1()
+                        .min_w_0()
                         .gap_0p5()
-                        .child(div().text_sm().child(yes_label))
+                        .child(div().text_sm().child(soft_wrap_dynamic_text(&yes_label)))
                         .when_some(yes_description, |option, description| {
                             option.child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(description),
+                                    .child(soft_wrap_dynamic_text(&description)),
                             )
                         }),
                 )
                 .when(recommended == Some(0), |row| {
-                    row.child(Tag::secondary().small().child("Recommended"))
+                    row.child(
+                        Tag::secondary()
+                            .small()
+                            .flex_shrink_0()
+                            .child("Recommended"),
+                    )
                 })
         })
         .child({
@@ -1508,6 +1567,7 @@ pub(crate) fn render_confirm_dialog(
                 .child(
                     div()
                         .w(px(20.))
+                        .flex_shrink_0()
                         .text_xs()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.muted_foreground)
@@ -1516,19 +1576,25 @@ pub(crate) fn render_confirm_dialog(
                 .child(
                     v_flex()
                         .flex_1()
+                        .min_w_0()
                         .gap_0p5()
-                        .child(div().text_sm().child(no_label))
+                        .child(div().text_sm().child(soft_wrap_dynamic_text(&no_label)))
                         .when_some(no_description, |option, description| {
                             option.child(
                                 div()
                                     .text_xs()
                                     .text_color(theme.muted_foreground)
-                                    .child(description),
+                                    .child(soft_wrap_dynamic_text(&description)),
                             )
                         }),
                 )
                 .when(recommended == Some(1), |row| {
-                    row.child(Tag::secondary().small().child("Recommended"))
+                    row.child(
+                        Tag::secondary()
+                            .small()
+                            .flex_shrink_0()
+                            .child("Recommended"),
+                    )
                 })
         })
         .child(
@@ -1595,12 +1661,21 @@ pub(crate) fn render_open_url_dialog(
             div()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child(instructions.to_owned()),
+                .child(soft_wrap_dynamic_text(instructions)),
         )
-        .child(div().text_xs().font_family("Menlo").child(url.clone()))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .overflow_x_scrollbar()
+                .text_xs()
+                .font_family("Menlo")
+                .child(url.clone()),
+        )
         .child(
             h_flex()
                 .w_full()
+                .flex_wrap()
                 .justify_end()
                 .gap_2()
                 .child(render_cancel_button(dialog, cx))
@@ -1641,6 +1716,7 @@ pub(crate) fn render_text_dialog(
     let dialog_input = cx.entity().read(cx).dialog_input.clone();
     h_flex()
         .w_full()
+        .flex_wrap()
         .gap_2()
         .items_end()
         .child(
