@@ -11,6 +11,20 @@ if [[ ! -x "$BIN" ]]; then
   exit 1
 fi
 
+bring_to_front() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 0
+  case "$(uname -s)" in
+    Darwin)
+      # Double-fork + setsid leaves the process as a background agent on macOS,
+      # so the window often opens behind Cursor. Explicitly raise it.
+      osascript -e \
+        "tell application \"System Events\" to set frontmost of (first process whose unix id is ${pid}) to true" \
+        >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
 if [[ "${PIMIENTO_RESTART:-}" == "1" ]]; then
   if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
     kill "$(cat "$PIDFILE")" 2>/dev/null || true
@@ -22,7 +36,9 @@ if [[ "${PIMIENTO_RESTART:-}" == "1" ]]; then
 fi
 
 if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-  echo "already running pid=$(cat "$PIDFILE")"
+  pid="$(cat "$PIDFILE")"
+  echo "already running pid=${pid}"
+  bring_to_front "$pid"
   exit 0
 fi
 
@@ -55,3 +71,8 @@ os.dup2(se.fileno(), 2)
 Path(pidfile).write_text(str(os.getpid()))
 os.execv(bin_path, [bin_path])
 PY
+
+pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+# Give GPUI a beat to create the window before raising.
+sleep 0.5
+bring_to_front "$pid"

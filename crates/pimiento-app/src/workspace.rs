@@ -425,6 +425,24 @@ impl WorkspaceView {
             return false;
         }
         let key = event.keystroke.key.as_str();
+        // Cmd/Ctrl+Shift+P — command palette (VS Code / Zed muscle memory).
+        if mods.shift && matches!(key, "p" | "P") {
+            if let Some(session) = self.sessions.get(self.active).cloned() {
+                session.update(cx, SessionView::toggle_palette);
+            }
+            return true;
+        }
+        // Keep Cmd/Ctrl+K as an alternate palette chord.
+        if !mods.shift && matches!(key, "k" | "K") {
+            if let Some(session) = self.sessions.get(self.active).cloned() {
+                session.update(cx, SessionView::toggle_palette);
+            }
+            return true;
+        }
+        if mods.shift {
+            // Other Shift+chords (e.g. future) are not workspace shortcuts.
+            return false;
+        }
         if let Some(digit) = workspace_digit_key(key) {
             let index = digit.saturating_sub(1);
             if index < self.sessions.len() {
@@ -450,13 +468,24 @@ impl WorkspaceView {
                 self.toggle_inspector(cx);
                 true
             }
-            "k" | "K" => {
-                if let Some(session) = self.sessions.get(self.active).cloned() {
-                    session.update(cx, SessionView::toggle_palette);
-                }
-                true
-            }
             _ => false,
+        }
+    }
+
+    pub(crate) fn rename_session_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.sessions.len() {
+            return;
+        }
+        self.select_session(index, cx);
+        if let Some(session) = self.sessions.get(index).cloned() {
+            session.update(cx, |session, cx| {
+                session.rename_session(window, cx);
+            });
         }
     }
 
@@ -952,6 +981,16 @@ pub(crate) fn render_inspector(
                 ),
         )
         .when_some(git_info, |parent, git| {
+            let head = git.head_line();
+            let diff = git.diff_line();
+            let working = git.working_tree_line();
+            let sync = git.sync_line();
+            let remote_line = match (&git.remote, &git.fetch_age) {
+                (Some(remote), Some(age)) => Some(format!("{remote} · fetched {age}")),
+                (Some(remote), None) => Some(format!("{remote} · never fetched")),
+                (None, Some(age)) => Some(format!("fetched {age}")),
+                (None, None) => None,
+            };
             parent.child(Separator::horizontal()).child(
                 v_flex()
                     .w_full()
@@ -962,13 +1001,27 @@ pub(crate) fn render_inspector(
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.muted_foreground),
                     )
-                    .child(Label::new(git.summary_line()).text_xs())
+                    .child(inspector_kv_row("Branch", git.branch_or_detached, &theme))
+                    .child(inspector_kv_row("Upstream", sync, &theme))
+                    .when_some(head, |section, line| {
+                        section.child(inspector_kv_row("HEAD", line, &theme))
+                    })
+                    .child(inspector_kv_row("Working", working, &theme))
+                    .when_some(diff, |section, line| {
+                        section.child(inspector_kv_row("Diff", line, &theme))
+                    })
+                    .when_some(remote_line, |section, line| {
+                        section.child(inspector_kv_row("Remote", line, &theme))
+                    })
+                    .when(git.stash_count > 0, |section| {
+                        section.child(inspector_kv_row(
+                            "Stash",
+                            format!("{}", git.stash_count),
+                            &theme,
+                        ))
+                    })
                     .when_some(git.worktree_label, |section, label| {
-                        section.child(
-                            Label::new(format!("Worktree: {label}"))
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                        )
+                        section.child(inspector_kv_row("Worktree", label, &theme))
                     }),
             )
         })
@@ -1501,6 +1554,48 @@ impl Render for WorkspaceView {
                                                             this.select_session(ix, cx);
                                                         },
                                                     ))
+                                                    .context_menu({
+                                                        let workspace = cx.weak_entity();
+                                                        move |menu, _window, _cx| {
+                                                            menu.item(
+                                                                PopupMenuItem::new("Rename")
+                                                                    .on_click({
+                                                                        let workspace =
+                                                                            workspace.clone();
+                                                                        move |_, window, cx| {
+                                                                            let _ = workspace
+                                                                                .update(
+                                                                                    cx,
+                                                                                    |this, cx| {
+                                                                                        this.rename_session_at(
+                                                                                            ix, window, cx,
+                                                                                        );
+                                                                                    },
+                                                                                );
+                                                                        }
+                                                                    }),
+                                                            )
+                                                            .separator()
+                                                            .item(
+                                                                PopupMenuItem::new("Close")
+                                                                    .on_click({
+                                                                        let workspace =
+                                                                            workspace.clone();
+                                                                        move |_, window, cx| {
+                                                                            let _ = workspace
+                                                                                .update(
+                                                                                    cx,
+                                                                                    |this, cx| {
+                                                                                        this.close_session_at(
+                                                                                            ix, window, cx,
+                                                                                        );
+                                                                                    },
+                                                                                );
+                                                                        }
+                                                                    }),
+                                                            )
+                                                        }
+                                                    })
                                             }))
                                     },
                                 )),
@@ -1661,6 +1756,26 @@ impl Render for WorkspaceView {
             })
     }
 }
+
+fn inspector_kv_row(
+    key: &str,
+    value: impl Into<String>,
+    theme: &gpui_component::Theme,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_start()
+        .child(
+            Label::new(key)
+                .text_xs()
+                .w(px(72.))
+                .flex_shrink_0()
+                .text_color(theme.muted_foreground),
+        )
+        .child(Label::new(value.into()).text_xs().flex_1().truncate())
+}
+
 pub(crate) fn context_percent_label(v: Option<&serde_json::Value>) -> Option<String> {
     context_percent(v).map(|pct| format!("{pct:.0}%"))
 }

@@ -18,11 +18,12 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
+    ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode, WindowExt,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},
     label::Label,
+    menu::{ContextMenuExt as _, PopupMenuItem},
     progress::Progress,
     scroll::ScrollableElement as _,
     separator::Separator,
@@ -83,6 +84,7 @@ use transcript_ui::*;
 use workspace::*;
 // ── entry ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // window open + activation + theme bootstrap
 fn main() {
     let persistence = SessionPersistence::from_environment();
     let saved_window_bounds = persistence.load_window_bounds();
@@ -120,69 +122,76 @@ fn main() {
                 window_bounds: saved_window_bounds.map(WindowBounds::Windowed),
                 ..Default::default()
             };
-            cx.open_window(window_options, |window, cx| {
-                apply_theme_preference(initial_theme, window, cx);
-                window
-                    .observe_window_appearance(|window, cx| {
-                        let follows_system =
-                            cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
-                        if follows_system {
-                            Theme::sync_system_appearance(Some(window), cx);
-                            apply_pimiento_brand(cx);
-                        }
-                    })
-                    .detach();
-                let session = cx.new(|cx| {
-                    SessionView::new(
-                        window,
-                        cx,
-                        None,
-                        "Choose a working directory to begin".to_owned(),
-                        SessionProjection::new(),
-                        Vec::new(),
-                        LauncherBootstrap {
-                            persistence: persistence.clone(),
-                            launcher_cwd: initial_cwd.clone(),
-                            recent_sessions: recent.clone(),
-                            last_session: last_session.clone(),
-                        },
-                    )
-                });
-                if auto_connect {
-                    let cwd = initial_cwd.clone();
-                    let resume = auto_resume.clone();
-                    session.update(cx, |this, cx| {
-                        this.begin_connection(window, cwd, resume, true, cx);
+            let window = cx
+                .open_window(window_options, |window, cx| {
+                    apply_theme_preference(initial_theme, window, cx);
+                    window
+                        .observe_window_appearance(|window, cx| {
+                            let follows_system =
+                                cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
+                            if follows_system {
+                                Theme::sync_system_appearance(Some(window), cx);
+                                apply_pimiento_brand(cx);
+                            }
+                        })
+                        .detach();
+                    let session = cx.new(|cx| {
+                        SessionView::new(
+                            window,
+                            cx,
+                            None,
+                            "Choose a working directory to begin".to_owned(),
+                            SessionProjection::new(),
+                            Vec::new(),
+                            LauncherBootstrap {
+                                persistence: persistence.clone(),
+                                launcher_cwd: initial_cwd.clone(),
+                                recent_sessions: recent.clone(),
+                                last_session: last_session.clone(),
+                            },
+                        )
                     });
-                }
-                let workspace = cx.new(|cx| {
-                    WorkspaceView::new(session, persistence.clone(), initial_cwd.clone(), cx)
-                });
-                let weak_workspace = workspace.downgrade();
-                window.on_window_should_close(cx, move |_window, cx| {
-                    weak_workspace
-                        .update(cx, WorkspaceView::should_close_window)
-                        .unwrap_or(true)
-                });
-                let bounds_persistence = persistence.clone();
-                let mut last_saved_bounds = saved_window_bounds;
-                cx.new(|cx| {
-                    cx.observe_window_bounds(window, move |_, window, _| {
-                        let WindowBounds::Windowed(bounds) = window.window_bounds() else {
-                            return;
-                        };
-                        let bounds = normalize_window_bounds(bounds);
-                        if last_saved_bounds == Some(bounds) {
-                            return;
-                        }
-                        bounds_persistence.save_window_bounds(bounds);
-                        last_saved_bounds = Some(bounds);
+                    if auto_connect {
+                        let cwd = initial_cwd.clone();
+                        let resume = auto_resume.clone();
+                        session.update(cx, |this, cx| {
+                            this.begin_connection(window, cwd, resume, true, cx);
+                        });
+                    }
+                    let workspace = cx.new(|cx| {
+                        WorkspaceView::new(session, persistence.clone(), initial_cwd.clone(), cx)
+                    });
+                    let weak_workspace = workspace.downgrade();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        weak_workspace
+                            .update(cx, WorkspaceView::should_close_window)
+                            .unwrap_or(true)
+                    });
+                    let bounds_persistence = persistence.clone();
+                    let mut last_saved_bounds = saved_window_bounds;
+                    cx.new(|cx| {
+                        cx.observe_window_bounds(window, move |_, window, _| {
+                            let WindowBounds::Windowed(bounds) = window.window_bounds() else {
+                                return;
+                            };
+                            let bounds = normalize_window_bounds(bounds);
+                            if last_saved_bounds == Some(bounds) {
+                                return;
+                            }
+                            bounds_persistence.save_window_bounds(bounds);
+                            last_saved_bounds = Some(bounds);
+                        })
+                        .detach();
+                        Root::new(workspace, window, cx)
                     })
-                    .detach();
-                    Root::new(workspace, window, cx)
                 })
-            })
-            .expect("open primary window");
+                .expect("open primary window");
+            // Daemonized launches (scripts/run_app.sh) often start behind the
+            // parent IDE on macOS; force platform activation once the window exists.
+            let _ = window.update(cx, |_, window, cx| {
+                cx.activate(true);
+                window.activate_window();
+            });
         })
         .detach();
     });

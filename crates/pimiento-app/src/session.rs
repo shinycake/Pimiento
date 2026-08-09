@@ -71,11 +71,9 @@ pub(crate) struct SessionView {
     /// Per-dialog timeout generation so superseded timers no-op.
     pub(crate) dialog_timeout_gens: HashMap<String, u64>,
     pub(crate) dialog_timeout_generation: u64,
-    /// Floating rename popover (About-style) with prefilled session name.
+    /// Hand-rolled rename overlay on `SessionView` (same pattern as About/palette).
     pub(crate) rename_open: bool,
     pub(crate) rename_input: gpui::Entity<InputState>,
-    pub(crate) pending_rename_sync: Option<String>,
-    pub(crate) refocus_rename_input: bool,
     /// Optional instructions for an explicit `compact` RPC.
     pub(crate) compact_open: bool,
     pub(crate) compact_input: gpui::Entity<InputState>,
@@ -251,8 +249,6 @@ impl SessionView {
             dialog_timeout_generation: 0,
             rename_open: false,
             rename_input,
-            pending_rename_sync: None,
-            refocus_rename_input: false,
             compact_open: false,
             compact_input,
             pending_compact_sync: false,
@@ -2774,8 +2770,12 @@ impl SessionView {
         }
     }
 
-    pub(crate) fn rename_session(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn rename_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.client.is_none() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Rename requires a live session".into(),
+            ));
+            cx.notify();
             return;
         }
         let cwd = self
@@ -2789,23 +2789,27 @@ impl SessionView {
         self.login_picker = None;
         self.compact_open = false;
         self.handoff_confirm_open = false;
+        // Prefer a SessionView overlay (same path as About/palette). gpui-component
+        // `open_dialog` was not surfacing reliably from this daemonized app.
+        window.close_all_dialogs(cx);
         self.rename_open = true;
-        self.pending_rename_sync = Some(current);
-        self.refocus_rename_input = true;
+        self.rename_input.update(cx, |input, cx| {
+            input.set_value(current, window, cx);
+            input.focus(window, cx);
+        });
         cx.notify();
     }
 
     pub(crate) fn close_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename_open {
             self.rename_open = false;
-            self.pending_rename_sync = None;
             self.refocus_composer = true;
             cx.notify();
         }
     }
 
-    pub(crate) fn confirm_rename(&mut self, cx: &mut Context<Self>) {
-        let name = self.rename_input.read(cx).value().trim().to_owned();
+    pub(crate) fn submit_rename(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.trim().to_owned();
         if name.is_empty() {
             self.projection.transcript.push(TranscriptEntry::Notice(
                 "session name cannot be empty".into(),
@@ -2862,7 +2866,11 @@ impl SessionView {
             }
         })
         .detach();
-        cx.notify();
+    }
+
+    pub(crate) fn confirm_rename(&mut self, cx: &mut Context<Self>) {
+        let name = self.rename_input.read(cx).value().to_string();
+        self.submit_rename(&name, cx);
     }
 
     pub(crate) fn on_rename_input_event(
@@ -3175,7 +3183,7 @@ impl SessionView {
             PaletteActionId::ToggleFast => self.toggle_fast_mode(cx),
             PaletteActionId::ExportHtml => self.export_html(cx),
             PaletteActionId::ShareSession => self.share_session(cx),
-            PaletteActionId::RenameSession => self.rename_session(cx),
+            PaletteActionId::RenameSession => self.rename_session(window, cx),
             PaletteActionId::AbortRun => self.do_abort(cx),
             PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
             PaletteActionId::RevealLogs => {
@@ -4506,21 +4514,10 @@ impl Render for SessionView {
                 input.set_value(value, window, cx);
             });
         }
-        if let Some(value) = self.pending_rename_sync.take() {
-            self.rename_input.update(cx, |input, cx| {
-                input.set_value(value, window, cx);
-            });
-        }
         if self.pending_compact_sync {
             self.pending_compact_sync = false;
             self.compact_input.update(cx, |input, cx| {
                 input.set_value("", window, cx);
-            });
-        }
-        if self.refocus_rename_input {
-            self.refocus_rename_input = false;
-            self.rename_input.update(cx, |input, cx| {
-                input.focus(window, cx);
             });
         }
         if self.refocus_compact_input {
@@ -6019,7 +6016,7 @@ impl Render for SessionView {
                                 .child(Label::new(version).text_sm())
                                 .child(
                                     Label::new(
-                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript · palette: Cycle model/thinking, Abort and prompt, Branch, Login",
+                                        "⌘/Ctrl+Shift+P palette · ⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript · right-click session: Rename",
                                     )
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
@@ -6203,13 +6200,13 @@ impl Render for SessionView {
                         .justify_center()
                         .bg(theme.overlay)
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                        .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _w, cx| {
                             this.close_rename(cx);
                         }))
                         .child(
                             v_flex()
                                 .id("rename-panel")
-                                .w(px(380.))
+                                .w(px(420.))
                                 .gap_3()
                                 .p_4()
                                 .rounded_lg()
@@ -6217,13 +6214,20 @@ impl Render for SessionView {
                                 .border_color(theme.border)
                                 .bg(theme.popover)
                                 .shadow_xl()
-                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                .on_mouse_down(gpui::MouseButton::Left, cx.listener(|_this, _, _w, cx| {
                                     cx.stop_propagation();
                                 }))
                                 .child(
                                     Label::new("Rename session")
                                         .text_sm()
                                         .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new(
+                                        "Updates OMP sessionName — shown in the rail and window title.",
+                                    )
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
                                 )
                                 .child(
                                     Input::new(&self.rename_input)
