@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent Cloud Agent bootstrap for Pimiento.
 # Installs/updates omp, then pins non-secret omp model roles.
-# Cursor auth MUST come from Dashboard secrets (CURSOR_ACCESS_TOKEN), never this script.
+# Cursor auth MUST come from Dashboard secret CURSOR_API_KEY (never this script).
 set -euo pipefail
 
 log() { printf '==> %s\n' "$*"; }
@@ -57,15 +57,19 @@ YAML
 }
 
 verify_cursor_auth_hint() {
-  if [[ -n "${CURSOR_ACCESS_TOKEN:-}" || -n "${CURSOR_API_KEY:-}" ]]; then
-    log "Cursor env credential present (CURSOR_ACCESS_TOKEN or CURSOR_API_KEY)"
+  if [[ -n "${CURSOR_API_KEY:-}" ]]; then
+    log "Cursor env credential present (CURSOR_API_KEY)"
+    return 0
+  fi
+  if [[ -n "${CURSOR_ACCESS_TOKEN:-}" ]]; then
+    log "Cursor env credential present (CURSOR_ACCESS_TOKEN fallback)"
     return 0
   fi
   if omp token cursor --list >/dev/null 2>&1; then
     log "Cursor OAuth credential present in local agent.db (dev snapshot only)"
     return 0
   fi
-  log "WARNING: no Cursor credential in env or agent.db — set Dashboard secret CURSOR_ACCESS_TOKEN"
+  log "WARNING: no Cursor credential in env or agent.db — set Dashboard secret CURSOR_API_KEY"
   return 0
 }
 

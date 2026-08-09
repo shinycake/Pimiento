@@ -7,7 +7,7 @@ Pimiento is a native GPUI desktop client for the Oh My Pi (`omp`) coding-agent h
 - **`PLAN.md`** — the complete implementation plan (v2, self-hosting-first). Read it fully before writing code; re-read the **Doctrine (§0)** whenever in doubt. Doctrine overrides any local decision.
 - **`KICKOFF-PROMPT.md`** — environment bootstrap and inner-loop discipline.
 - **`docs/protocol-notes.md`** (created during M1) — every wire-shape discovery, OMP quirk, and GPUI API surprise.
-- **`.cursor/environment.json`** + **`scripts/cloud-agent-install.sh`** — Cloud Agent bootstrap (omp install + Composer 2.5 defaults). Cursor auth is a Dashboard secret (`CURSOR_ACCESS_TOKEN`), never committed.
+- **`.cursor/environment.json`** + **`scripts/cloud-agent-install.sh`** — Cloud Agent bootstrap (omp install + Composer 2.5 defaults). Cursor auth is a Dashboard secret (`CURSOR_API_KEY`), never committed.
 
 ## Local-only workflow (hard rule)
 
