@@ -173,6 +173,27 @@ pub(crate) fn apply_theme_selection(selection: &ThemeSelection, window: &mut Win
     window.refresh();
 }
 
+pub(crate) fn apply_theme_selection_without_window(selection: &ThemeSelection, cx: &mut App) {
+    cx.set_global(ThemeSelectionState(selection.clone()));
+    install_selected_pair(selection, cx);
+    match selection.appearance {
+        ThemePreference::System => {
+            cx.set_window_appearance(None);
+            Theme::sync_system_appearance(None, cx);
+        }
+        ThemePreference::Light => {
+            cx.set_window_appearance(Some(WindowAppearance::Light));
+            Theme::change(ThemeMode::Light, None, cx);
+        }
+        ThemePreference::Dark => {
+            cx.set_window_appearance(Some(WindowAppearance::Dark));
+            Theme::change(ThemeMode::Dark, None, cx);
+        }
+    }
+    apply_pimiento_brand(cx);
+    cx.refresh_windows();
+}
+
 pub(crate) fn reapply_theme_without_window(cx: &mut App) {
     let selection = cx.global::<ThemeSelectionState>().0.clone();
     install_selected_pair(&selection, cx);
@@ -184,18 +205,6 @@ pub(crate) fn reapply_theme_without_window(cx: &mut App) {
     Theme::change(mode, None, cx);
     apply_pimiento_brand(cx);
     cx.refresh_windows();
-}
-
-pub(crate) fn select_appearance(
-    preference: ThemePreference,
-    persistence: &SessionPersistence,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let mut selection = cx.global::<ThemeSelectionState>().0.clone();
-    selection.appearance = preference;
-    persistence.save_theme_selection(&selection);
-    apply_theme_selection(&selection, window, cx);
 }
 
 pub(crate) fn theme_family_name(name: &str) -> String {
@@ -220,39 +229,6 @@ pub(crate) fn paired_theme_name(
             *mode == counterpart_mode && theme_family_name(name).eq_ignore_ascii_case(&family)
         })
         .map(|(name, _)| name.clone())
-}
-
-pub(crate) fn select_named_theme(
-    name: &str,
-    persistence: &SessionPersistence,
-    window: &mut Window,
-    cx: &mut App,
-) -> bool {
-    let Some(config) = ThemeRegistry::global(cx).themes().get(name).cloned() else {
-        return false;
-    };
-    let themes = ThemeRegistry::global(cx)
-        .themes()
-        .values()
-        .map(|theme| (theme.name.to_string(), theme.mode))
-        .collect::<Vec<_>>();
-    let mut selection = cx.global::<ThemeSelectionState>().0.clone();
-    if config.mode.is_dark() {
-        selection.dark = config.name.to_string();
-        selection.appearance = ThemePreference::Dark;
-        if let Some(pair) = paired_theme_name(&selection.dark, ThemeMode::Light, &themes) {
-            selection.light = pair;
-        }
-    } else {
-        selection.light = config.name.to_string();
-        selection.appearance = ThemePreference::Light;
-        if let Some(pair) = paired_theme_name(&selection.light, ThemeMode::Dark, &themes) {
-            selection.dark = pair;
-        }
-    }
-    persistence.save_theme_selection(&selection);
-    apply_theme_selection(&selection, window, cx);
-    true
 }
 
 pub(crate) fn registered_theme_choices(cx: &App) -> Vec<RegisteredThemeChoice> {
@@ -320,4 +296,40 @@ pub(crate) fn theme_picker_item_is_active(
         ThemePickerItem::Theme { name, mode } if mode.is_dark() => selection.dark == *name,
         ThemePickerItem::Theme { name, .. } => selection.light == *name,
     }
+}
+
+pub(crate) fn theme_picker_selected_index(
+    items: &[ThemePickerItem],
+    selection: &ThemeSelection,
+) -> usize {
+    items
+        .iter()
+        .position(|item| theme_picker_item_is_active(item, selection))
+        .unwrap_or(0)
+}
+
+pub(crate) fn theme_selection_for_picker_item(
+    opening_selection: &ThemeSelection,
+    item: &ThemePickerItem,
+    themes: &[(String, ThemeMode)],
+) -> ThemeSelection {
+    let mut selection = opening_selection.clone();
+    match item {
+        ThemePickerItem::Appearance(preference) => selection.appearance = *preference,
+        ThemePickerItem::Theme { name, mode } if mode.is_dark() => {
+            selection.dark.clone_from(name);
+            selection.appearance = ThemePreference::Dark;
+            if let Some(pair) = paired_theme_name(name, ThemeMode::Light, themes) {
+                selection.light = pair;
+            }
+        }
+        ThemePickerItem::Theme { name, .. } => {
+            selection.light.clone_from(name);
+            selection.appearance = ThemePreference::Light;
+            if let Some(pair) = paired_theme_name(name, ThemeMode::Dark, themes) {
+                selection.dark = pair;
+            }
+        }
+    }
+    selection
 }

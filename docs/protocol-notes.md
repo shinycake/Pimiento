@@ -391,3 +391,9 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - `hub` tool cards render a Jobs summary only from fields present on args/results (`op`, job id, status, command, or a `jobs[]` array). Unparseable payloads keep the generic card.
 - `task` cards show **Open agents** only when a named `subagentId`/`toolCallId` linkage field is present; the button opens the existing Agents inspector focus and does not invent linkage. `eval` titles/digests use only supplied title, language, and code.
 - `abort_bash` is targetless (`{type:"abort_bash"}`), while transcript bash rows are identified by `tool_execution_* .toolCallId`; no safe correlation exists, so no per-card Abort button renders.
+
+## Discoverable slash commands + theme preview — 2026-08-09
+
+- The main command palette combines its static actions with every top-level command from OMP's open `available_commands` catalog. Search also flattens matching nested subcommands and considers names, descriptions, input/usage hints, source strings, and aliases.
+- Choosing a slash entry reuses the composer's completion text (including safe trailing spaces for required input), focuses the composer, and never sends. Slash entries use variable-height rows so source, aliases, descriptions, and usage metadata cannot overlap.
+- The named theme picker snapshots the exact appearance/light/dark selection on open. Highlight changes preview a selection in memory only; Enter/click persists, while Esc, backdrop, and Close restore the opening snapshot. Each preview is derived from that snapshot so moving from a named preview back to an appearance row also restores the original paired theme names.

@@ -194,10 +194,6 @@ pub(crate) fn filter_palette_entries(query: &str) -> Vec<&'static PaletteEntry> 
         .collect()
 }
 
-pub(crate) fn palette_entry_display_label(entry: &PaletteEntry) -> String {
-    format!("{} · {}", entry.label, entry.hint)
-}
-
 pub(crate) fn shell_single_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', "'\\''"))
 }

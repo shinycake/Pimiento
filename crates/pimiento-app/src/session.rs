@@ -49,6 +49,31 @@ pub(crate) struct SlashSuggestion {
     pub(crate) is_subcommand: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum CommandPaletteEntry {
+    Action(&'static PaletteEntry),
+    Slash {
+        suggestion: SlashSuggestion,
+        aliases: Vec<String>,
+    },
+}
+
+impl CommandPaletteEntry {
+    pub(crate) fn title(&self) -> &str {
+        match self {
+            Self::Action(entry) => entry.label,
+            Self::Slash { suggestion, .. } => &suggestion.title,
+        }
+    }
+
+    pub(crate) fn description(&self) -> &str {
+        match self {
+            Self::Action(entry) => entry.hint,
+            Self::Slash { suggestion, .. } => &suggestion.description,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlashMenuState {
     Closed,
@@ -139,6 +164,7 @@ pub(crate) struct SessionView {
     pub(crate) theme_picker_open: bool,
     pub(crate) theme_search: gpui::Entity<InputState>,
     pub(crate) theme_picker_selected: usize,
+    pub(crate) theme_picker_opening_selection: Option<ThemeSelection>,
     pub(crate) clear_theme_search: bool,
     pub(crate) refocus_theme_search: bool,
     pub(crate) about_open: bool,
@@ -320,6 +346,7 @@ impl SessionView {
             theme_picker_open: false,
             theme_search,
             theme_picker_selected: 0,
+            theme_picker_opening_selection: None,
             clear_theme_search: false,
             refocus_theme_search: false,
             about_open: false,
@@ -3159,6 +3186,9 @@ impl SessionView {
     pub(crate) fn toggle_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = !self.palette_open;
         if self.palette_open {
+            if let Some(opening_selection) = self.theme_picker_opening_selection.take() {
+                apply_theme_selection_without_window(&opening_selection, cx);
+            }
             self.theme_picker_open = false;
             self.about_open = false;
             self.rename_open = false;
@@ -3201,20 +3231,50 @@ impl SessionView {
         self.model_picker_open = false;
         self.thinking_picker_open = false;
         self.theme_picker_open = true;
-        self.theme_picker_selected = 0;
+        let opening_selection = cx.global::<ThemeSelectionState>().0.clone();
+        let items = filter_theme_picker_items(&registered_theme_choices(cx), "");
+        self.theme_picker_selected = theme_picker_selected_index(&items, &opening_selection);
+        self.theme_picker_opening_selection = Some(opening_selection);
         self.clear_theme_search = true;
         self.refocus_theme_search = true;
         self.refocus_composer = false;
         cx.notify();
     }
 
-    pub(crate) fn close_theme_picker(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_theme_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.theme_picker_open {
+            if let Some(opening_selection) = self.theme_picker_opening_selection.take() {
+                apply_theme_selection(&opening_selection, window, cx);
+            }
             self.theme_picker_open = false;
             self.theme_picker_selected = 0;
             self.clear_theme_search = true;
             self.refocus_composer = true;
             cx.notify();
+        }
+    }
+
+    fn theme_selection_for_item(&self, item: &ThemePickerItem, cx: &App) -> Option<ThemeSelection> {
+        let opening_selection = self.theme_picker_opening_selection.as_ref()?;
+        let themes = registered_theme_choices(cx)
+            .into_iter()
+            .map(|theme| (theme.name, theme.mode))
+            .collect::<Vec<_>>();
+        Some(theme_selection_for_picker_item(
+            opening_selection,
+            item,
+            &themes,
+        ))
+    }
+
+    fn preview_theme_picker_item(
+        &mut self,
+        item: &ThemePickerItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(selection) = self.theme_selection_for_item(item, cx) {
+            apply_theme_selection(&selection, window, cx);
         }
     }
 
@@ -3224,15 +3284,16 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match item {
-            ThemePickerItem::Appearance(preference) => {
-                select_appearance(*preference, &self.persistence, window, cx);
-            }
-            ThemePickerItem::Theme { name, .. } => {
-                let _ = select_named_theme(name, &self.persistence, window, cx);
-            }
+        if let Some(selection) = self.theme_selection_for_item(item, cx) {
+            self.persistence.save_theme_selection(&selection);
+            self.theme_picker_opening_selection = None;
+            apply_theme_selection(&selection, window, cx);
         }
-        self.close_theme_picker(cx);
+        self.theme_picker_open = false;
+        self.theme_picker_selected = 0;
+        self.clear_theme_search = true;
+        self.refocus_composer = true;
+        cx.notify();
     }
 
     pub(crate) fn show_about(&mut self, cx: &mut Context<Self>) {
@@ -3378,6 +3439,23 @@ impl SessionView {
             | PaletteActionId::ToggleAgents
             | PaletteActionId::ToggleInspector => {
                 self.pending_workspace_palette = Some(id);
+            }
+        }
+    }
+
+    fn run_command_palette_entry(
+        &mut self,
+        entry: CommandPaletteEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match entry {
+            CommandPaletteEntry::Action(entry) => {
+                self.run_palette_action(entry.id, window, cx);
+            }
+            CommandPaletteEntry::Slash { suggestion, .. } => {
+                self.close_palette(cx);
+                self.accept_slash_command(&suggestion, cx);
             }
         }
     }
@@ -4048,13 +4126,14 @@ impl SessionView {
         }
         match event.keystroke.key.to_ascii_lowercase().as_str() {
             "escape" | "esc" => {
-                self.close_theme_picker(cx);
+                self.close_theme_picker(window, cx);
                 true
             }
             "up" | "arrowup" => {
                 if !items.is_empty() {
                     self.theme_picker_selected =
                         (self.theme_picker_selected + items.len() - 1) % items.len();
+                    self.preview_theme_picker_item(&items[self.theme_picker_selected], window, cx);
                     cx.notify();
                 }
                 true
@@ -4062,6 +4141,7 @@ impl SessionView {
             "down" | "arrowdown" => {
                 if !items.is_empty() {
                     self.theme_picker_selected = (self.theme_picker_selected + 1) % items.len();
+                    self.preview_theme_picker_item(&items[self.theme_picker_selected], window, cx);
                     cx.notify();
                 }
                 true
@@ -4084,6 +4164,13 @@ impl SessionView {
     ) {
         if self.theme_picker_open && matches!(event, InputEvent::Change) {
             self.theme_picker_selected = 0;
+            let query = self.theme_search.read(cx).value().to_string();
+            let items = filter_theme_picker_items(&registered_theme_choices(cx), &query);
+            if let Some(item) = items.first()
+                && let Some(selection) = self.theme_selection_for_item(item, cx)
+            {
+                apply_theme_selection_without_window(&selection, cx);
+            }
             cx.notify();
         }
     }
@@ -4100,7 +4187,8 @@ impl SessionView {
         let key = event.keystroke.key.to_ascii_lowercase();
         let key = key.as_str();
         let query = self.palette_search.read(cx).value().to_string();
-        let matches = filter_palette_entries(&query);
+        let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        let matches = filter_command_palette_entries(&commands, &query);
         if matches.is_empty() {
             self.palette_selected = 0;
         } else {
@@ -4128,8 +4216,8 @@ impl SessionView {
             }
             "enter" | "return" => {
                 if let Some(entry) = matches.get(self.palette_selected) {
-                    let id = entry.id;
-                    self.run_palette_action(id, window, cx);
+                    let entry = entry.clone();
+                    self.run_command_palette_entry(entry, window, cx);
                 }
                 true
             }
@@ -4764,6 +4852,72 @@ fn slash_suggestion_for_subcommand(
     }
 }
 
+fn palette_text_matches(query: &str, values: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
+    values
+        .into_iter()
+        .any(|value| value.as_ref().to_ascii_lowercase().contains(query))
+}
+
+pub(crate) fn filter_command_palette_entries(
+    commands: &[SlashCommand],
+    query: &str,
+) -> Vec<CommandPaletteEntry> {
+    let query = query.trim().to_ascii_lowercase();
+    let slash_query = query.strip_prefix('/').unwrap_or(&query);
+    let mut entries = filter_palette_entries(&query)
+        .into_iter()
+        .map(CommandPaletteEntry::Action)
+        .collect::<Vec<_>>();
+
+    for command in commands {
+        let aliases = command.aliases.clone();
+        let top_level_matches = query.is_empty()
+            || palette_text_matches(
+                slash_query,
+                [
+                    command.name.as_str(),
+                    command.description.as_str(),
+                    command.input_hint.as_deref().unwrap_or_default(),
+                    command.source.as_deref().unwrap_or_default(),
+                ]
+                .into_iter()
+                .chain(command.aliases.iter().map(String::as_str)),
+            );
+        if top_level_matches {
+            entries.push(CommandPaletteEntry::Slash {
+                suggestion: slash_suggestion_for_command(command),
+                aliases: aliases.clone(),
+            });
+        }
+
+        if query.is_empty() {
+            continue;
+        }
+        for subcommand in &command.subcommands {
+            let title = format!("{} {}", command.name, subcommand.name);
+            if palette_text_matches(
+                slash_query,
+                [
+                    title.as_str(),
+                    subcommand.name.as_str(),
+                    subcommand.description.as_str(),
+                    subcommand.usage.as_deref().unwrap_or_default(),
+                    command.source.as_deref().unwrap_or_default(),
+                ]
+                .into_iter()
+                .chain(command.aliases.iter().map(String::as_str)),
+            ) {
+                entries.push(CommandPaletteEntry::Slash {
+                    suggestion: slash_suggestion_for_subcommand(command, subcommand),
+                    aliases: aliases.clone(),
+                });
+            }
+        }
+    }
+
+    entries
+}
+
 pub(crate) fn filter_slash_commands(commands: &[SlashCommand], text: &str) -> Vec<SlashSuggestion> {
     let Some(context) = slash_completion_context(commands, text) else {
         return Vec::new();
@@ -5053,10 +5207,11 @@ impl Render for SessionView {
         if self.pending_palette_enter {
             self.pending_palette_enter = false;
             let query = self.palette_search.read(cx).value().to_string();
-            let matches = filter_palette_entries(&query);
+            let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+            let matches = filter_command_palette_entries(&commands, &query);
             if let Some(entry) = matches.get(self.palette_selected) {
-                let id = entry.id;
-                self.run_palette_action(id, window, cx);
+                let entry = entry.clone();
+                self.run_command_palette_entry(entry, window, cx);
             }
         }
 
@@ -5157,7 +5312,7 @@ impl Render for SessionView {
             .at_mention_selected
             .min(at_mention_items.len().saturating_sub(1));
         let palette_query = self.palette_search.read(cx).value().to_string();
-        let palette_matches = filter_palette_entries(&palette_query);
+        let palette_matches = filter_command_palette_entries(&slash_commands, &palette_query);
         if palette_matches.is_empty() {
             self.palette_selected = 0;
         } else {
@@ -6518,8 +6673,8 @@ impl Render for SessionView {
                         .pt_16()
                         .bg(theme.overlay)
                         .cursor_pointer()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.close_theme_picker(cx);
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.close_theme_picker(window, cx);
                         }))
                         .child(
                             v_flex()
@@ -6573,8 +6728,8 @@ impl Render for SessionView {
                                                 .small()
                                                 .ghost()
                                                 .on_click(cx.listener(
-                                                    |this, _: &ClickEvent, _w, cx| {
-                                                        this.close_theme_picker(cx);
+                                                    |this, _: &ClickEvent, window, cx| {
+                                                        this.close_theme_picker(window, cx);
                                                     },
                                                 )),
                                         ),
@@ -6787,23 +6942,114 @@ impl Render for SessionView {
                                         .children(
                                             palette_matches.iter().enumerate().map(
                                                 |(ix, entry)| {
-                                                    let id = entry.id;
+                                                    let entry = entry.clone();
                                                     let selected = ix == palette_selected;
-                                                    Button::new(("palette-entry", ix))
-                                                        .small()
+                                                    let title = entry.title().to_owned();
+                                                    let description =
+                                                        entry.description().to_owned();
+                                                    let (metadata, usage) = match &entry {
+                                                        CommandPaletteEntry::Action(_) => (
+                                                            "Pimiento command".to_owned(),
+                                                            None,
+                                                        ),
+                                                        CommandPaletteEntry::Slash {
+                                                            suggestion,
+                                                            aliases,
+                                                        } => {
+                                                            let mut metadata =
+                                                                "Slash command".to_owned();
+                                                            if let Some(source) =
+                                                                suggestion.source.as_deref()
+                                                            {
+                                                                metadata.push_str(" · ");
+                                                                metadata.push_str(source);
+                                                            }
+                                                            if !aliases.is_empty() {
+                                                                metadata.push_str(" · aliases ");
+                                                                metadata.push_str(
+                                                                    &aliases.join(", "),
+                                                                );
+                                                            }
+                                                            (
+                                                                metadata,
+                                                                suggestion
+                                                                    .usage_hint
+                                                                    .as_ref()
+                                                                    .map(|hint| {
+                                                                        format!("Usage: {hint}")
+                                                                    }),
+                                                            )
+                                                        }
+                                                    };
+                                                    v_flex()
+                                                        .id(("palette-entry", ix))
                                                         .w_full()
-                                                        .child(wrapped_button_text(
-                                                            palette_entry_display_label(entry),
-                                                        ))
-                                                        .when(selected, Button::primary)
-                                                        .when(!selected, Button::ghost)
+                                                        .min_h(px(44.))
+                                                        .gap_0p5()
+                                                        .px_3()
+                                                        .py_2()
+                                                        .rounded_sm()
+                                                        .cursor_pointer()
+                                                        .when(selected, |row| {
+                                                            row.bg(theme.secondary)
+                                                        })
+                                                        .hover(|row| {
+                                                            row.bg(theme.secondary_hover)
+                                                        })
+                                                        .child(
+                                                            div()
+                                                                .w_full()
+                                                                .text_sm()
+                                                                .child(soft_wrap_dynamic_text(
+                                                                    &title,
+                                                                )),
+                                                        )
+                                                        .child(
+                                                            Label::new(metadata)
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    theme.muted_foreground,
+                                                                ),
+                                                        )
+                                                        .when(!description.is_empty(), |row| {
+                                                            row.child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    )
+                                                                    .child(
+                                                                        soft_wrap_dynamic_text(
+                                                                            &description,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                        })
+                                                        .when_some(usage, |row, usage| {
+                                                            row.child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    )
+                                                                    .child(
+                                                                        soft_wrap_dynamic_text(
+                                                                            &usage,
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                        })
                                                         .on_click(cx.listener(
                                                             move |this,
                                                                   _: &ClickEvent,
                                                                   window,
                                                                   cx| {
-                                                                this.run_palette_action(
-                                                                    id, window, cx,
+                                                                this.run_command_palette_entry(
+                                                                    entry.clone(),
+                                                                    window,
+                                                                    cx,
                                                                 );
                                                             },
                                                         ))

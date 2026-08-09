@@ -712,18 +712,6 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
-fn palette_theme_entry_is_concise() {
-    assert_eq!(
-        palette_entry_display_label(&PaletteEntry {
-            id: PaletteActionId::ToggleTheme,
-            label: "Theme…",
-            hint: "appearance",
-        }),
-        "Theme… · appearance"
-    );
-}
-
-#[test]
 fn mount_notices_are_detected_without_inventing_content() {
     assert!(notice_looks_like_mount_event(
         "cli_8: mounted mcp_node_repl_js, mcp_node_repl_js.reset"
@@ -1123,6 +1111,75 @@ fn theme_picker_search_and_selected_state_cover_appearance_and_names() {
 }
 
 #[test]
+fn theme_picker_derives_preview_from_opening_selection_and_can_revert_exactly() {
+    let opening = ThemeSelection {
+        appearance: ThemePreference::System,
+        light: "Quiet Pepper Light".into(),
+        dark: "Pepperwood Dark".into(),
+    };
+    let themes = vec![
+        ("Quiet Pepper Light".into(), ThemeMode::Light),
+        ("Quiet Pepper Dark".into(), ThemeMode::Dark),
+        ("Pepperwood Light".into(), ThemeMode::Light),
+        ("Pepperwood Dark".into(), ThemeMode::Dark),
+    ];
+    let preview = theme_selection_for_picker_item(
+        &opening,
+        &ThemePickerItem::Theme {
+            name: "Quiet Pepper Dark".into(),
+            mode: ThemeMode::Dark,
+        },
+        &themes,
+    );
+    assert_eq!(
+        preview,
+        ThemeSelection {
+            appearance: ThemePreference::Dark,
+            light: "Quiet Pepper Light".into(),
+            dark: "Quiet Pepper Dark".into(),
+        }
+    );
+
+    let appearance_preview = theme_selection_for_picker_item(
+        &opening,
+        &ThemePickerItem::Appearance(ThemePreference::Light),
+        &themes,
+    );
+    assert_eq!(appearance_preview.appearance, ThemePreference::Light);
+    assert_eq!(appearance_preview.light, opening.light);
+    assert_eq!(appearance_preview.dark, opening.dark);
+    assert_eq!(opening.appearance, ThemePreference::System);
+}
+
+#[test]
+fn theme_picker_selection_index_prefers_the_opening_appearance_or_active_filtered_theme() {
+    let selection = ThemeSelection {
+        appearance: ThemePreference::Dark,
+        light: "Quiet Pepper Light".into(),
+        dark: "Pepperwood Dark".into(),
+    };
+    let all = vec![
+        ThemePickerItem::Appearance(ThemePreference::System),
+        ThemePickerItem::Appearance(ThemePreference::Light),
+        ThemePickerItem::Appearance(ThemePreference::Dark),
+    ];
+    assert_eq!(theme_picker_selected_index(&all, &selection), 2);
+
+    let filtered = vec![
+        ThemePickerItem::Theme {
+            name: "Other Dark".into(),
+            mode: ThemeMode::Dark,
+        },
+        ThemePickerItem::Theme {
+            name: "Pepperwood Dark".into(),
+            mode: ThemeMode::Dark,
+        },
+    ];
+    assert_eq!(theme_picker_selected_index(&filtered, &selection), 1);
+    assert_eq!(theme_picker_selected_index(&[], &selection), 0);
+}
+
+#[test]
 fn initial_theme_selection_overrides_only_appearance_from_environment() {
     let root = std::env::temp_dir().join(format!(
         "pimiento-theme-env-{}-{}",
@@ -1385,6 +1442,125 @@ fn slash_future_source_is_preserved_without_a_closed_enum() {
     let suggestions = filter_slash_commands(&commands, "/future");
     assert_eq!(suggestions[0].title, "/future-command");
     assert_eq!(suggestions[0].source.as_deref(), Some("remote-registry-v2"));
+}
+
+#[test]
+fn command_palette_combines_static_actions_with_every_top_level_slash_command() {
+    let commands = parse_slash_commands(Some(&serde_json::json!([
+        {
+            "name": "mcp",
+            "description": "Manage servers",
+            "subcommands": [{"name": "list", "description": "List servers"}]
+        },
+        {
+            "name": "future-command",
+            "description": "Discovered at runtime",
+            "source": "remote-registry-v2"
+        }
+    ])));
+    let entries = filter_command_palette_entries(&commands, "");
+
+    assert!(entries.iter().any(|entry| matches!(
+        entry,
+        CommandPaletteEntry::Action(action)
+            if action.id == PaletteActionId::ToggleTheme && action.label == "Theme…"
+    )));
+    let slash_titles = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            CommandPaletteEntry::Slash { suggestion, .. } => Some(suggestion.title.as_str()),
+            CommandPaletteEntry::Action(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(slash_titles, vec!["/mcp", "/future-command"]);
+}
+
+#[test]
+fn command_palette_searches_slash_metadata_aliases_and_nested_subcommands() {
+    let commands = parse_slash_commands(Some(&serde_json::json!([{
+        "name": "mcp",
+        "aliases": ["servers"],
+        "description": "Manage MCP servers",
+        "input": {"hint": "<operation>"},
+        "source": "future-extension-source",
+        "subcommands": [
+            {
+                "name": "reconnect",
+                "description": "Reconnect a remote server",
+                "usage": "<server-name>"
+            },
+            {"name": "list", "description": "List active servers"}
+        ]
+    }])));
+
+    for query in [
+        "manage mcp",
+        "servers",
+        "<operation>",
+        "future-extension-source",
+    ] {
+        assert!(
+            filter_command_palette_entries(&commands, query)
+                .iter()
+                .any(|entry| entry.title() == "/mcp"),
+            "top-level metadata did not match {query}"
+        );
+    }
+
+    for query in [
+        "reconnect",
+        "remote server",
+        "<server-name>",
+        "future-extension-source",
+        "servers",
+    ] {
+        assert!(
+            filter_command_palette_entries(&commands, query)
+                .iter()
+                .any(|entry| entry.title() == "/mcp reconnect"),
+            "nested metadata did not match {query}"
+        );
+    }
+}
+
+#[test]
+fn command_palette_slash_entries_reuse_safe_completion_text_without_execution_data() {
+    let commands = parse_slash_commands(Some(&serde_json::json!([{
+        "name": "mcp",
+        "aliases": ["servers"],
+        "subcommands": [
+            {"name": "reconnect", "description": "Reconnect", "usage": "<server>"},
+            {"name": "list", "description": "List"}
+        ]
+    }])));
+
+    let parent = filter_command_palette_entries(&commands, "servers")
+        .into_iter()
+        .find_map(|entry| match entry {
+            CommandPaletteEntry::Slash { suggestion, .. } if suggestion.title == "/mcp" => {
+                Some(suggestion)
+            }
+            _ => None,
+        })
+        .expect("parent slash palette entry");
+    assert_eq!(parent.completion_text, slash_completion_text(&parent));
+    assert_eq!(parent.completion_text, "/mcp ");
+    assert!(parent.expects_input);
+
+    let nested = filter_command_palette_entries(&commands, "reconnect")
+        .into_iter()
+        .find_map(|entry| match entry {
+            CommandPaletteEntry::Slash { suggestion, .. }
+                if suggestion.title == "/mcp reconnect" =>
+            {
+                Some(suggestion)
+            }
+            _ => None,
+        })
+        .expect("nested slash palette entry");
+    assert_eq!(nested.completion_text, slash_completion_text(&nested));
+    assert_eq!(nested.completion_text, "/mcp reconnect ");
+    assert!(nested.is_subcommand);
 }
 
 #[test]
