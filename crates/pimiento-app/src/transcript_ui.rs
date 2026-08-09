@@ -1,9 +1,42 @@
 use crate::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ToolGroupPosition {
+    pub(crate) grouped: bool,
+    pub(crate) first: bool,
+}
+
+/// Derive action-group chrome without merging transcript entries.
+///
+/// Keeping one rendered item per transcript entry preserves every `ListState`
+/// index and lets tool expansion remeasure only the affected row.
+pub(crate) fn tool_group_position(
+    transcript: &[TranscriptEntry],
+    row_ix: usize,
+) -> ToolGroupPosition {
+    let is_tool = transcript
+        .get(row_ix)
+        .is_some_and(|entry| matches!(entry, TranscriptEntry::ToolCall(_)));
+    let previous_is_tool = row_ix.checked_sub(1).is_some_and(|previous_ix| {
+        transcript
+            .get(previous_ix)
+            .is_some_and(|entry| matches!(entry, TranscriptEntry::ToolCall(_)))
+    });
+    let next_is_tool = transcript
+        .get(row_ix + 1)
+        .is_some_and(|entry| matches!(entry, TranscriptEntry::ToolCall(_)));
+
+    ToolGroupPosition {
+        grouped: is_tool && (previous_is_tool || next_is_tool),
+        first: is_tool && !previous_is_tool,
+    }
+}
+
 #[allow(clippy::too_many_lines)] // Match arms mirror transcript variants.
 pub(crate) fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,
+    tool_group: ToolGroupPosition,
     expanded: &HashSet<String>,
     running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
@@ -192,6 +225,7 @@ pub(crate) fn render_entry(
         TranscriptEntry::ToolCall(tc) => render_tool_card(
             row_ix,
             tc,
+            tool_group,
             expanded.contains(&tc.tool_call_id),
             running_tool_started,
             cx,
@@ -480,6 +514,7 @@ pub(crate) fn code_block_copy_id(row_ix: usize, lang: Option<&str>, code: &str) 
 pub(crate) fn render_tool_card(
     row_ix: usize,
     tc: &pimiento_core::transcript::ToolCall,
+    group: ToolGroupPosition,
     expanded: bool,
     running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
@@ -544,20 +579,63 @@ pub(crate) fn render_tool_card(
     let view = cx.entity().downgrade();
     let view_for_toggle = view.clone();
     let view_for_revert = view.clone();
+    let tc_id_for_toggle = tc_id.clone();
 
     v_flex()
         .w_full()
-        .py_2()
+        .when(!group.grouped || group.first, gpui::Styled::pt_2)
+        .when(!group.grouped, gpui::Styled::pb_2)
+        .when(group.grouped, gpui::Styled::pb_1)
         .px_2()
         .gap_0p5()
         .rounded_md()
         .border_1()
         .border_color(theme.border)
         .bg(theme.secondary)
+        .when(group.grouped && group.first, |card| {
+            card.child(
+                div()
+                    .w_full()
+                    .pb_1()
+                    .mb_0p5()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("Tools"),
+            )
+        })
         .child(
             h_flex()
                 .w_full()
-                .gap_2()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child(tc.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("·"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .truncate()
+                        .child(arg_digest),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("·"),
+                )
                 .child(
                     div()
                         .px_2()
@@ -568,28 +646,35 @@ pub(crate) fn render_tool_card(
                         .text_xs()
                         .child(status_label),
                 )
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .child(tc.name.clone()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .truncate()
-                        .child(arg_digest),
-                )
                 .when(!duration_str.is_empty(), |el| {
                     el.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child(duration_str),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("·"),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(duration_str),
+                            ),
                     )
-                }),
+                })
+                .child(
+                    Button::new(("toggle-tool", row_ix))
+                        .label(if expanded { "⌄" } else { "›" })
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            let _ = view_for_toggle.update(cx, |this, cx| {
+                                this.toggle_tool_expanded(&tc_id_for_toggle, cx);
+                            });
+                        }),
+                ),
         )
         .when(tc.status == ToolStatus::Running, |card| {
             card.child(
@@ -682,21 +767,6 @@ pub(crate) fn render_tool_card(
         .child(
             h_flex()
                 .gap_2()
-                .child({
-                    let tc_id = tc_id.clone();
-                    Button::new(("toggle-tool", row_ix))
-                        .label(if expanded {
-                            "▲ collapse"
-                        } else {
-                            "▼ details"
-                        })
-                        .small()
-                        .ghost()
-                        .on_click(move |_, _, cx| {
-                            let _ = view_for_toggle
-                                .update(cx, |this, cx| this.toggle_tool_expanded(&tc_id, cx));
-                        })
-                })
                 .when(has_output, |controls| {
                     controls.child(
                         Button::new(("copy-tool-output", row_ix))
@@ -817,6 +887,150 @@ pub(crate) fn render_crash_card(
 
 // ── dialog rendering ──────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DialogOption {
+    pub(crate) value: String,
+    pub(crate) label: String,
+    pub(crate) description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DialogQuestion {
+    pub(crate) header: Option<String>,
+    pub(crate) prompt: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) options: Vec<DialogOption>,
+    pub(crate) recommended: Option<usize>,
+}
+
+fn nonempty_dialog_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn parse_dialog_options(payload: &serde_json::Value) -> Vec<DialogOption> {
+    payload
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| {
+                    if let Some(value) = option.as_str() {
+                        return Some(DialogOption {
+                            value: value.to_owned(),
+                            label: value.to_owned(),
+                            description: None,
+                        });
+                    }
+                    let label = nonempty_dialog_string(
+                        option
+                            .get("label")
+                            .or_else(|| option.get("title"))
+                            .or_else(|| option.get("value")),
+                    )?;
+                    let value =
+                        nonempty_dialog_string(option.get("value").or_else(|| option.get("id")))
+                            .unwrap_or_else(|| label.clone());
+                    let description = nonempty_dialog_string(
+                        option.get("description").or_else(|| option.get("preview")),
+                    );
+                    Some(DialogOption {
+                        value,
+                        label,
+                        description,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn dialog_recommended_index(
+    payload: &serde_json::Value,
+    options: &[DialogOption],
+) -> Option<usize> {
+    let recommended = payload
+        .get("recommended")
+        .or_else(|| payload.get("recommendedIndex"));
+    if let Some(index) = recommended
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
+        .filter(|index| *index < options.len())
+    {
+        return Some(index);
+    }
+    if let Some(value) = nonempty_dialog_string(recommended) {
+        return options
+            .iter()
+            .position(|option| option.value == value || option.label == value);
+    }
+    payload
+        .get("options")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|raw_options| {
+            raw_options.iter().enumerate().find_map(|(index, option)| {
+                option
+                    .get("recommended")
+                    .and_then(serde_json::Value::as_bool)
+                    .is_some_and(|recommended| recommended)
+                    .then_some(index)
+            })
+        })
+        .filter(|index| *index < options.len())
+}
+
+pub(crate) fn dialog_questions(dialog: &UiDialog) -> Vec<DialogQuestion> {
+    let nested = dialog
+        .payload
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .filter(|question| question.is_object())
+                .map(|question| {
+                    let options = parse_dialog_options(question);
+                    DialogQuestion {
+                        header: nonempty_dialog_string(
+                            question.get("header").or_else(|| question.get("title")),
+                        ),
+                        prompt: nonempty_dialog_string(
+                            question.get("question").or_else(|| question.get("message")),
+                        ),
+                        description: nonempty_dialog_string(question.get("description")),
+                        recommended: dialog_recommended_index(question, &options),
+                        options,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !nested.is_empty() {
+        return nested;
+    }
+
+    let options = parse_dialog_options(&dialog.payload);
+    vec![DialogQuestion {
+        header: None,
+        prompt: None,
+        description: None,
+        recommended: dialog_recommended_index(&dialog.payload, &options),
+        options,
+    }]
+}
+
+pub(crate) fn dialog_primary_options(dialog: &UiDialog) -> Vec<DialogOption> {
+    dialog_questions(dialog)
+        .into_iter()
+        .find(|question| !question.options.is_empty())
+        .map(|question| question.options)
+        .unwrap_or_default()
+}
+
 pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyElement {
     let theme = cx.theme().clone();
     let title = dialog
@@ -853,7 +1067,7 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
             },
         )
         .child(match dialog.method.as_str() {
-            "select" => render_select_dialog(dialog, &select_dialog_options(dialog), cx),
+            "select" => render_select_dialog(dialog, &dialog_questions(dialog), cx),
             "confirm" => render_confirm_dialog(dialog, cx),
             "input" | "editor" => render_text_dialog(dialog, cx),
             "open_url" => render_open_url_dialog(dialog, cx),
@@ -864,78 +1078,228 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
 
 pub(crate) fn render_select_dialog(
     dialog: &UiDialog,
-    options: &[String],
+    questions: &[DialogQuestion],
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
-    let mut el = h_flex().flex_wrap().gap_2();
+    let theme = cx.theme().clone();
     let view = cx.entity().downgrade();
-    for (i, opt) in options.iter().enumerate() {
-        let opt = opt.clone();
-        let id = dialog.id.clone();
-        let key_hint = match i {
-            0 => "1 ⏎ ",
-            n if n < 9 => &format!("{} ", n + 1),
-            _ => "",
-        };
-        el = el.child({
+    let mut blocks = v_flex().w_full().gap_3();
+    for (question_ix, question) in questions.iter().enumerate() {
+        let mut block = v_flex().w_full().gap_1();
+        if let Some(header) = &question.header {
+            block = block.child(
+                Label::new(header.clone())
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD),
+            );
+        }
+        if let Some(prompt) = &question.prompt {
+            block = block.child(div().text_sm().child(prompt.clone()));
+        }
+        if let Some(description) = &question.description {
+            block = block.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(description.clone()),
+            );
+        }
+        for (option_ix, option) in question.options.iter().take(9).enumerate() {
+            let value = option.value.clone();
+            let id = dialog.id.clone();
             let view = view.clone();
-            Button::new(format!("opt-{i}"))
-                .label(format!("{key_hint}{opt}"))
-                .small()
-                .on_click(move |_, _, cx| {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("value".into(), serde_json::Value::String(opt.clone()));
-                    do_dialog_response(&view, &id, fields, cx);
-                })
-        });
+            let is_recommended = question.recommended == Some(option_ix);
+            block = block.child(
+                h_flex()
+                    .id(format!("dialog-option-{question_ix}-{option_ix}"))
+                    .w_full()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        let mut fields = serde_json::Map::new();
+                        fields.insert("value".into(), serde_json::Value::String(value.clone()));
+                        do_dialog_response(&view, &id, fields, cx);
+                    })
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child((option_ix + 1).to_string()),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .gap_0p5()
+                            .child(div().text_sm().child(option.label.clone()))
+                            .when_some(option.description.clone(), |option, description| {
+                                option.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(description),
+                                )
+                            }),
+                    )
+                    .when(is_recommended, |row| {
+                        row.child(Tag::secondary().small().child("Recommended"))
+                    }),
+            );
+        }
+        blocks = blocks.child(block);
     }
-    el.child({
-        let view = view.clone();
-        let id = dialog.id.clone();
-        Button::new("cancel-select")
-            .label("Esc")
-            .small()
-            .ghost()
-            .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
-    })
-    .into_any_element()
+    blocks
+        .child(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .child(
+                    Label::new("Press 1–9 · Esc cancel")
+                        .text_xs()
+                        .text_color(theme.muted_foreground),
+                )
+                .child({
+                    let view = view.clone();
+                    let id = dialog.id.clone();
+                    Button::new("cancel-select")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
+                }),
+        )
+        .into_any_element()
 }
 
+#[allow(clippy::too_many_lines)] // Two structured choices keep labels, descriptions, tags, and callbacks together.
 pub(crate) fn render_confirm_dialog(
     dialog: &UiDialog,
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let parsed_options = parse_dialog_options(&dialog.payload);
+    let recommended = dialog_recommended_index(&dialog.payload, &parsed_options);
+    let yes_label = parsed_options
+        .first()
+        .map_or_else(|| "Yes".to_owned(), |option| option.label.clone());
+    let no_label = parsed_options
+        .get(1)
+        .map_or_else(|| "No".to_owned(), |option| option.label.clone());
+    let yes_description = parsed_options
+        .first()
+        .and_then(|option| option.description.clone());
+    let no_description = parsed_options
+        .get(1)
+        .and_then(|option| option.description.clone());
     let view = cx.entity().downgrade();
     let id_yes = dialog.id.clone();
     let id_no = dialog.id.clone();
-    h_flex()
+    v_flex()
         .w_full()
-        .justify_end()
         .gap_2()
         .child({
             let view = view.clone();
-            Button::new("confirm-no")
-                .label("N No")
-                .small()
-                .ghost()
-                .on_click(move |_, _, cx| {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("confirmed".into(), serde_json::Value::Bool(false));
-                    do_dialog_response(&view, &id_no, fields, cx);
-                })
-        })
-        .child({
-            let view = view.clone();
-            Button::new("confirm-yes")
-                .primary()
-                .label("Y ⏎ Yes")
-                .small()
+            h_flex()
+                .id("confirm-yes")
+                .w_full()
+                .items_start()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     let mut fields = serde_json::Map::new();
                     fields.insert("confirmed".into(), serde_json::Value::Bool(true));
                     do_dialog_response(&view, &id_yes, fields, cx);
                 })
+                .child(
+                    div()
+                        .w(px(20.))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child("Y"),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .gap_0p5()
+                        .child(div().text_sm().child(yes_label))
+                        .when_some(yes_description, |option, description| {
+                            option.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(description),
+                            )
+                        }),
+                )
+                .when(recommended == Some(0), |row| {
+                    row.child(Tag::secondary().small().child("Recommended"))
+                })
         })
+        .child({
+            let view = view.clone();
+            h_flex()
+                .id("confirm-no")
+                .w_full()
+                .items_start()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let mut fields = serde_json::Map::new();
+                    fields.insert("confirmed".into(), serde_json::Value::Bool(false));
+                    do_dialog_response(&view, &id_no, fields, cx);
+                })
+                .child(
+                    div()
+                        .w(px(20.))
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child("N"),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .gap_0p5()
+                        .child(div().text_sm().child(no_label))
+                        .when_some(no_description, |option, description| {
+                            option.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(description),
+                            )
+                        }),
+                )
+                .when(recommended == Some(1), |row| {
+                    row.child(Tag::secondary().small().child("Recommended"))
+                })
+        })
+        .child(
+            Label::new("Press Y/N · Esc cancel")
+                .text_xs()
+                .text_color(theme.muted_foreground),
+        )
         .into_any_element()
 }
 

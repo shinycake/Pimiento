@@ -38,7 +38,7 @@ pub(crate) fn workspace_window_title(session_name: &str, phase: &RunPhase) -> St
 pub(crate) struct RailEntry {
     pub(crate) ix: usize,
     pub(crate) label: String,
-    pub(crate) phase: String,
+    pub(crate) phase: RunPhase,
     pub(crate) cwd: PathBuf,
     pub(crate) attention: RailAttention,
     pub(crate) session_file: Option<PathBuf>,
@@ -69,6 +69,33 @@ pub(crate) fn group_sessions_by_workspace(
         entries.sort_by_key(|entry| entry.ix);
     }
     groups
+}
+
+pub(crate) fn workspace_status_for_entries(entries: &[RailEntry]) -> StatusKind {
+    entries
+        .iter()
+        .max_by_key(|entry| match entry.phase {
+            RunPhase::Dead => 4,
+            RunPhase::AwaitingResume => 3,
+            RunPhase::Streaming
+            | RunPhase::Compacting
+            | RunPhase::Retrying
+            | RunPhase::Restarting => 2,
+            RunPhase::Idle => 1,
+        })
+        .map_or(StatusKind::Idle, |entry| {
+            StatusKind::from_run_phase(&entry.phase)
+        })
+}
+
+pub(crate) fn run_phase_label(phase: &RunPhase) -> &'static str {
+    match phase {
+        RunPhase::Idle => "Idle",
+        RunPhase::Streaming => "Working",
+        RunPhase::AwaitingResume => "Awaiting input",
+        RunPhase::Compacting | RunPhase::Retrying | RunPhase::Restarting => "Busy",
+        RunPhase::Dead => "Error",
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,6 +521,69 @@ pub(crate) fn tool_names_from_state(state: Option<&serde_json::Value>) -> Vec<St
     names
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ToolNameGroups {
+    pub(crate) builtin: Vec<String>,
+    pub(crate) extensions: Vec<String>,
+}
+
+pub(crate) fn group_tool_names(names: &[String]) -> ToolNameGroups {
+    let (builtin, extensions) = names
+        .iter()
+        .cloned()
+        .partition(|name| is_builtin_tool_name(name));
+    ToolNameGroups {
+        builtin,
+        extensions,
+    }
+}
+
+pub(crate) fn is_builtin_tool_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "read"
+            | "bash"
+            | "ask"
+            | "eval"
+            | "glob"
+            | "grep"
+            | "task"
+            | "hub"
+            | "todo"
+            | "web_search"
+            | "web_fetch"
+            | "write"
+            | "edit"
+            | "ast_edit"
+            | "lsp"
+            | "ls"
+            | "find"
+            | "fetch"
+            | "patch"
+            | "apply_patch"
+            | "skill"
+            | "skills"
+    )
+}
+
+pub(crate) fn mode_indicators(tool_names: &[String], widget_keys: &[String]) -> Vec<&'static str> {
+    const MODES: [(&str, &str); 3] = [
+        ("computer", "Computer"),
+        ("browser", "Browser"),
+        ("vision", "Vision"),
+    ];
+    MODES
+        .into_iter()
+        .filter_map(|(needle, label)| {
+            tool_names
+                .iter()
+                .chain(widget_keys)
+                .any(|value| value.to_ascii_lowercase().contains(needle))
+                .then_some(label)
+        })
+        .collect()
+}
+
 // Keeping the declarative pane together makes its visual section order auditable.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn render_inspector(
@@ -524,7 +614,9 @@ pub(crate) fn render_inspector(
         subagent_tail_lines,
         subagent_status,
         fallback_subagent_events,
+        subagent_subscription,
         tool_names,
+        mode_tags,
         display_title,
         display_statuses,
         display_widgets,
@@ -549,10 +641,12 @@ pub(crate) fn render_inspector(
         .to_owned();
         let state = &session_view.projection.state;
         let raw_state = state.state.as_ref();
+        let display = &session_view.projection.display;
         let tool_names = tool_names_from_state(raw_state);
+        let widget_keys = display.widgets.keys().cloned().collect::<Vec<_>>();
+        let mode_tags = mode_indicators(&tool_names, &widget_keys);
         let extra_status_lines = inspector_extra_status_lines(raw_state);
         let git_info = probe_git_inspector(&cwd);
-        let display = &session_view.projection.display;
         let display_title = display
             .title
             .as_deref()
@@ -607,7 +701,9 @@ pub(crate) fn render_inspector(
                 .take(12)
                 .map(subagent_payload_summary)
                 .collect::<Vec<_>>(),
+            session_view.subagent_subscription.as_wire().to_owned(),
             tool_names,
+            mode_tags,
             display_title,
             display_statuses,
             display_widgets,
@@ -620,6 +716,7 @@ pub(crate) fn render_inspector(
     let path = cwd.display().to_string();
     let path = truncate_subagent_text(&path, 44);
     let refresh_session = session.clone();
+    let subscription_session = session.clone();
     let steering_session = session.clone();
     let follow_up_session = session.clone();
     let interrupt_session = session.clone();
@@ -704,6 +801,15 @@ pub(crate) fn render_inspector(
                         .text_xs()
                         .text_color(theme.muted_foreground),
                 )
+                .when(!mode_tags.is_empty(), |section| {
+                    section.child(
+                        h_flex().w_full().flex_wrap().gap_1().children(
+                            mode_tags
+                                .into_iter()
+                                .map(|mode| Tag::secondary().small().child(mode)),
+                        ),
+                    )
+                })
                 .when_some(context, |section, value| {
                     section.child(
                         v_flex()
@@ -982,17 +1088,35 @@ pub(crate) fn render_inspector(
                                 .text_color(theme.muted_foreground),
                         )
                         .child(
-                            Button::new("inspector-agents-refresh")
-                                .label("Refresh")
-                                .small()
-                                .ghost()
-                                .disabled(!connected)
-                                .on_click(window.listener_for(
-                                    &refresh_session,
-                                    |this, _: &ClickEvent, _window, cx| {
-                                        this.refresh_subagents(cx);
-                                    },
-                                )),
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Button::new("inspector-agents-subscription")
+                                        .label(format!("Subscription: {subagent_subscription}"))
+                                        .small()
+                                        .ghost()
+                                        .disabled(!connected)
+                                        .on_click(window.listener_for(
+                                            &subscription_session,
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.cycle_subagent_subscription(cx);
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    Button::new("inspector-agents-refresh")
+                                        .label("Refresh")
+                                        .small()
+                                        .ghost()
+                                        .disabled(!connected)
+                                        .on_click(window.listener_for(
+                                            &refresh_session,
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.refresh_subagents(cx);
+                                            },
+                                        )),
+                                ),
                         ),
                 )
                 .when(
@@ -1041,6 +1165,7 @@ pub(crate) fn render_inspector(
                 ),
         )
         .when(!tool_names.is_empty(), |parent| {
+            let grouped = group_tool_names(&tool_names);
             parent.child(Separator::horizontal()).child(
                 v_flex()
                     .w_full()
@@ -1068,16 +1193,46 @@ pub(crate) fn render_inspector(
                             .into_any_element()
                     })
                     .when(tool_names.len() <= 8 || tools_expanded, |section| {
-                        let hidden = tool_names.len().saturating_sub(12);
+                        let visible_builtin = grouped.builtin.len().min(12);
+                        let visible_extensions = grouped.extensions.len().min(12);
+                        let hidden = tool_names
+                            .len()
+                            .saturating_sub(visible_builtin + visible_extensions);
                         section
-                            .child(
-                                h_flex().w_full().flex_wrap().gap_1().children(
-                                    tool_names
-                                        .iter()
-                                        .take(12)
-                                        .map(|name| Tag::secondary().small().child(name.clone())),
-                                ),
-                            )
+                            .when(!grouped.builtin.is_empty(), |section| {
+                                section.child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("Builtin")
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(h_flex().w_full().flex_wrap().gap_1().children(
+                                            grouped.builtin.iter().take(12).map(|name| {
+                                                Tag::secondary().small().child(name.clone())
+                                            }),
+                                        )),
+                                )
+                            })
+                            .when(!grouped.extensions.is_empty(), |section| {
+                                section.child(
+                                    v_flex()
+                                        .w_full()
+                                        .gap_1()
+                                        .child(
+                                            Label::new("Extensions / MCP")
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(h_flex().w_full().flex_wrap().gap_1().children(
+                                            grouped.extensions.iter().take(12).map(|name| {
+                                                Tag::secondary().small().child(name.clone())
+                                            }),
+                                        )),
+                                )
+                            })
                             .when(hidden > 0, |section| {
                                 section.child(
                                     Label::new(format!("+{hidden} more"))
@@ -1150,7 +1305,7 @@ impl Render for WorkspaceView {
                     v_flex()
                         .w(px(260.))
                         .h_full()
-                        .p_3()
+                        .p_2()
                         .gap_2()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
@@ -1192,12 +1347,13 @@ impl Render for WorkspaceView {
                             v_flex()
                                 .w_full()
                                 .flex_1()
-                                .gap_3()
+                                .gap_2()
                                 .overflow_y_scrollbar()
                                 .children(groups.into_iter().enumerate().map(
                                     |(group_ix, (cwd, entries))| {
                                         let cwd_for_add = cwd.clone();
                                         let display = workspace_display_name(&cwd);
+                                        let group_status = workspace_status_for_entries(&entries);
                                         let path_label = truncate_subagent_text(
                                             &cwd.display().to_string(),
                                             36,
@@ -1232,6 +1388,12 @@ impl Render for WorkspaceView {
                                                             ),
                                                     )
                                                     .child(
+                                                        group_status
+                                                            .tag()
+                                                            .small()
+                                                            .child(group_status.label()),
+                                                    )
+                                                    .child(
                                                         Button::new((
                                                             "workspace-add-session",
                                                             group_ix,
@@ -1256,6 +1418,7 @@ impl Render for WorkspaceView {
                                             .children(entries.into_iter().map(|entry| {
                                                 let selected = entry.ix == active;
                                                 let ix = entry.ix;
+                                                let phase_label = run_phase_label(&entry.phase);
                                                 let attention_color = match entry.attention {
                                                     RailAttention::Quiet => None,
                                                     RailAttention::Active => Some(theme.info),
@@ -1270,13 +1433,13 @@ impl Render for WorkspaceView {
                                                     .gap_1()
                                                     .px_2()
                                                     .py_1()
-                                                    .rounded_md()
+                                                    .rounded_sm()
                                                     .cursor_pointer()
                                                     .when(selected, |row| {
-                                                        row.bg(theme.sidebar_accent).rounded_md()
+                                                        row.bg(theme.sidebar_accent).rounded_sm()
                                                     })
                                                     .when(!selected, |row| {
-                                                        row.rounded_md()
+                                                        row.rounded_sm()
                                                             .hover(|row| row.bg(theme.secondary))
                                                     })
                                                     .child(
@@ -1308,9 +1471,9 @@ impl Render for WorkspaceView {
                                                             ),
                                                     )
                                                     .child(
-                                                        phase_tag(&entry.phase)
+                                                        status_pill_for_phase(&entry.phase)
                                                             .small()
-                                                            .child(entry.phase),
+                                                            .child(phase_label),
                                                     )
                                                     .child(
                                                         Button::new(("workspace-close-session", ix))

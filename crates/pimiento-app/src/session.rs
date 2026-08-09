@@ -76,6 +76,13 @@ pub(crate) struct SessionView {
     pub(crate) rename_input: gpui::Entity<InputState>,
     pub(crate) pending_rename_sync: Option<String>,
     pub(crate) refocus_rename_input: bool,
+    /// Optional instructions for an explicit `compact` RPC.
+    pub(crate) compact_open: bool,
+    pub(crate) compact_input: gpui::Entity<InputState>,
+    pub(crate) pending_compact_sync: bool,
+    pub(crate) refocus_compact_input: bool,
+    /// Confirmation surface before handing the authoritative session to TUI.
+    pub(crate) handoff_confirm_open: bool,
     /// Branch-into-new-tab message picker (`get_branch_messages`).
     pub(crate) branch_picker: Option<Vec<BranchMessageChoice>>,
     pub(crate) branch_picker_selected: usize,
@@ -97,11 +104,14 @@ pub(crate) struct SessionView {
     pub(crate) omp_roles: Vec<OmpRole>,
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
+    pub(crate) subagent_subscription: SubagentSubscriptionLevel,
     pub(crate) selected_subagent_id: Option<String>,
     pub(crate) subagent_tail_next_byte: Option<u64>,
     pub(crate) subagent_tail_lines: Vec<String>,
     pub(crate) subagent_drawer_status: String,
     pub(crate) pending_revert: Option<PendingRevert>,
+    /// Experimental OMP host-tool bridge. Disabled unless explicitly opted in.
+    pub(crate) host_bridge: HostBridgeState,
     pub(crate) palette_open: bool,
     pub(crate) about_open: bool,
     /// Mirrors workspace inspector visibility so the session toolbar can
@@ -188,6 +198,13 @@ impl SessionView {
                 .placeholder("Session name")
                 .submit_on_enter(true)
         });
+        let compact_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 5)
+                .placeholder("Optional instructions for the compacted context")
+                .submit_on_enter(true)
+        });
 
         let subscriptions = vec![
             cx.subscribe(&composer, Self::on_composer_event),
@@ -195,6 +212,7 @@ impl SessionView {
             cx.subscribe(&palette_search, Self::on_palette_search_event),
             cx.subscribe(&dialog_input, Self::on_dialog_input_event),
             cx.subscribe(&rename_input, Self::on_rename_input_event),
+            cx.subscribe(&compact_input, Self::on_compact_input_event),
         ];
 
         let initial_len = initial_projection.transcript.len();
@@ -235,6 +253,11 @@ impl SessionView {
             rename_input,
             pending_rename_sync: None,
             refocus_rename_input: false,
+            compact_open: false,
+            compact_input,
+            pending_compact_sync: false,
+            refocus_compact_input: false,
+            handoff_confirm_open: false,
             branch_picker: None,
             branch_picker_selected: 0,
             login_picker: None,
@@ -250,11 +273,13 @@ impl SessionView {
             at_mention_candidates: Vec::new(),
             omp_roles: load_omp_roles_from_home(home_dir().as_deref()),
             subagent_snapshots: Vec::new(),
+            subagent_subscription: SubagentSubscriptionLevel::Events,
             selected_subagent_id: None,
             subagent_tail_next_byte: None,
             subagent_tail_lines: Vec::new(),
             subagent_drawer_status: String::new(),
             pending_revert: None,
+            host_bridge: HostBridgeState::from_environment(),
             palette_open: false,
             about_open: false,
             inspector_open: false,
@@ -308,6 +333,7 @@ impl SessionView {
                         ClientEvent::Frame(frame) => {
                             let is_model_changed = frame.raw.get("type").and_then(|v| v.as_str())
                                 == Some("model_changed");
+                            this.observe_host_bridge_frame(frame);
                             this.projection.apply(frame);
                             this.sync_pending_dialogs(cx);
                             if is_model_changed {
@@ -321,6 +347,7 @@ impl SessionView {
                                 .unwrap_or_else(|| format!("exit code {:?}", info.exit_code));
                             this.projection.mark_dead(reason);
                             this.client = None;
+                            this.host_bridge.reset();
                             this.dialog_timeout_gens.clear();
                             this.dialog_input_bound_id = None;
                             this.status_message = format!(
@@ -353,6 +380,7 @@ impl SessionView {
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
+        self.host_bridge.reset();
         self.version_gate_notice = None;
         self.launcher_phase = LauncherPhase::Connecting;
         if launcher_mode {
@@ -418,6 +446,7 @@ impl SessionView {
             Ok((client, projection, status, models, version_gate_notice)) => {
                 self.available_models = models;
                 self.projection = projection;
+                self.subagent_subscription = SubagentSubscriptionLevel::Events;
                 self.omp_version = Some(status.clone());
                 self.version_gate_notice = version_gate_notice;
                 self.status_message = status;
@@ -499,8 +528,11 @@ impl SessionView {
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
+        self.host_bridge.reset();
         self.model_picker_open = false;
         self.thinking_picker_open = false;
+        self.compact_open = false;
+        self.handoff_confirm_open = false;
         self.close_slash_menu();
         self.clear_composer = true;
         if let Some(cwd) = self.session_cwd.take() {
@@ -748,6 +780,42 @@ impl SessionView {
         .detach();
     }
 
+    pub(crate) fn cycle_subagent_subscription(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let next = next_subagent_subscription_level(&self.subagent_subscription);
+        let next_for_command = next.clone();
+        cx.spawn(async move |view, cx| {
+            let result = client
+                .send(RpcCommandBody::SetSubagentSubscription {
+                    level: next_for_command,
+                })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                match result {
+                    Ok(response) if response.success => {
+                        this.subagent_subscription = next;
+                        this.subagent_drawer_status = format!(
+                            "Agent event subscription: {}",
+                            this.subagent_subscription.as_wire()
+                        );
+                    }
+                    Ok(response) => {
+                        this.subagent_drawer_status = response
+                            .error
+                            .unwrap_or_else(|| "set_subagent_subscription failed".to_owned());
+                    }
+                    Err(error) => {
+                        this.subagent_drawer_status = format!("set_subagent_subscription: {error}");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn apply_subagent_snapshots(
         &mut self,
         snapshots: Vec<serde_json::Value>,
@@ -945,6 +1013,54 @@ impl SessionView {
                     });
                 }
             }
+        })
+        .detach();
+    }
+
+    pub(crate) fn share_session(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Connect to OMP, then run /share.".to_owned(),
+            ));
+            cx.notify();
+            return;
+        };
+        let streaming_behavior =
+            composer_uses_steer(&self.projection.run_phase).then_some(StreamingBehavior::Steer);
+        self.projection.push_user_message("/share".to_owned());
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            let result = client
+                .send(RpcCommandBody::Prompt {
+                    message: "/share".to_owned(),
+                    images: None,
+                    streaming_behavior,
+                })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                match result {
+                    Ok(response) if response.success => {
+                        this.projection.transcript.push(TranscriptEntry::Notice(
+                            "Share requested via /share; OMP will report the result.".to_owned(),
+                        ));
+                    }
+                    Ok(response) => {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: response
+                                .error
+                                .unwrap_or_else(|| "/share prompt failed".to_owned()),
+                            code: Some("share".to_owned()),
+                        });
+                    }
+                    Err(error) => {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("/share: {error}"),
+                            code: Some("share".to_owned()),
+                        });
+                    }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -2181,6 +2297,7 @@ impl SessionView {
         self.client.is_some()
             && phase_allows_send(&self.projection.run_phase)
             && self.projection.pending_dialogs.is_empty()
+            && !self.host_bridge.has_pending_requests()
     }
 
     /// Honest reason when Send/Steer is disabled (Doctrine: disabled-with-reason).
@@ -2190,6 +2307,9 @@ impl SessionView {
         }
         if !self.projection.pending_dialogs.is_empty() {
             return Some("Answer the dialog above first");
+        }
+        if self.host_bridge.has_pending_requests() {
+            return Some("Resolve the host request above");
         }
         if self.client.is_none() {
             return Some("Not connected to omp");
@@ -2386,6 +2506,7 @@ impl SessionView {
         self.client.is_some()
             && matches!(self.projection.run_phase, RunPhase::Streaming)
             && self.projection.pending_dialogs.is_empty()
+            && !self.host_bridge.has_pending_requests()
             && (!self.composer.read(cx).value().trim().is_empty()
                 || !self.pending_attachments.is_empty())
     }
@@ -2666,6 +2787,8 @@ impl SessionView {
         self.about_open = false;
         self.branch_picker = None;
         self.login_picker = None;
+        self.compact_open = false;
+        self.handoff_confirm_open = false;
         self.rename_open = true;
         self.pending_rename_sync = Some(current);
         self.refocus_rename_input = true;
@@ -2760,6 +2883,141 @@ impl SessionView {
         }
     }
 
+    pub(crate) fn open_compact_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Compact requires a live session".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        self.palette_open = false;
+        self.about_open = false;
+        self.rename_open = false;
+        self.branch_picker = None;
+        self.login_picker = None;
+        self.handoff_confirm_open = false;
+        self.compact_open = true;
+        self.pending_compact_sync = true;
+        self.refocus_compact_input = true;
+        cx.notify();
+    }
+
+    pub(crate) fn close_compact_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.compact_open {
+            self.compact_open = false;
+            self.pending_compact_sync = false;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_compact(&mut self, cx: &mut Context<Self>) {
+        let instructions = self.compact_input.read(cx).value().trim().to_owned();
+        let custom_instructions = (!instructions.is_empty()).then_some(instructions);
+        self.compact_open = false;
+        self.refocus_composer = true;
+        self.request_compact(custom_instructions, cx);
+    }
+
+    pub(crate) fn on_compact_input_event(
+        &mut self,
+        _input: gpui::Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.compact_open {
+            return;
+        }
+        if let InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        } = event
+        {
+            self.confirm_compact(cx);
+        }
+    }
+
+    pub(crate) fn open_handoff_confirmation(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Handoff requires a live session".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        self.palette_open = false;
+        self.about_open = false;
+        self.rename_open = false;
+        self.compact_open = false;
+        self.branch_picker = None;
+        self.login_picker = None;
+        self.handoff_confirm_open = true;
+        cx.notify();
+    }
+
+    pub(crate) fn close_handoff_confirmation(&mut self, cx: &mut Context<Self>) {
+        if self.handoff_confirm_open {
+            self.handoff_confirm_open = false;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_handoff(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            self.close_handoff_confirmation(cx);
+            return;
+        };
+        self.handoff_confirm_open = false;
+        self.refocus_composer = true;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Handoff {
+                    custom_instructions: None,
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let detail = pretty_rpc_data(resp.data.as_ref());
+                    let _ = view.update(cx, |this, cx| {
+                        let mut message =
+                            "Handoff accepted by OMP. Continue this session in the TUI.".to_owned();
+                        if let Some(detail) = detail {
+                            message.push('\n');
+                            message.push_str(&detail);
+                        }
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(message));
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "handoff failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("handoff".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("handoff: {error}"),
+                            code: Some("handoff".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn take_pending_workspace_palette(&mut self) -> Option<PaletteActionId> {
         self.pending_workspace_palette.take()
     }
@@ -2773,6 +3031,8 @@ impl SessionView {
         if self.palette_open {
             self.about_open = false;
             self.rename_open = false;
+            self.compact_open = false;
+            self.handoff_confirm_open = false;
             self.branch_picker = None;
             self.login_picker = None;
             self.palette_selected = 0;
@@ -2802,6 +3062,8 @@ impl SessionView {
     pub(crate) fn show_about(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
         self.rename_open = false;
+        self.compact_open = false;
+        self.handoff_confirm_open = false;
         self.branch_picker = None;
         self.login_picker = None;
         self.about_open = true;
@@ -2912,6 +3174,7 @@ impl SessionView {
             PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
             PaletteActionId::ToggleFast => self.toggle_fast_mode(cx),
             PaletteActionId::ExportHtml => self.export_html(cx),
+            PaletteActionId::ShareSession => self.share_session(cx),
             PaletteActionId::RenameSession => self.rename_session(cx),
             PaletteActionId::AbortRun => self.do_abort(cx),
             PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
@@ -2924,7 +3187,10 @@ impl SessionView {
             }
             PaletteActionId::CycleModel => self.cycle_model(cx),
             PaletteActionId::CycleThinking => self.cycle_thinking(cx),
-            PaletteActionId::Compact => self.request_compact(cx),
+            PaletteActionId::Compact => self.open_compact_dialog(cx),
+            PaletteActionId::SessionStats => self.fetch_session_stats(cx),
+            PaletteActionId::FreshSession => self.request_fresh_session(cx),
+            PaletteActionId::Handoff => self.open_handoff_confirmation(cx),
             PaletteActionId::AbortRetry => self.request_abort_retry(cx),
             PaletteActionId::AbortAndPrompt => self.request_abort_and_prompt(cx),
             PaletteActionId::BranchSession => self.open_branch_picker(cx),
@@ -3124,14 +3390,18 @@ impl SessionView {
         self.set_thinking_level(&next, cx);
     }
 
-    pub(crate) fn request_compact(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_compact(
+        &mut self,
+        custom_instructions: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(client) = self.client.clone() else {
             return;
         };
         cx.spawn(async move |view, cx| {
             match client
                 .send(RpcCommandBody::Compact {
-                    custom_instructions: None,
+                    custom_instructions,
                 })
                 .await
             {
@@ -3151,6 +3421,105 @@ impl SessionView {
                         this.projection.transcript.push(TranscriptEntry::Error {
                             message: format!("compact: {error}"),
                             code: Some("compact".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn fetch_session_stats(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Session stats require a live session".into(),
+            ));
+            cx.notify();
+            return;
+        };
+        cx.spawn(
+            async move |view, cx| match client.send(RpcCommandBody::GetSessionStats).await {
+                Ok(resp) if resp.success => {
+                    let detail = pretty_rpc_data(resp.data.as_ref())
+                        .unwrap_or_else(|| "(no stats payload returned)".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(format!("Session stats\n{detail}")));
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "get_session_stats failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("get_session_stats".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("get_session_stats: {error}"),
+                            code: Some("get_session_stats".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    pub(crate) fn request_fresh_session(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.projection.run_phase, RunPhase::Idle)
+            || !self.projection.pending_dialogs.is_empty()
+        {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Fresh session is available when the current session is idle".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "Fresh session requires a live session".into(),
+            ));
+            cx.notify();
+            return;
+        };
+        self.projection.push_user_message("/fresh".into());
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Prompt {
+                    message: "/fresh".into(),
+                    images: None,
+                    streaming_behavior: None,
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "/fresh failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("fresh".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("/fresh: {error}"),
+                            code: Some("fresh".into()),
                         });
                         cx.notify();
                     });
@@ -3596,6 +3965,43 @@ impl SessionView {
         false
     }
 
+    pub(crate) fn handle_compact_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.compact_open {
+            return false;
+        }
+        if !event.keystroke.modifiers.modified()
+            && matches!(event.keystroke.key.as_str(), "escape" | "esc")
+        {
+            self.close_compact_dialog(cx);
+            return true;
+        }
+        // Let printable keys and Enter reach the focused instructions Input.
+        false
+    }
+
+    pub(crate) fn handle_handoff_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.handoff_confirm_open {
+            return false;
+        }
+        if event.keystroke.modifiers.modified() {
+            return true;
+        }
+        match event.keystroke.key.to_ascii_lowercase().as_str() {
+            "enter" | "return" | "y" => self.confirm_handoff(cx),
+            "escape" | "esc" | "n" => self.close_handoff_confirmation(cx),
+            _ => {}
+        }
+        true
+    }
+
     pub(crate) fn handle_branch_picker_key(
         &mut self,
         event: &KeyDownEvent,
@@ -3688,19 +4094,10 @@ impl SessionView {
             .as_deref()
             .unwrap_or(self.launcher_cwd.as_path());
         let label = projection_session_name(&self.projection, cwd);
-        let phase = match self.projection.run_phase {
-            RunPhase::Idle => "idle",
-            RunPhase::Streaming => "stream",
-            RunPhase::AwaitingResume => "await",
-            RunPhase::Compacting => "compact",
-            RunPhase::Retrying => "retry",
-            RunPhase::Restarting => "restart",
-            RunPhase::Dead => "dead",
-        };
         RailEntry {
             ix,
             label,
-            phase: phase.to_owned(),
+            phase: self.projection.run_phase.clone(),
             cwd: cwd.to_owned(),
             attention: self.rail_attention(),
             session_file: self
@@ -3751,6 +4148,7 @@ impl SessionView {
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
+        self.host_bridge.reset();
         self.running_tool_started.clear();
         self.running_tool_timer.take();
         self.dialog_timeout_gens.clear();
@@ -3888,16 +4286,10 @@ pub(crate) fn dialog_key_action(
 }
 
 pub(crate) fn select_dialog_options(dialog: &UiDialog) -> Vec<String> {
-    dialog
-        .payload
-        .get("options")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default()
+    dialog_primary_options(dialog)
+        .into_iter()
+        .map(|option| option.value)
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4119,9 +4511,21 @@ impl Render for SessionView {
                 input.set_value(value, window, cx);
             });
         }
+        if self.pending_compact_sync {
+            self.pending_compact_sync = false;
+            self.compact_input.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
         if self.refocus_rename_input {
             self.refocus_rename_input = false;
             self.rename_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        if self.refocus_compact_input {
+            self.refocus_compact_input = false;
+            self.compact_input.update(cx, |input, cx| {
                 input.focus(window, cx);
             });
         }
@@ -4146,15 +4550,17 @@ impl Render for SessionView {
         }
 
         let theme = cx.theme().clone();
-        let toolbar_status = if self.projection.pending_dialogs.is_empty() {
-            StatusKind::from_run_phase(&self.projection.run_phase)
-        } else {
+        let has_pending_approval =
+            !self.projection.pending_dialogs.is_empty() || self.host_bridge.has_pending_requests();
+        let toolbar_status = if has_pending_approval {
             StatusKind::Approval
-        };
-        let toolbar_status_tag = if self.projection.pending_dialogs.is_empty() {
-            status_pill_for_phase(&self.projection.run_phase)
         } else {
+            StatusKind::from_run_phase(&self.projection.run_phase)
+        };
+        let toolbar_status_tag = if has_pending_approval {
             StatusKind::Approval.tag()
+        } else {
+            status_pill_for_phase(&self.projection.run_phase)
         };
         let queued_message_count = self
             .projection
@@ -4181,6 +4587,8 @@ impl Render for SessionView {
         }
         let context_label = context_percent_label(self.projection.state.context.as_ref())
             .map(|context| format!("ctx:{context}"));
+        let show_context_high = matches!(self.projection.run_phase, RunPhase::Idle)
+            && context_high(self.projection.state.context.as_ref());
         let tokens_label = tokens_per_second_label(self.projection.state.tokens.as_ref())
             .map(|tokens| format!("{tokens}/s"));
         let compacting = matches!(self.projection.run_phase, RunPhase::Compacting);
@@ -4243,6 +4651,8 @@ impl Render for SessionView {
         let palette_selected = self.palette_selected;
         let pending_revert = self.pending_revert.clone();
         let transcript_empty = self.projection.transcript.is_empty();
+        let subagent_strip =
+            subagent_strip_rows(&self.subagent_snapshots, &self.projection.subagents_raw);
         let display_statuses = display_status_lines(&self.projection.display);
         let display_widgets = self
             .projection
@@ -4265,7 +4675,9 @@ impl Render for SessionView {
             .size_full()
             .relative()
             .capture_key_down(cx.listener(|this, event, window, cx| {
-                let handled = this.handle_about_key(event, cx)
+                let handled = this.handle_handoff_key(event, cx)
+                    || this.handle_compact_key(event, cx)
+                    || this.handle_about_key(event, cx)
                     || this.handle_rename_key(event, cx)
                     || this.handle_branch_picker_key(event, cx)
                     || this.handle_login_picker_key(event, cx)
@@ -4475,6 +4887,36 @@ impl Render for SessionView {
                                 ),
                         )
                     })
+                    .when(show_context_high, |parent| {
+                        parent.child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .py_1()
+                                .gap_2()
+                                .bg(theme.secondary)
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .text_xs()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_color(theme.warning)
+                                        .child("Context is high. Compact before a long turn."),
+                                )
+                                .child(
+                                    Button::new("context-high-compact")
+                                        .label("Compact…")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.open_compact_dialog(cx);
+                                            },
+                                        )),
+                                ),
+                        )
+                    })
                     .when(show_activity_banner, |parent| {
                         parent.child(
                             div()
@@ -4493,6 +4935,42 @@ impl Render for SessionView {
                                 }),
                         )
                     })
+                    .when(!subagent_strip.is_empty(), |parent| {
+                        parent.child(
+                            h_flex()
+                                .w_full()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_1()
+                                .px_3()
+                                .py_1()
+                                .border_b_1()
+                                .border_color(theme.border)
+                                .bg(theme.sidebar)
+                                .child(
+                                    Label::new("Agents")
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .children(subagent_strip.into_iter().enumerate().map(
+                                    |(ix, (_id, summary))| {
+                                        Button::new(("subagent-strip-agent", ix))
+                                            .label(truncate_subagent_text(&summary, 68))
+                                            .small()
+                                            .ghost()
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.request_inspector_focus(
+                                                        PaletteActionId::ToggleAgents,
+                                                        cx,
+                                                    );
+                                                },
+                                            ))
+                                    },
+                                )),
+                        )
+                    })
                     .child({
                         self.sync_transcript_list();
                         let list_state = self.transcript_list.clone();
@@ -4508,9 +4986,14 @@ impl Render for SessionView {
                                         this.projection.transcript.get(ix).map_or_else(
                                             || div().into_any_element(),
                                             |e| {
+                                                let tool_group = tool_group_position(
+                                                    &this.projection.transcript,
+                                                    ix,
+                                                );
                                                 render_entry(
                                                     ix,
                                                     e,
+                                                    tool_group,
                                                     &this.expanded_tools,
                                                     &this.running_tool_started,
                                                     cx,
@@ -4615,6 +5098,51 @@ impl Render for SessionView {
                                     ),
                             )
                     }))
+                    .when(!self.host_bridge.pending_calls.is_empty(), |parent| {
+                        parent.child(
+                            v_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .bg(theme.secondary)
+                                .border_t_1()
+                                .border_color(theme.border)
+                                .children(
+                                    self.host_bridge
+                                        .pending_calls
+                                        .iter()
+                                        .enumerate()
+                                        .map(|(index, call)| {
+                                            render_host_tool_call(call, index, cx)
+                                        }),
+                                ),
+                        )
+                    })
+                    .when(
+                        !self.host_bridge.pending_uri_requests.is_empty(),
+                        |parent| {
+                            parent.child(
+                                v_flex()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .gap_2()
+                                    .bg(theme.secondary)
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .children(
+                                        self.host_bridge
+                                            .pending_uri_requests
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(index, request)| {
+                                                render_host_uri_request(request, index, cx)
+                                            }),
+                                    ),
+                            )
+                        },
+                    )
                     .when(!self.projection.pending_dialogs.is_empty(), |parent| {
                         parent.child(
                             v_flex()
@@ -4655,7 +5183,7 @@ impl Render for SessionView {
                                 let paths = paths.paths().to_vec();
                                 this.add_attachment_paths(&paths, cx);
                             }))
-                            .when(!self.projection.pending_dialogs.is_empty(), |band| {
+                            .when(has_pending_approval, |band| {
                                 band.opacity(0.55)
                             })
                             .child(
@@ -5511,6 +6039,159 @@ impl Render for SessionView {
                         ),
                 )
             })
+            .when(self.compact_open, |parent| {
+                parent.child(
+                    div()
+                        .id("compact-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_compact_dialog(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("compact-panel")
+                                .w(px(420.))
+                                .gap_3()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Compact context")
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new(
+                                        "Optionally tell OMP what the compacted context must preserve.",
+                                    )
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    Input::new(&self.compact_input)
+                                        .appearance(true)
+                                        .focus_bordered(true),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Label::new("Enter compacts · Shift+Enter adds a line")
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .child(
+                                                    Button::new("compact-cancel")
+                                                        .label("Cancel")
+                                                        .ghost()
+                                                        .on_click(cx.listener(
+                                                            |this, _: &ClickEvent, _w, cx| {
+                                                                this.close_compact_dialog(cx);
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("compact-confirm")
+                                                        .label("Compact")
+                                                        .primary()
+                                                        .on_click(cx.listener(
+                                                            |this, _: &ClickEvent, _w, cx| {
+                                                                this.confirm_compact(cx);
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                )
+            })
+            .when(self.handoff_confirm_open, |parent| {
+                parent.child(
+                    div()
+                        .id("handoff-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_handoff_confirmation(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("handoff-panel")
+                                .w(px(420.))
+                                .gap_3()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Handoff to TUI?")
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new(
+                                        "OMP will hand off this authoritative session. Continue the work in its terminal UI.",
+                                    )
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("handoff-cancel")
+                                                .label("Cancel")
+                                                .ghost()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.close_handoff_confirmation(cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new("handoff-confirm")
+                                                .label("Handoff")
+                                                .primary()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.confirm_handoff(cx);
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        ),
+                )
+            })
             .when(self.rename_open, |parent| {
                 parent.child(
                     div()
@@ -5732,6 +6413,72 @@ impl Render for SessionView {
 }
 
 // ── transcript rows ───────────────────────────────────────────────────────
+
+pub(crate) fn next_subagent_subscription_level(
+    current: &SubagentSubscriptionLevel,
+) -> SubagentSubscriptionLevel {
+    match current {
+        SubagentSubscriptionLevel::Off => SubagentSubscriptionLevel::Progress,
+        SubagentSubscriptionLevel::Progress => SubagentSubscriptionLevel::Events,
+        SubagentSubscriptionLevel::Events | SubagentSubscriptionLevel::Unknown(_) => {
+            SubagentSubscriptionLevel::Off
+        }
+    }
+}
+
+pub(crate) fn subagent_strip_rows(
+    snapshots: &[serde_json::Value],
+    raw_events: &[serde_json::Value],
+) -> Vec<(String, String)> {
+    if !snapshots.is_empty() {
+        return snapshots
+            .iter()
+            .enumerate()
+            .map(|(ix, snapshot)| {
+                let id = subagent_snapshot_id(snapshot)
+                    .map_or_else(|| format!("agent-{}", ix + 1), str::to_owned);
+                (
+                    id,
+                    truncate_subagent_text(&subagent_snapshot_summary(snapshot), 80),
+                )
+            })
+            .take(8)
+            .collect();
+    }
+
+    let mut seen = HashSet::new();
+    raw_events
+        .iter()
+        .rev()
+        .enumerate()
+        .filter_map(|(ix, event)| {
+            let id = subagent_payload_id(event)
+                .map_or_else(|| format!("agent-event-{}", ix + 1), str::to_owned);
+            seen.insert(id.clone()).then(|| {
+                (
+                    id,
+                    truncate_subagent_text(&subagent_payload_summary(event), 80),
+                )
+            })
+        })
+        .take(8)
+        .collect()
+}
+
+pub(crate) fn subagent_payload_id(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("subagentId")
+        .or_else(|| payload.get("agentId"))
+        .or_else(|| payload.get("id"))
+        .or_else(|| payload.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("subagent")
+                .and_then(|subagent| subagent.get("id"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
 
 #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
 pub(crate) fn subagent_payload_summary(payload: &serde_json::Value) -> String {
@@ -6022,6 +6769,10 @@ pub(crate) fn try_connect_omp(
         Err(e) => return Err(format!("OMP connect failed: {e}")),
     };
 
+    let host_bridge_notice = register_host_bridge(&client)
+        .err()
+        .map(|error| format!("Host bridge unavailable: {error}"));
+
     let get_state = smol::block_on(async { client.send(RpcCommandBody::GetState).await });
     let avail = smol::block_on(async { client.send(RpcCommandBody::GetAvailableCommands).await });
     let _sub = smol::block_on(async {
@@ -6059,7 +6810,15 @@ pub(crate) fn try_connect_omp(
     let models = Vec::new();
 
     let status = discovered.version_text.trim().to_owned();
-    let version_gate_notice = format_version_gate_notice(discovered.version);
+    let version_gate_notice = match (
+        format_version_gate_notice(discovered.version),
+        host_bridge_notice,
+    ) {
+        (Some(version), Some(host)) => Some(format!("{version} · {host}")),
+        (Some(version), None) => Some(version),
+        (None, Some(host)) => Some(host),
+        (None, None) => None,
+    };
 
     Ok((client, proj, status, models, version_gate_notice))
 }
@@ -6071,4 +6830,13 @@ pub(crate) fn format_version_gate_notice(version: OmpVersion) -> Option<String> 
             "Pimiento was tested with omp {MIN_SUPPORTED}+; you have {version} — unknown events will still render"
         )),
     }
+}
+
+pub(crate) fn context_high(context: Option<&serde_json::Value>) -> bool {
+    context_percent(context).is_some_and(|percent| percent >= 80.0)
+}
+
+pub(crate) fn pretty_rpc_data(data: Option<&serde_json::Value>) -> Option<String> {
+    data.filter(|value| !value.is_null())
+        .and_then(|value| serde_json::to_string_pretty(value).ok())
 }

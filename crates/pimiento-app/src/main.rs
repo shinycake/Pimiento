@@ -36,7 +36,9 @@ use omp_rpc_client::{
     discovery::{
         DiscoveryInputs, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport, discover,
     },
-    frames::{InterruptMode, QueueMode, RpcCommandBody, SubagentSubscriptionLevel},
+    frames::{
+        InterruptMode, QueueMode, RpcCommandBody, StreamingBehavior, SubagentSubscriptionLevel,
+    },
 };
 use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
@@ -50,6 +52,7 @@ use serde::{Deserialize, Serialize};
 
 mod app_state;
 mod git_status;
+mod host_bridge;
 mod models;
 mod palette;
 mod session;
@@ -63,6 +66,8 @@ mod workspace;
 use app_state::*;
 #[allow(clippy::wildcard_imports)]
 use git_status::*;
+#[allow(clippy::wildcard_imports)]
+use host_bridge::*;
 #[allow(clippy::wildcard_imports)]
 use models::*;
 #[allow(clippy::wildcard_imports)]
