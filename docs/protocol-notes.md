@@ -182,6 +182,11 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back when the same agent is opened again for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied. The modal remains visible while loading and is dismissed by backdrop click, **Close**, or Esc.
 - PageUp/PageDown/Home/End navigate the transcript `ListState`; PageUp/PageDown/Home leave tail-follow mode and End re-enables it at the transcript tail. Keys are ignored while the composer or model-search input is focused so Home/End still move the caret.
 
+## Rich slash-command discovery — 2026-08-09
+
+- OMP 17.2.11 publishes slash commands dynamically through both `available_commands_update.commands` and `get_available_commands.data.commands`. Entries may include `name`, `aliases`, `description`, `input.hint`, `source`, and nested `subcommands[] { name, description, usage? }`.
+- Pimiento treats this metadata as an open catalog rather than a fixed enum. Completion supports top-level aliases and a second subcommand stage while preserving unknown future `source` values. Selecting a suggestion only fills the composer; execution still requires an explicit send so destructive extension/custom commands are never triggered by menu navigation.
+
 ## Compaction and retry fallback UX — 2026-08-08
 
 - `retry_fallback_applied` carries `{ from, to, role }`; `retry_fallback_succeeded` carries `{ model, role }`. Pimiento reads these only from the retained raw event JSON, emits human-readable retry rows, and omits missing values without guessing.

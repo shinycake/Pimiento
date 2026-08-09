@@ -983,13 +983,26 @@ fn code_block_copy_ids_are_stable_and_distinct() {
 }
 
 #[test]
-fn slash_commands_normalize_names_and_wrapper_shapes() {
+fn slash_commands_parse_full_live_metadata_shape() {
     let raw = serde_json::json!({
         "commands": [
             {
-                "name": "help",
-                "description": " Show help ",
-                "aliases": ["h", "/help", "h"]
+                "name": "mcp",
+                "description": " Manage MCP servers ",
+                "aliases": ["servers", "/mcp", "servers"],
+                "input": {"hint": " server name "},
+                "subcommands": [
+                    {
+                        "name": "reconnect",
+                        "description": " Reconnect a server ",
+                        "usage": " <server> "
+                    },
+                    {
+                        "name": "list",
+                        "description": "List servers"
+                    }
+                ],
+                "source": "extension"
             },
             "status"
         ]
@@ -999,14 +1012,31 @@ fn slash_commands_normalize_names_and_wrapper_shapes() {
         commands,
         vec![
             SlashCommand {
-                name: "/help".into(),
-                description: "Show help".into(),
-                aliases: vec!["/h".into()],
+                name: "/mcp".into(),
+                description: "Manage MCP servers".into(),
+                aliases: vec!["/servers".into()],
+                input_hint: Some("server name".into()),
+                subcommands: vec![
+                    SlashSubcommand {
+                        name: "reconnect".into(),
+                        description: "Reconnect a server".into(),
+                        usage: Some("<server>".into()),
+                    },
+                    SlashSubcommand {
+                        name: "list".into(),
+                        description: "List servers".into(),
+                        usage: None,
+                    },
+                ],
+                source: Some("extension".into()),
             },
             SlashCommand {
                 name: "/status".into(),
                 description: String::new(),
                 aliases: Vec::new(),
+                input_hint: None,
+                subcommands: Vec::new(),
+                source: None,
             },
         ]
     );
@@ -1016,7 +1046,7 @@ fn slash_commands_normalize_names_and_wrapper_shapes() {
 }
 
 #[test]
-fn slash_filter_matches_aliases_and_caps_results() {
+fn slash_top_level_filter_matches_aliases_and_caps_after_filtering() {
     let commands = (0..(SLASH_COMMAND_VISIBLE_CAP + 2))
         .map(|ix| SlashCommand {
             name: format!("/command-{ix}"),
@@ -1026,23 +1056,76 @@ fn slash_filter_matches_aliases_and_caps_results() {
             } else {
                 Vec::new()
             },
+            input_hint: None,
+            subcommands: Vec::new(),
+            source: Some("builtin".into()),
         })
         .collect::<Vec<_>>();
     let matches = filter_slash_commands(&commands, "/GO");
     assert_eq!(matches.len(), 1);
-    assert_eq!(matches[0].name, "/command-0");
+    assert_eq!(matches[0].title, "/command-0");
+    assert_eq!(matches[0].completion_text, "/command-0");
 
     let capped = filter_slash_commands(&commands, "/");
     assert_eq!(capped.len(), SLASH_COMMAND_VISIBLE_CAP);
 }
 
 #[test]
-fn slash_draft_predicate_requires_a_slash_only_draft() {
-    assert!(slash_draft_is_open("/"));
-    assert!(slash_draft_is_open("  /build-2"));
-    assert!(!slash_draft_is_open("build /"));
-    assert!(!slash_draft_is_open("/build "));
-    assert!(!slash_draft_is_open("/build.task"));
+fn slash_nested_subcommands_flatten_and_filter_dynamically() {
+    let raw = serde_json::json!([{
+        "name": "mcp",
+        "description": "Manage servers",
+        "subcommands": [
+            {"name": "reconnect", "description": "Reconnect", "usage": "<server>"},
+            {"name": "remove", "description": "Remove", "usage": "<server>"},
+            {"name": "list", "description": "List"}
+        ],
+        "source": "builtin"
+    }]);
+    let commands = parse_slash_commands(Some(&raw));
+
+    let all = filter_slash_commands(&commands, "/mcp ");
+    assert_eq!(all.len(), 3);
+    assert!(all.iter().all(|suggestion| suggestion.is_subcommand));
+    assert_eq!(all[0].title, "/mcp reconnect");
+    assert_eq!(all[0].source.as_deref(), Some("builtin"));
+
+    let filtered = filter_slash_commands(&commands, "/mcp re");
+    assert_eq!(
+        filtered
+            .iter()
+            .map(|suggestion| suggestion.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/mcp reconnect", "/mcp remove"]
+    );
+    assert_eq!(
+        filter_slash_commands(&commands, "/mcp list")[0].title,
+        "/mcp list"
+    );
+}
+
+#[test]
+fn slash_draft_predicate_tracks_metadata_completion_states() {
+    let raw = serde_json::json!([
+        {
+            "name": "mcp",
+            "subcommands": [
+                {"name": "reconnect", "description": "Reconnect", "usage": "<server>"},
+                {"name": "list", "description": "List"}
+            ]
+        },
+        {"name": "build", "input": {"hint": "<target>"}}
+    ]);
+    let commands = parse_slash_commands(Some(&raw));
+
+    assert!(slash_draft_is_open(&commands, "/"));
+    assert!(slash_draft_is_open(&commands, "  /m"));
+    assert!(slash_draft_is_open(&commands, "/mcp "));
+    assert!(slash_draft_is_open(&commands, "/mcp re"));
+    assert!(!slash_draft_is_open(&commands, "/mcp reconnect server"));
+    assert!(!slash_draft_is_open(&commands, "/build target"));
+    assert!(!slash_draft_is_open(&commands, "build /"));
+    assert!(slash_draft_is_open(&commands, "/future.command"));
 }
 
 #[test]
@@ -1070,13 +1153,50 @@ fn secondary_enter_sends_instead_of_accepting_slash_completion() {
 }
 
 #[test]
-fn slash_completion_uses_primary_name_with_trailing_space() {
-    let command = SlashCommand {
-        name: "/help".into(),
-        description: String::new(),
-        aliases: vec!["/h".into()],
-    };
-    assert_eq!(slash_completion_text(&command), "/help ");
+fn slash_completion_text_distinguishes_required_args_and_argless_leaves() {
+    let raw = serde_json::json!([{
+        "name": "mcp",
+        "aliases": ["servers"],
+        "subcommands": [
+            {"name": "reconnect", "description": "Reconnect", "usage": "<server>"},
+            {"name": "list", "description": "List"}
+        ]
+    }]);
+    let commands = parse_slash_commands(Some(&raw));
+
+    let parent = &filter_slash_commands(&commands, "/servers")[0];
+    assert_eq!(slash_completion_text(parent), "/mcp ");
+    assert!(parent.expects_input);
+    assert_eq!(
+        filter_slash_commands(&commands, "/servers ")
+            .iter()
+            .map(|suggestion| suggestion.title.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/mcp reconnect", "/mcp list"]
+    );
+
+    let required = &filter_slash_commands(&commands, "/mcp re")[0];
+    assert_eq!(slash_completion_text(required), "/mcp reconnect ");
+    assert!(required.expects_input);
+
+    let argless = &filter_slash_commands(&commands, "/mcp li")[0];
+    assert_eq!(slash_completion_text(argless), "/mcp list");
+    assert!(!argless.expects_input);
+}
+
+#[test]
+fn slash_future_source_is_preserved_without_a_closed_enum() {
+    let raw = serde_json::json!([{
+        "name": "future-command",
+        "description": "Discovered at runtime",
+        "source": "remote-registry-v2"
+    }]);
+    let commands = parse_slash_commands(Some(&raw));
+    assert_eq!(commands[0].source.as_deref(), Some("remote-registry-v2"));
+
+    let suggestions = filter_slash_commands(&commands, "/future");
+    assert_eq!(suggestions[0].title, "/future-command");
+    assert_eq!(suggestions[0].source.as_deref(), Some("remote-registry-v2"));
 }
 
 #[test]

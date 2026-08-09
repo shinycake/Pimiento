@@ -26,6 +26,27 @@ pub(crate) struct SlashCommand {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) aliases: Vec<String>,
+    pub(crate) input_hint: Option<String>,
+    pub(crate) subcommands: Vec<SlashSubcommand>,
+    pub(crate) source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlashSubcommand {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) usage: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SlashSuggestion {
+    pub(crate) completion_text: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) usage_hint: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) expects_input: bool,
+    pub(crate) is_subcommand: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1918,6 +1939,13 @@ impl SessionView {
         match event {
             InputEvent::Change => {
                 if self.slash_menu == SlashMenuState::Dismissed {
+                    let text = self.composer.read(cx).value().to_string();
+                    let commands =
+                        parse_slash_commands(self.projection.available_commands_raw.as_ref());
+                    if slash_draft_is_open(&commands, &text) {
+                        cx.notify();
+                        return;
+                    }
                     self.slash_menu = SlashMenuState::Closed;
                 }
                 self.update_slash_menu(cx);
@@ -2269,14 +2297,18 @@ impl SessionView {
         .detach();
     }
 
-    pub(crate) fn filtered_slash_commands(&self, text: &str) -> Vec<SlashCommand> {
+    pub(crate) fn filtered_slash_commands(&self, text: &str) -> Vec<SlashSuggestion> {
         let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
-        filter_slash_commands(&commands, text.trim_start())
+        filter_slash_commands(&commands, text)
     }
 
     pub(crate) fn update_slash_menu(&mut self, cx: &Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
-        if self.slash_menu == SlashMenuState::Dismissed || !slash_draft_is_open(&text) {
+        if self.slash_menu == SlashMenuState::Dismissed {
+            return;
+        }
+        let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        if !slash_draft_is_open(&commands, &text) {
             self.close_slash_menu();
             return;
         }
@@ -2291,10 +2323,21 @@ impl SessionView {
         self.slash_selected = 0;
     }
 
-    pub(crate) fn accept_slash_command(&mut self, command: &SlashCommand, cx: &mut Context<Self>) {
-        self.pending_composer_value = Some(slash_completion_text(command));
+    pub(crate) fn accept_slash_command(
+        &mut self,
+        suggestion: &SlashSuggestion,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_composer_value = Some(slash_completion_text(suggestion));
         self.refocus_composer = true;
-        self.close_slash_menu();
+        self.slash_selected = 0;
+        self.slash_menu = if suggestion.is_subcommand {
+            SlashMenuState::Dismissed
+        } else if suggestion.expects_input {
+            SlashMenuState::Open
+        } else {
+            SlashMenuState::Dismissed
+        };
         cx.notify();
     }
 
@@ -2309,7 +2352,8 @@ impl SessionView {
         }
 
         let text = self.composer.read(cx).value().to_string();
-        if !slash_draft_is_open(&text) {
+        let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        if !slash_draft_is_open(&commands, &text) {
             self.close_slash_menu();
             return false;
         }
@@ -4407,13 +4451,8 @@ pub(crate) fn composer_enter_action(
     }
 }
 
-pub(crate) fn slash_draft_is_open(text: &str) -> bool {
-    let Some(command) = text.trim_start().strip_prefix('/') else {
-        return false;
-    };
-    command
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+pub(crate) fn slash_draft_is_open(commands: &[SlashCommand], text: &str) -> bool {
+    slash_completion_context(commands, text).is_some()
 }
 
 pub(crate) fn normalize_slash_name(name: &str) -> Option<String> {
@@ -4427,6 +4466,9 @@ pub(crate) fn parse_slash_command(raw: &serde_json::Value) -> Option<SlashComman
             name: normalize_slash_name(name)?,
             description: String::new(),
             aliases: Vec::new(),
+            input_hint: None,
+            subcommands: Vec::new(),
+            source: None,
         });
     }
 
@@ -4457,11 +4499,57 @@ pub(crate) fn parse_slash_command(raw: &serde_json::Value) -> Option<SlashComman
             }
         }
     }
+    let input_hint = raw
+        .get("input")
+        .and_then(|input| input.get("hint"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_owned);
+    let subcommands = raw
+        .get("subcommands")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|subcommand| {
+            let name = subcommand
+                .get("name")
+                .and_then(serde_json::Value::as_str)?
+                .trim();
+            if name.is_empty() {
+                return None;
+            }
+            let description = subcommand
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(String::new, |description| description.trim().to_owned());
+            let usage = subcommand
+                .get("usage")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|usage| !usage.is_empty())
+                .map(str::to_owned);
+            Some(SlashSubcommand {
+                name: name.to_owned(),
+                description,
+                usage,
+            })
+        })
+        .collect();
+    let source = raw
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|source| !source.is_empty())
+        .map(str::to_owned);
 
     Some(SlashCommand {
         name,
         description,
         aliases,
+        input_hint,
+        subcommands,
+        source,
     })
 }
 
@@ -4477,7 +4565,7 @@ pub(crate) fn parse_slash_commands(raw: Option<&serde_json::Value>) -> Vec<Slash
 }
 
 pub(crate) fn slash_command_matches(command: &SlashCommand, query: &str) -> bool {
-    let query = query.trim_start().to_ascii_lowercase();
+    let query = query.to_ascii_lowercase();
     command.name.to_ascii_lowercase().starts_with(&query)
         || command
             .aliases
@@ -4485,17 +4573,116 @@ pub(crate) fn slash_command_matches(command: &SlashCommand, query: &str) -> bool
             .any(|alias| alias.to_ascii_lowercase().starts_with(&query))
 }
 
-pub(crate) fn filter_slash_commands(commands: &[SlashCommand], query: &str) -> Vec<SlashCommand> {
-    commands
-        .iter()
-        .filter(|command| slash_command_matches(command, query))
-        .take(SLASH_COMMAND_VISIBLE_CAP)
-        .cloned()
-        .collect()
+enum SlashCompletionContext<'a> {
+    TopLevel(&'a str),
+    Subcommands(&'a SlashCommand, &'a str),
 }
 
-pub(crate) fn slash_completion_text(command: &SlashCommand) -> String {
-    format!("{} ", command.name)
+fn valid_slash_fragment(fragment: &str) -> bool {
+    fragment.chars().all(|ch| !ch.is_whitespace())
+}
+
+fn slash_completion_context<'a>(
+    commands: &'a [SlashCommand],
+    text: &'a str,
+) -> Option<SlashCompletionContext<'a>> {
+    let draft = text.trim_start().strip_prefix('/')?;
+    if draft.contains(['\n', '\r', '\t']) {
+        return None;
+    }
+    let Some((command_fragment, subcommand_fragment)) = draft.split_once(' ') else {
+        return valid_slash_fragment(draft).then_some(SlashCompletionContext::TopLevel(draft));
+    };
+    if command_fragment.is_empty()
+        || !valid_slash_fragment(command_fragment)
+        || subcommand_fragment.contains(' ')
+        || !valid_slash_fragment(subcommand_fragment)
+    {
+        return None;
+    }
+    let command_token = format!("/{command_fragment}");
+    let command = commands.iter().find(|command| {
+        command.name.eq_ignore_ascii_case(&command_token)
+            || command
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(&command_token))
+    })?;
+    (!command.subcommands.is_empty()).then_some(SlashCompletionContext::Subcommands(
+        command,
+        subcommand_fragment,
+    ))
+}
+
+fn slash_suggestion_for_command(command: &SlashCommand) -> SlashSuggestion {
+    let expects_input = command.input_hint.is_some() || !command.subcommands.is_empty();
+    SlashSuggestion {
+        completion_text: if expects_input {
+            format!("{} ", command.name)
+        } else {
+            command.name.clone()
+        },
+        title: command.name.clone(),
+        description: command.description.clone(),
+        usage_hint: command.input_hint.clone(),
+        source: command.source.clone(),
+        expects_input,
+        is_subcommand: false,
+    }
+}
+
+fn slash_suggestion_for_subcommand(
+    command: &SlashCommand,
+    subcommand: &SlashSubcommand,
+) -> SlashSuggestion {
+    let expects_input = subcommand.usage.is_some();
+    let exact = format!("{} {}", command.name, subcommand.name);
+    SlashSuggestion {
+        completion_text: if expects_input {
+            format!("{exact} ")
+        } else {
+            exact.clone()
+        },
+        title: exact,
+        description: subcommand.description.clone(),
+        usage_hint: subcommand.usage.clone(),
+        source: command.source.clone(),
+        expects_input,
+        is_subcommand: true,
+    }
+}
+
+pub(crate) fn filter_slash_commands(commands: &[SlashCommand], text: &str) -> Vec<SlashSuggestion> {
+    let Some(context) = slash_completion_context(commands, text) else {
+        return Vec::new();
+    };
+    match context {
+        SlashCompletionContext::TopLevel(query) => {
+            let query = format!("/{query}");
+            commands
+                .iter()
+                .filter(|command| slash_command_matches(command, &query))
+                .map(slash_suggestion_for_command)
+                .take(SLASH_COMMAND_VISIBLE_CAP)
+                .collect()
+        }
+        SlashCompletionContext::Subcommands(command, query) => command
+            .subcommands
+            .iter()
+            .filter(|subcommand| {
+                subcommand
+                    .name
+                    .to_ascii_lowercase()
+                    .starts_with(&query.to_ascii_lowercase())
+            })
+            .map(|subcommand| slash_suggestion_for_subcommand(command, subcommand))
+            .take(SLASH_COMMAND_VISIBLE_CAP)
+            .collect(),
+    }
+}
+
+pub(crate) fn slash_completion_text(suggestion: &SlashSuggestion) -> String {
+    suggestion.completion_text.clone()
 }
 
 pub(crate) fn todo_open_count(phases: &[TodoPhaseView]) -> usize {
@@ -4681,8 +4868,9 @@ impl Render for SessionView {
         };
         let view = cx.entity();
         let composer_text = self.composer.read(cx).value().to_string();
-        let slash_menu_visible =
-            self.slash_menu == SlashMenuState::Open && slash_draft_is_open(&composer_text);
+        let slash_commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        let slash_menu_visible = self.slash_menu == SlashMenuState::Open
+            && slash_draft_is_open(&slash_commands, &composer_text);
         let slash_matches = if slash_menu_visible {
             self.filtered_slash_commands(&composer_text)
         } else {
@@ -5614,15 +5802,14 @@ impl Render for SessionView {
                                                         .rounded_md()
                                                         .children(
                                                             slash_matches.iter().enumerate().map(
-                                                                |(ix, command)| {
-                                                                    let command_for_click =
-                                                                        command.clone();
+                                                                |(ix, suggestion)| {
+                                                                    let suggestion_for_click =
+                                                                        suggestion.clone();
                                                                     Button::new((
                                                                         "slash-command",
                                                                         ix,
                                                                     ))
                                                                     .ghost()
-                                                                    .small()
                                                                     .w_full()
                                                                     .when(
                                                                         ix == self.slash_selected,
@@ -5638,7 +5825,7 @@ impl Render for SessionView {
                                                                               _window,
                                                                               cx| {
                                                                             this.accept_slash_command(
-                                                                                &command_for_click,
+                                                                                &suggestion_for_click,
                                                                                 cx,
                                                                             );
                                                                         },
@@ -5646,34 +5833,91 @@ impl Render for SessionView {
                                                                     .child(
                                                                         v_flex()
                                                                             .w_full()
-                                                                            .gap_0p5()
+                                                                            .gap_1()
                                                                             .child(
-                                                                                Label::new(
-                                                                                    command
-                                                                                        .name
-                                                                                        .clone(),
-                                                                                )
-                                                                                .text_sm(),
+                                                                                h_flex()
+                                                                                    .w_full()
+                                                                                    .justify_between()
+                                                                                    .gap_2()
+                                                                                    .child(
+                                                                                        Label::new(
+                                                                                            suggestion
+                                                                                                .title
+                                                                                                .clone(),
+                                                                                        )
+                                                                                        .text_sm(),
+                                                                                    )
+                                                                                    .child(
+                                                                                        div()
+                                                                                            .px_1()
+                                                                                            .py_0p5()
+                                                                                            .rounded_sm()
+                                                                                            .bg(theme.secondary)
+                                                                                            .text_xs()
+                                                                                            .text_color(
+                                                                                                theme
+                                                                                                    .muted_foreground,
+                                                                                            )
+                                                                                            .child(
+                                                                                                suggestion
+                                                                                                    .source
+                                                                                                    .clone()
+                                                                                                    .unwrap_or_else(|| {
+                                                                                                        if suggestion
+                                                                                                            .is_subcommand
+                                                                                                        {
+                                                                                                            "subcommand"
+                                                                                                                .into()
+                                                                                                        } else {
+                                                                                                            "command"
+                                                                                                                .into()
+                                                                                                        }
+                                                                                                    }),
+                                                                                            ),
+                                                                                    ),
                                                                             )
                                                                             .when(
-                                                                                !command
+                                                                                !suggestion
                                                                                     .description
                                                                                     .is_empty(),
                                                                                 |col| {
                                                                                     col.child(
-                                                                                        Label::new(
-                                                                                            command
-                                                                                                .description
-                                                                                                .clone(),
-                                                                                        )
+                                                                                        div()
+                                                                                            .w_full()
                                                                                         .text_xs()
                                                                                         .text_color(
                                                                                             theme
                                                                                                 .muted_foreground,
+                                                                                        )
+                                                                                        .child(
+                                                                                            suggestion
+                                                                                                .description
+                                                                                                .clone(),
                                                                                         ),
                                                                                     )
                                                                                 },
-                                                                            ),
+                                                                            )
+                                                                            .when_some(
+                                                                                suggestion
+                                                                                    .usage_hint
+                                                                                    .clone(),
+                                                                                |col, hint| {
+                                                                                    col.child(
+                                                                                        div()
+                                                                                            .w_full()
+                                                                                            .text_xs()
+                                                                                            .text_color(
+                                                                                                theme
+                                                                                                    .muted_foreground,
+                                                                                            )
+                                                                                            .child(
+                                                                                                format!(
+                                                                                                    "Usage: {hint}"
+                                                                                                ),
+                                                                                            ),
+                                                                                    )
+                                                                                },
+                                                                            )
                                                                     )
                                                                 },
                                                             ),
@@ -5686,7 +5930,20 @@ impl Render for SessionView {
                                                                         theme.muted_foreground,
                                                                     ),
                                                             )
-                                                        }),
+                                                        })
+                                                        .child(
+                                                            h_flex()
+                                                                .w_full()
+                                                                .justify_between()
+                                                                .px_2()
+                                                                .py_1()
+                                                                .border_t_1()
+                                                                .border_color(theme.border)
+                                                                .text_xs()
+                                                                .text_color(theme.muted_foreground)
+                                                                .child("↑↓ Navigate")
+                                                                .child("Enter Complete · Esc Dismiss"),
+                                                        ),
                                                 )
                                             })
                                             .when_some(large_paste_lines, |parent, lines| {
