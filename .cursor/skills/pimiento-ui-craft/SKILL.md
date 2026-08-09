@@ -13,6 +13,25 @@ description: >-
 Apply when changing Pimiento visuals or chrome. Companion skills (install globally):
 `macos-native-ui`, `human-interface-guidelines`, `apple-design`.
 
+## API / reference (hard)
+
+- Prefer pinned **Zed `gpui` / `gpui_platform`** and **gpui-component** under
+  `~/.cargo/git/checkouts/` (Apache-2.0) for any UI/API question.
+- Zed’s `ui`, `editor`, `terminal_view`, and `agent_ui` are **GPL-3.0-or-later**.
+  **Patterns only, never copy source.**
+
+## Depth recipe (Zed / gpui-component)
+
+| Surface | Recipe |
+|---------|--------|
+| Docked (rail, composer band, inspector) | Tone (`sidebar` / `secondary`) + hairline `border` — **no shadow** |
+| Floating (model picker, palette, About, slash) | `popover` + `border` + `radius`/`rounded_lg` + **`shadow_lg` / `shadow_xl`** over `overlay` |
+| Selected rail row | `secondary` / `sidebar_accent` wash + `rounded_sm` — **no** primary accent bar |
+| Tool / inset rows | `secondary` (PLAN “elevated”; do not invent an elevated token) |
+
+No purple glow, neon rings, or shadows on docked chrome. Prefer gpui-component
+popover/dialog primitives when wiring is clean (placement + Wayland).
+
 ## Doctrine (do not violate)
 
 From `PLAN.md` §8 / `AGENTS.md`:
@@ -24,7 +43,7 @@ From `PLAN.md` §8 / `AGENTS.md`:
 
 ## macOS chrome goals
 
-1. **Toolbar anatomy (HIG):** leading = session/rail controls; center = live status (phase, ctx%, tps); trailing = actions (model, thinking, fast, drawers, overflow). Do not repeat the same fact in two places.
+1. **Toolbar anatomy (HIG):** leading = session/rail controls; center = live status (phase, ctx%, tps); trailing = drawers/overflow — **not** model/fast (those live on the composer band).
 2. **8pt grid:** padding/gaps are multiples of 4/8 (`px(8.)`, `px(12.)`, `px(16.)`).
 3. **Deference:** content (transcript) is the hero; chrome is quiet (`theme.muted` / borders), not a second information dump.
 4. **Grouping:** separate status readouts from action buttons; insert visual gaps between groups.
@@ -34,41 +53,52 @@ From `PLAN.md` §8 / `AGENTS.md`:
 
 ## Status strip rules
 
-- `status_message` holds **OMP version / connection only** (or a transient notice like abort-arm). Do **not** also embed model + think + ctx there if buttons already show them.
-- Model button shows current model id (shorten provider when obvious).
+- `status_message` holds **OMP version / connection only** (or a transient notice like abort-arm). Do **not** also embed model + think + ctx there if composer/inspector already show them.
+- Model + thinking + Fast live on the **composer band** (docked `secondary` + top hairline).
 - Thinking control shows **only levels the active model supports** from `get_available_models[].thinking.efforts`, plus agent selectors `off` and `auto` when the model has a thinking config. If `thinking` is absent/`null`, hide or disable with reason ("no controllable thinking").
-- Fast / Todos / Agents / Export / Rename / Sessions / Theme: trailing actions; collapse rarely used into palette (Cmd+K) when the bar overcrowds.
+- Todos / Agents / Export / Rename / Sessions / Theme: trailing or palette (Cmd+K) when the bar overcrowds.
 
 ## Session rail (left)
 
-- Group sessions by **workspace** (`session_cwd`); section headers use the directory basename (full path in tooltip/muted subtitle if needed).
-- Within a workspace: compact rows with name + phase `Tag`/badge; active row selected style.
-- New / Close / Hide are rail chrome, not a second title bar of prose buttons.
+- Depth: `sidebar` + `sidebar_border`; denser 8pt spacing.
+- Group sessions by **workspace** (`session_cwd`); header = basename primary + muted path; per-workspace **`+`** adds a tab that connects with that cwd.
+- Selected: wash + `rounded_sm` only — **no** `border_l_2` / primary accent bar.
+- Hover **×** closes that index and `forget_session` from Pimiento `recent.json` — **never** delete OMP session files under `~/.omp`.
+- Top chrome: compact **Workspace…** (directory picker → connect) + Hide/⌘B — not a New/Close/Hide prose wall.
 - Prefer gpui-component `Separator`, `Tag`, `Switch` over walls of ghost text buttons.
 
 ## Context inspector (right, on demand)
 
 PLAN §8: `[rail] [transcript] [right pane — Todos | Subagents | Session info]`.
 
-- Collapsible; Cmd+B = left rail, palette/More also toggles inspector (add Cmd+] if easy).
+- Quiet `sidebar` strip (tone + border only).
+- Collapsible; Cmd+B = left rail, Cmd+J / palette toggles inspector.
 - OpenCode-inspired sections, **OMP-honest only**:
   - **Session / Context** — cwd, model, thinking, ctx%, tps, phase
-  - **Fast** — `Switch` bound to `set_fast_mode` (show enabled vs active divergence in muted text)
-  - **Checklist** — `todoPhases`
+  - **Checklist** — only when `todoPhases` nonempty
   - **Agents** — subagent snapshots / subscription data
-  - **Tools** — `dumpTools` names if present in `get_state`; otherwise omit
-  - **LSP / MCP** — only if the wire exposes them; otherwise a single muted note that rpc-ui does not publish status (do not invent)
+  - **Tools** — only when `dumpTools` names present in `get_state`
+- **Do not** put Fast here (composer band owns it). **Do not** invent an LSP/MCP footer.
 - Prefer `Accordion` / collapsible section headers; keep transcript the hero (inspector ~240–280px).
 
 ## Composer
 
+- Band: model control → floating picker (`popover` + `shadow_lg`); Fast `Switch`; thinking when catalog has efforts; Attach + image chips; Send primary.
+- **Roles (from omp config):** peek `modelRoles` + `modelTags` colors (built-in OMP palette). Click = `set_model`. **Set** = assign current model via `omp config set modelRoles` (merge; never hand-edit YAML).
+- Image attachments only (v1): file picker + `ExternalPaths` drop; wire `{type, mimeType, data}` on Prompt/Steer/FollowUp.
 - Short placeholder; put keymap hints in status/help or palette, not a novel in the placeholder.
-- Send is primary trailing control; keep secondary Enter (Cmd/Ctrl+Enter) behavior.
+- Fast Switch disabled when the model has no service-tier family (e.g. Cursor/Grok).
+
+## Floating overlays
+
+- Command palette / About: `overlay` scrim + `popover` + `shadow_xl`; focused search `Input`; Esc/arrows on an outer `capture_key_down` that wraps the overlay sibling.
+- Clip long lists with `max_h` + `overflow_y_scrollbar` (inner scroll region if `on_click` must stay on the panel).
 
 ## Checklist before merge
 
-- [ ] No duplicated model/think/ctx labels
+- [ ] No duplicated model/think/ctx/fast labels across strip + composer + inspector
 - [ ] Thinking options filtered to current model
+- [ ] Docked = tone+border; floating = popover+shadow
 - [ ] Light + dark still readable via theme tokens
 - [ ] `cargo check -p pimiento-app` + app nextest green
 - [ ] Note wire/UI surprises in `docs/protocol-notes.md`

@@ -211,6 +211,27 @@ fn text_deltas_accumulate_and_end_reconciles() {
 }
 
 #[test]
+fn image_end_projects_visible_notice() {
+    let mut p = SessionProjection::new();
+    apply(&mut p, json!({ "type": "message_start" }));
+    apply(
+        &mut p,
+        message_update(&json!({
+            "type": "image_end",
+            "contentIndex": 1,
+            "content": { "type": "image", "mimeType": "image/png", "data": "abc" },
+            "partial": {}
+        })),
+    );
+    match &p.transcript[0] {
+        TranscriptEntry::Notice(text) => {
+            assert!(text.contains("image/png"), "got {text}");
+        }
+        other => panic!("expected Notice for image_end, got {other:?}"),
+    }
+}
+
+#[test]
 fn thinking_deltas_accumulate_and_end_reconciles() {
     let mut p = SessionProjection::new();
     apply(&mut p, json!({ "type": "message_start" }));

@@ -11,6 +11,11 @@ pub(crate) enum PaletteActionId {
     ToggleModels,
     ToggleThinking,
     ToggleFast,
+    CycleModel,
+    CycleThinking,
+    Compact,
+    AbortRetry,
+    AbortAndPrompt,
     ExportHtml,
     RenameSession,
     AbortRun,
@@ -20,6 +25,8 @@ pub(crate) enum PaletteActionId {
     CloseSession,
     ToggleRail,
     ToggleInspector,
+    BranchSession,
+    LoginProviders,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +36,10 @@ pub(crate) struct PaletteEntry {
     pub(crate) hint: &'static str,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "static command catalog; splitting would obscure the action list"
+)]
 pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
     &[
         PaletteEntry {
@@ -67,6 +78,31 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
             hint: "fast",
         },
         PaletteEntry {
+            id: PaletteActionId::CycleModel,
+            label: "Cycle model",
+            hint: "cycle_model next",
+        },
+        PaletteEntry {
+            id: PaletteActionId::CycleThinking,
+            label: "Cycle thinking level",
+            hint: "cycle_thinking_level",
+        },
+        PaletteEntry {
+            id: PaletteActionId::Compact,
+            label: "Compact context",
+            hint: "compact rpc",
+        },
+        PaletteEntry {
+            id: PaletteActionId::AbortRetry,
+            label: "Abort retry",
+            hint: "abort_retry",
+        },
+        PaletteEntry {
+            id: PaletteActionId::AbortAndPrompt,
+            label: "Abort and prompt",
+            hint: "abort_and_prompt composer",
+        },
+        PaletteEntry {
             id: PaletteActionId::ExportHtml,
             label: "Export HTML",
             hint: "export",
@@ -80,6 +116,16 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
             id: PaletteActionId::AbortRun,
             label: "Abort run",
             hint: "stop",
+        },
+        PaletteEntry {
+            id: PaletteActionId::BranchSession,
+            label: "Branch into new tab",
+            hint: "get_branch_messages fork",
+        },
+        PaletteEntry {
+            id: PaletteActionId::LoginProviders,
+            label: "Login providers",
+            hint: "get_login_providers oauth",
         },
         PaletteEntry {
             id: PaletteActionId::SessionsLauncher,

@@ -35,6 +35,13 @@ pub(crate) enum SlashMenuState {
     Dismissed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LargePasteChoice {
+    Wrap,
+    SaveLocal,
+    Inline,
+}
+
 pub(crate) struct AbortArm {
     pub(crate) generation: u64,
     pub(crate) deadline: Instant,
@@ -54,8 +61,40 @@ pub(crate) struct SessionView {
     pub(crate) client: Option<RpcClient>,
     pub(crate) composer: gpui::Entity<InputState>,
     pub(crate) model_search: gpui::Entity<InputState>,
+    pub(crate) palette_search: gpui::Entity<InputState>,
+    /// Shared text field for `input` / `editor` extension UI dialogs.
+    pub(crate) dialog_input: gpui::Entity<InputState>,
+    /// Dialog id currently bound into [`Self::dialog_input`].
+    pub(crate) dialog_input_bound_id: Option<String>,
+    /// Applied in `render` (needs `Window`) when a text dialog appears/clears.
+    pub(crate) pending_dialog_input_sync: Option<(String, String)>,
+    /// Per-dialog timeout generation so superseded timers no-op.
+    pub(crate) dialog_timeout_gens: HashMap<String, u64>,
+    pub(crate) dialog_timeout_generation: u64,
+    /// Floating rename popover (About-style) with prefilled session name.
+    pub(crate) rename_open: bool,
+    pub(crate) rename_input: gpui::Entity<InputState>,
+    pub(crate) pending_rename_sync: Option<String>,
+    pub(crate) refocus_rename_input: bool,
+    /// Branch-into-new-tab message picker (`get_branch_messages`).
+    pub(crate) branch_picker: Option<Vec<BranchMessageChoice>>,
+    pub(crate) branch_picker_selected: usize,
+    /// Login providers floating list (`get_login_providers`).
+    pub(crate) login_picker: Option<Vec<LoginProviderChoice>>,
+    pub(crate) login_picker_selected: usize,
+    /// Workspace opens a fresh tab for this cwd after a successful branch.
+    pub(crate) pending_new_tab_cwd: Option<PathBuf>,
     pub(crate) model_picker_open: bool,
     pub(crate) thinking_picker_open: bool,
+    pub(crate) pending_attachments: Vec<PendingAttachment>,
+    /// Monotonic counter for OMP-style `local://paste-N.md` saves.
+    pub(crate) paste_counter: u64,
+    /// Large-paste menu: raw text awaiting Wrap / Save / Inline.
+    pub(crate) large_paste_pending: Option<String>,
+    pub(crate) at_mention_open: bool,
+    pub(crate) at_mention_selected: usize,
+    pub(crate) at_mention_candidates: Vec<PathBuf>,
+    pub(crate) omp_roles: Vec<OmpRole>,
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
     pub(crate) selected_subagent_id: Option<String>,
@@ -68,7 +107,6 @@ pub(crate) struct SessionView {
     /// Mirrors workspace inspector visibility so the session toolbar can
     /// defer Checklist/Agents/ctx chrome while the Context pane is open.
     pub(crate) inspector_open: bool,
-    pub(crate) palette_query: String,
     pub(crate) palette_selected: usize,
     pub(crate) pending_workspace_palette: Option<PaletteActionId>,
     pub(crate) slash_menu: SlashMenuState,
@@ -85,7 +123,10 @@ pub(crate) struct SessionView {
     pub(crate) clear_composer: bool,
     pub(crate) pending_composer_value: Option<String>,
     pub(crate) refocus_composer: bool,
+    pub(crate) refocus_palette_search: bool,
     pub(crate) clear_model_search: bool,
+    pub(crate) clear_palette_search: bool,
+    pub(crate) pending_palette_enter: bool,
     /// Virtualized transcript list (GPUI `ListState`, bottom-aligned chat).
     pub(crate) transcript_list: ListState,
     pub(crate) last_transcript_len: usize,
@@ -103,6 +144,7 @@ pub(crate) struct SessionView {
 }
 
 impl SessionView {
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -130,10 +172,29 @@ impl SessionView {
                 .placeholder("Search models… (or provider/id, Enter)")
                 .submit_on_enter(true)
         });
+        let palette_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Type to filter commands…")
+                .submit_on_enter(true)
+        });
+        let dialog_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .multi_line(true)
+                .auto_grow(1, 6)
+                .placeholder("Enter a value…")
+        });
+        let rename_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Session name")
+                .submit_on_enter(true)
+        });
 
         let subscriptions = vec![
             cx.subscribe(&composer, Self::on_composer_event),
             cx.subscribe(&model_search, Self::on_model_search_event),
+            cx.subscribe(&palette_search, Self::on_palette_search_event),
+            cx.subscribe(&dialog_input, Self::on_dialog_input_event),
+            cx.subscribe(&rename_input, Self::on_rename_input_event),
         ];
 
         let initial_len = initial_projection.transcript.len();
@@ -164,8 +225,30 @@ impl SessionView {
             client,
             composer,
             model_search,
+            palette_search,
+            dialog_input,
+            dialog_input_bound_id: None,
+            pending_dialog_input_sync: None,
+            dialog_timeout_gens: HashMap::new(),
+            dialog_timeout_generation: 0,
+            rename_open: false,
+            rename_input,
+            pending_rename_sync: None,
+            refocus_rename_input: false,
+            branch_picker: None,
+            branch_picker_selected: 0,
+            login_picker: None,
+            login_picker_selected: 0,
+            pending_new_tab_cwd: None,
             model_picker_open: false,
             thinking_picker_open: false,
+            pending_attachments: Vec::new(),
+            paste_counter: 0,
+            large_paste_pending: None,
+            at_mention_open: false,
+            at_mention_selected: 0,
+            at_mention_candidates: Vec::new(),
+            omp_roles: load_omp_roles_from_home(home_dir().as_deref()),
             subagent_snapshots: Vec::new(),
             selected_subagent_id: None,
             subagent_tail_next_byte: None,
@@ -175,7 +258,6 @@ impl SessionView {
             palette_open: false,
             about_open: false,
             inspector_open: false,
-            palette_query: String::new(),
             palette_selected: 0,
             pending_workspace_palette: None,
             slash_menu: SlashMenuState::Closed,
@@ -192,7 +274,10 @@ impl SessionView {
             clear_composer: false,
             pending_composer_value: None,
             refocus_composer: false,
+            refocus_palette_search: false,
             clear_model_search: false,
+            clear_palette_search: false,
+            pending_palette_enter: false,
             transcript_list,
             last_transcript_len: initial_len,
             unread_below: 0,
@@ -224,6 +309,7 @@ impl SessionView {
                             let is_model_changed = frame.raw.get("type").and_then(|v| v.as_str())
                                 == Some("model_changed");
                             this.projection.apply(frame);
+                            this.sync_pending_dialogs(cx);
                             if is_model_changed {
                                 this.refresh_state(cx);
                             }
@@ -235,6 +321,8 @@ impl SessionView {
                                 .unwrap_or_else(|| format!("exit code {:?}", info.exit_code));
                             this.projection.mark_dead(reason);
                             this.client = None;
+                            this.dialog_timeout_gens.clear();
+                            this.dialog_input_bound_id = None;
                             this.status_message = format!(
                                 "OMP closed — {}",
                                 info.stderr_tail.chars().take(256).collect::<String>()
@@ -279,6 +367,8 @@ impl SessionView {
             self.expanded_tools.clear();
             self.running_tool_started.clear();
             self.running_tool_timer.take();
+            self.dialog_timeout_gens.clear();
+            self.dialog_input_bound_id = None;
             self.slash_menu = SlashMenuState::Closed;
             self.slash_selected = 0;
             self.transcript_list.reset(0);
@@ -422,6 +512,9 @@ impl SessionView {
         self.expanded_tools.clear();
         self.running_tool_started.clear();
         self.running_tool_timer.take();
+        self.dialog_timeout_gens.clear();
+        self.dialog_input_bound_id = None;
+        self.pending_dialog_input_sync = Some(("Enter a value…".to_owned(), String::new()));
         self.transcript_list.reset(0);
         self.last_transcript_len = 0;
         self.unread_below = 0;
@@ -1030,7 +1123,8 @@ impl SessionView {
         let Some(client) = self.client.clone() else {
             return;
         };
-        let enabled = !self.projection.state.fast_mode_enabled.unwrap_or(false);
+        let previous = self.projection.state.fast_mode_enabled;
+        let enabled = !previous.unwrap_or(false);
         // Optimistic display; the command response and get_state are authoritative.
         self.projection.state.fast_mode_enabled = Some(enabled);
         cx.notify();
@@ -1062,16 +1156,17 @@ impl SessionView {
                         .clone()
                         .unwrap_or_else(|| "set_fast_mode failed".to_owned());
                     let _ = view.update(cx, |this, cx| {
-                        this.projection.transcript.push(TranscriptEntry::Error {
-                            message: error,
-                            code: Some("set_fast_mode".into()),
-                        });
+                        this.projection.state.fast_mode_enabled = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
                         this.refresh_state(cx);
                         cx.notify();
                     });
                 }
                 Err(error) => {
                     let _ = view.update(cx, |this, cx| {
+                        this.projection.state.fast_mode_enabled = previous;
                         this.projection.transcript.push(TranscriptEntry::Error {
                             message: format!("set_fast_mode: {error}"),
                             code: Some("set_fast_mode".into()),
@@ -1083,6 +1178,175 @@ impl SessionView {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn assign_current_model_to_role(&mut self, role: &str, cx: &mut Context<Self>) {
+        let Some((provider, id)) = self
+            .projection
+            .state
+            .model
+            .as_deref()
+            .and_then(split_model_label)
+        else {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "No current model to assign to a role".into(),
+            ));
+            cx.notify();
+            return;
+        };
+        match assign_omp_model_role(role, &provider, &id) {
+            Ok(()) => {
+                self.omp_roles = load_omp_roles_from_home(home_dir().as_deref());
+                self.projection
+                    .transcript
+                    .push(TranscriptEntry::Notice(format!(
+                        "Assigned {provider}/{id} → @{role} (via omp config)"
+                    )));
+            }
+            Err(error) => {
+                self.projection.transcript.push(TranscriptEntry::Error {
+                    message: error,
+                    code: Some("modelRoles".into()),
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    #[allow(clippy::unused_self)] // instance API for listeners; work is in the path-prompt future
+    pub(crate) fn prompt_attach_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let _ = view.update(cx, |this, cx| {
+                this.add_attachment_paths(&paths, cx);
+            });
+        })
+        .detach();
+    }
+
+    pub(crate) fn session_cwd_path(&self) -> PathBuf {
+        self.session_cwd
+            .clone()
+            .unwrap_or_else(|| self.launcher_cwd.clone())
+    }
+
+    pub(crate) fn composer_draft(&self, cx: &Context<Self>) -> String {
+        self.pending_composer_value
+            .clone()
+            .unwrap_or_else(|| self.composer.read(cx).value().to_string())
+    }
+
+    pub(crate) fn set_composer_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        self.pending_composer_value = Some(text);
+        self.refocus_composer = true;
+        cx.notify();
+    }
+
+    pub(crate) fn append_composer_fragment(&mut self, fragment: &str, cx: &mut Context<Self>) {
+        let mut draft = self.composer_draft(cx);
+        if !draft.is_empty() && !draft.ends_with(' ') && !draft.ends_with('\n') {
+            draft.push(' ');
+        }
+        draft.push_str(fragment);
+        if !fragment.ends_with(' ') {
+            draft.push(' ');
+        }
+        self.set_composer_draft(draft, cx);
+    }
+
+    pub(crate) fn add_attachment_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut failed = 0usize;
+        let cwd = self.session_cwd_path();
+        for path in paths {
+            if self
+                .pending_attachments
+                .iter()
+                .any(|existing| existing.matches_path(path))
+            {
+                continue;
+            }
+            let next_index = next_image_marker_index(&self.pending_attachments);
+            match load_pending_attachment(path, next_index) {
+                Ok(attachment) => {
+                    let attachment = match attachment {
+                        PendingAttachment::PathMention {
+                            path: mention_path, ..
+                        } => {
+                            let display = path_mention_display(&mention_path, Some(cwd.as_path()));
+                            PendingAttachment::PathMention {
+                                path: mention_path,
+                                display,
+                            }
+                        }
+                        other @ PendingAttachment::Image { .. } => other,
+                    };
+                    self.add_pending_attachment(attachment, cx);
+                }
+                Err(_) => failed += 1,
+            }
+        }
+        if failed > 0 {
+            self.projection
+                .transcript
+                .push(TranscriptEntry::Notice(format!(
+                    "skipped {failed} unreadable attachment(s)"
+                )));
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn add_pending_attachment(
+        &mut self,
+        attachment: PendingAttachment,
+        cx: &mut Context<Self>,
+    ) {
+        match &attachment {
+            PendingAttachment::Image {
+                marker_index,
+                width,
+                height,
+                ..
+            } => {
+                let marker = image_marker(*marker_index, *width, *height);
+                if !image_marker_present(&self.composer_draft(cx), *marker_index) {
+                    self.append_composer_fragment(&marker, cx);
+                }
+            }
+            PendingAttachment::PathMention { display, .. } => {
+                if !self.composer_draft(cx).contains(display.as_str()) {
+                    let insert = display.clone();
+                    self.append_composer_fragment(&insert, cx);
+                }
+            }
+        }
+        self.pending_attachments.push(attachment);
+        cx.notify();
+    }
+
+    pub(crate) fn remove_attachment_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.pending_attachments.len() {
+            return;
+        }
+        let removed = self.pending_attachments.remove(index);
+        let mut draft = self.composer_draft(cx);
+        match removed {
+            PendingAttachment::Image { marker_index, .. } => {
+                draft = strip_image_marker(&draft, marker_index);
+            }
+            PendingAttachment::PathMention { display, .. } => {
+                draft = strip_path_mention(&draft, &display);
+            }
+        }
+        self.set_composer_draft(draft, cx);
+        cx.notify();
     }
 
     pub(crate) fn on_model_search_event(
@@ -1101,6 +1365,147 @@ impl SessionView {
         }
     }
 
+    pub(crate) fn on_dialog_input_event(
+        &mut self,
+        _input: gpui::Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => cx.notify(),
+            // Single-line `input` submits on Enter; multiline `editor` keeps
+            // newlines and uses the Submit button.
+            InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            } if self
+                .projection
+                .pending_dialogs
+                .first()
+                .is_some_and(|d| d.method == "input") =>
+            {
+                self.submit_dialog_input(cx);
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn submit_dialog_input(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.projection.pending_dialogs.first() else {
+            return;
+        };
+        if !matches!(dialog.method.as_str(), "input" | "editor") {
+            return;
+        }
+        let id = dialog.id.clone();
+        let value = self.dialog_input.read(cx).value().to_string();
+        let view = cx.entity().downgrade();
+        let mut fields = serde_json::Map::new();
+        fields.insert("value".into(), serde_json::Value::String(value));
+        do_dialog_response(&view, &id, fields, cx);
+    }
+
+    /// Bind dialog text field + schedule timeouts when pending dialogs change.
+    pub(crate) fn sync_pending_dialogs(&mut self, cx: &mut Context<Self>) {
+        self.sync_dialog_input(cx);
+        self.sync_dialog_timeouts(cx);
+    }
+
+    pub(crate) fn sync_dialog_input(&mut self, _cx: &mut Context<Self>) {
+        let text_dialog = self
+            .projection
+            .pending_dialogs
+            .iter()
+            .find(|d| matches!(d.method.as_str(), "input" | "editor"))
+            .cloned();
+        let Some(dialog) = text_dialog else {
+            if self.dialog_input_bound_id.take().is_some() {
+                self.pending_dialog_input_sync = Some(("Enter a value…".to_owned(), String::new()));
+            }
+            return;
+        };
+        if self.dialog_input_bound_id.as_deref() == Some(dialog.id.as_str()) {
+            return;
+        }
+        self.dialog_input_bound_id = Some(dialog.id.clone());
+        let placeholder = dialog
+            .payload
+            .get("placeholder")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(if dialog.method == "editor" {
+                "Edit text…"
+            } else {
+                "Enter a value…"
+            })
+            .to_owned();
+        let prefill = dialog
+            .payload
+            .get("prefill")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        self.pending_dialog_input_sync = Some((placeholder, prefill));
+    }
+
+    pub(crate) fn sync_dialog_timeouts(&mut self, cx: &mut Context<Self>) {
+        let pending: HashMap<String, Option<f64>> = self
+            .projection
+            .pending_dialogs
+            .iter()
+            .map(|d| (d.id.clone(), d.timeout_ms))
+            .collect();
+        self.dialog_timeout_gens
+            .retain(|id, _| pending.contains_key(id));
+
+        for (id, timeout_ms) in pending {
+            let Some(ms) = timeout_ms else {
+                continue;
+            };
+            if !(ms.is_finite() && ms > 0.0) || self.dialog_timeout_gens.contains_key(&id) {
+                continue;
+            }
+            self.dialog_timeout_generation = self.dialog_timeout_generation.wrapping_add(1);
+            let generation = self.dialog_timeout_generation;
+            self.dialog_timeout_gens.insert(id.clone(), generation);
+            let duration = Duration::from_secs_f64(ms / 1000.0);
+            cx.spawn(async move |view, cx| {
+                smol::Timer::after(duration).await;
+                let _ = view.update(cx, |this, cx| {
+                    if this.dialog_timeout_gens.get(&id) != Some(&generation) {
+                        return;
+                    }
+                    this.dialog_timeout_gens.remove(&id);
+                    if !this.projection.pending_dialogs.iter().any(|d| d.id == id) {
+                        return;
+                    }
+                    let Some(client) = this.client.clone() else {
+                        this.projection.pending_dialogs.retain(|d| d.id != id);
+                        this.sync_pending_dialogs(cx);
+                        cx.notify();
+                        return;
+                    };
+                    this.projection.pending_dialogs.retain(|d| d.id != id);
+                    this.sync_pending_dialogs(cx);
+                    let fields = dialog_cancel_fields(true);
+                    let id_owned = id.clone();
+                    cx.spawn(async move |_, _| {
+                        let _ = client
+                            .send(RpcCommandBody::ExtensionUiResponse {
+                                id: id_owned,
+                                fields,
+                            })
+                            .await;
+                    })
+                    .detach();
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
     // ── composer ──────────────────────────────────────────────────────
 
     pub(crate) fn on_composer_event(
@@ -1115,12 +1520,23 @@ impl SessionView {
                     self.slash_menu = SlashMenuState::Closed;
                 }
                 self.update_slash_menu(cx);
+                self.update_at_mention_menu(cx);
                 cx.notify();
             }
             InputEvent::PressEnter {
                 secondary,
                 shift: false,
             } => {
+                if self.at_mention_open {
+                    if let Some(path) = self.at_mention_candidates.get(self.at_mention_selected) {
+                        let path = path.clone();
+                        self.accept_at_mention(&path, cx);
+                    }
+                    return;
+                }
+                if self.large_paste_pending.is_some() {
+                    return;
+                }
                 let text = self.composer.read(cx).value().to_string();
                 let matches = self.filtered_slash_commands(&text);
                 if composer_enter_action(
@@ -1141,9 +1557,241 @@ impl SessionView {
         }
     }
 
+    pub(crate) fn update_at_mention_menu(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer_draft(cx);
+        let Some(query) = at_mention_query(&text) else {
+            self.at_mention_open = false;
+            self.at_mention_candidates.clear();
+            return;
+        };
+        let cwd = self.session_cwd_path();
+        self.at_mention_candidates = list_cwd_files_for_at_mention(&cwd, query);
+        self.at_mention_selected = self
+            .at_mention_selected
+            .min(self.at_mention_candidates.len().saturating_sub(1));
+        self.at_mention_open = !self.at_mention_candidates.is_empty();
+    }
+
+    pub(crate) fn accept_at_mention(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let cwd = self.session_cwd_path();
+        let display = path_mention_display(path, Some(cwd.as_path()));
+        let draft = self.composer_draft(cx);
+        let next = replace_at_mention_token(&draft, &display);
+        self.set_composer_draft(next, cx);
+        if !self
+            .pending_attachments
+            .iter()
+            .any(|existing| existing.matches_path(path))
+        {
+            self.pending_attachments
+                .push(PendingAttachment::PathMention {
+                    path: path.to_owned(),
+                    display,
+                });
+        }
+        self.at_mention_open = false;
+        self.at_mention_candidates.clear();
+        cx.notify();
+    }
+
+    pub(crate) fn handle_composer_paste_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let key = event.keystroke.key.to_ascii_lowercase();
+        let is_paste =
+            key == "v" && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control);
+        if !is_paste {
+            return false;
+        }
+        if !self.composer.read(cx).focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        let Some(item) = cx.read_from_clipboard() else {
+            return false;
+        };
+        self.handle_clipboard_item(&item, cx)
+    }
+
+    pub(crate) fn handle_clipboard_item(
+        &mut self,
+        item: &ClipboardItem,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut handled = false;
+        let mut path_bufs = Vec::new();
+        for entry in item.entries() {
+            match entry {
+                gpui::ClipboardEntry::Image(image) => {
+                    let next = next_image_marker_index(&self.pending_attachments);
+                    match load_pending_image_bytes(&image.bytes, next, &format!("clipboard-{next}"))
+                    {
+                        Ok(attachment) => {
+                            self.add_pending_attachment(attachment, cx);
+                            handled = true;
+                        }
+                        Err(err) => {
+                            self.projection
+                                .transcript
+                                .push(TranscriptEntry::Notice(format!("clipboard image: {err}")));
+                            handled = true;
+                        }
+                    }
+                }
+                gpui::ClipboardEntry::ExternalPaths(paths) => {
+                    path_bufs.extend(paths.paths().iter().cloned());
+                    handled = true;
+                }
+                gpui::ClipboardEntry::String(_) => {}
+            }
+        }
+        if !path_bufs.is_empty() {
+            self.add_attachment_paths(&path_bufs, cx);
+            return true;
+        }
+        if handled {
+            return true;
+        }
+
+        let Some(text) = item.text() else {
+            return false;
+        };
+        let paths = paths_from_paste_text(&text);
+        if !paths.is_empty() {
+            self.add_attachment_paths(&paths, cx);
+            return true;
+        }
+
+        let lines = count_text_lines(&text);
+        let threshold = large_paste_threshold();
+        if threshold > 0 && lines >= threshold {
+            self.large_paste_pending = Some(text);
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn apply_large_paste_choice(
+        &mut self,
+        choice: LargePasteChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self.large_paste_pending.take() else {
+            return;
+        };
+        match choice {
+            LargePasteChoice::Wrap => {
+                self.append_composer_fragment(&wrap_attachment(&text), cx);
+            }
+            LargePasteChoice::SaveLocal => {
+                if let Ok(reference) = self.save_local_paste(&text) {
+                    self.append_composer_fragment(&reference, cx);
+                } else {
+                    let lines = count_text_lines(&text);
+                    self.paste_counter = self.paste_counter.saturating_add(1);
+                    let marker = inline_paste_marker(
+                        usize::try_from(self.paste_counter).unwrap_or(usize::MAX),
+                        lines,
+                        text.len(),
+                    );
+                    self.append_composer_fragment(&format!("{marker}\n{text}"), cx);
+                    self.projection.transcript.push(TranscriptEntry::Notice(
+                        "failed to save local://paste — inlined instead".into(),
+                    ));
+                }
+            }
+            LargePasteChoice::Inline => {
+                let lines = count_text_lines(&text);
+                self.paste_counter = self.paste_counter.saturating_add(1);
+                let marker = inline_paste_marker(
+                    usize::try_from(self.paste_counter).unwrap_or(usize::MAX),
+                    lines,
+                    text.len(),
+                );
+                // Keep full text in the draft (marker is a visual cue for the model).
+                self.append_composer_fragment(&format!("{marker}\n{text}"), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn save_local_paste(&mut self, text: &str) -> Result<String, String> {
+        let dir = omp_local_paste_dir(self.projection.state.session_file.as_deref());
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        loop {
+            self.paste_counter = self.paste_counter.saturating_add(1);
+            let name = format!("paste-{}.md", self.paste_counter);
+            let path = dir.join(&name);
+            if path.exists() {
+                continue;
+            }
+            std::fs::write(&path, text).map_err(|err| err.to_string())?;
+            return Ok(format!("local://{name}"));
+        }
+    }
+
+    pub(crate) fn handle_attachment_overlay_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.large_paste_pending.is_some() {
+            let key = event.keystroke.key.to_ascii_lowercase();
+            return match key.as_str() {
+                "1" | "w" => {
+                    self.apply_large_paste_choice(LargePasteChoice::Wrap, cx);
+                    true
+                }
+                "2" | "s" => {
+                    self.apply_large_paste_choice(LargePasteChoice::SaveLocal, cx);
+                    true
+                }
+                "escape" | "esc" | "3" | "i" => {
+                    self.apply_large_paste_choice(LargePasteChoice::Inline, cx);
+                    true
+                }
+                _ => true, // consume while menu open
+            };
+        }
+        if !self.at_mention_open || self.at_mention_candidates.is_empty() {
+            return false;
+        }
+        let key = event.keystroke.key.to_ascii_lowercase();
+        match key.as_str() {
+            "escape" | "esc" => {
+                self.at_mention_open = false;
+                cx.notify();
+                true
+            }
+            "up" | "arrowup" => {
+                let len = self.at_mention_candidates.len();
+                self.at_mention_selected = (self.at_mention_selected + len - 1) % len;
+                cx.notify();
+                true
+            }
+            "down" | "arrowdown" => {
+                let len = self.at_mention_candidates.len();
+                self.at_mention_selected = (self.at_mention_selected + 1) % len;
+                cx.notify();
+                true
+            }
+            "enter" | "return" | "tab" => {
+                if let Some(path) = self.at_mention_candidates.get(self.at_mention_selected) {
+                    let path = path.clone();
+                    self.accept_at_mention(&path, cx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn send_composer_message(&mut self, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        let text = self.composer_draft(cx);
+        if text.trim().is_empty() && self.pending_attachments.is_empty() {
             return;
         }
         if !self.can_send() {
@@ -1154,29 +1802,68 @@ impl SessionView {
         };
 
         let steer = composer_uses_steer(&self.projection.run_phase);
-        self.projection.push_user_message(text.clone());
+        let wire_images = pending_images_to_wire(&self.pending_attachments);
+        let images = (!wire_images.is_empty()).then_some(wire_images);
+        let message = compose_message_with_attachments(&text, &self.pending_attachments);
+        let display = if message.trim().is_empty() {
+            let n = self
+                .pending_attachments
+                .iter()
+                .filter(|a| a.is_image())
+                .count();
+            format!("[{n} image{}]", if n == 1 { "" } else { "s" })
+        } else {
+            message.clone()
+        };
+        self.projection.push_user_message(display);
         self.close_slash_menu();
+        self.at_mention_open = false;
+        self.large_paste_pending = None;
         // Prefer an explicit empty pending value so the next paint always
         // clears even if a later flag race skips `clear_composer`.
         self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
+        self.pending_attachments.clear();
         self.refocus_composer = true;
         cx.notify();
 
-        cx.spawn(async move |_, _| {
+        let message = if message.trim().is_empty() {
+            "(image)".to_owned()
+        } else {
+            message
+        };
+        cx.spawn(async move |view, cx| {
             let body = if steer {
-                RpcCommandBody::Steer {
-                    message: text,
-                    images: None,
-                }
+                RpcCommandBody::Steer { message, images }
             } else {
                 RpcCommandBody::Prompt {
-                    message: text,
-                    images: None,
+                    message,
+                    images,
                     streaming_behavior: None,
                 }
             };
-            let _ = client.send(body).await;
+            match client.send(body).await {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "prompt failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("prompt".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("failed to send prompt (images?): {error}"),
+                            code: Some("prompt".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
     }
@@ -1457,12 +2144,12 @@ impl SessionView {
         match action {
             DialogKeyAction::Confirm => {
                 let mut fields = serde_json::Map::new();
-                fields.insert("accepted".into(), serde_json::Value::Bool(true));
+                fields.insert("confirmed".into(), serde_json::Value::Bool(true));
                 do_dialog_response(&view, &id, fields, cx);
             }
             DialogKeyAction::Deny => {
                 let mut fields = serde_json::Map::new();
-                fields.insert("accepted".into(), serde_json::Value::Bool(false));
+                fields.insert("confirmed".into(), serde_json::Value::Bool(false));
                 do_dialog_response(&view, &id, fields, cx);
             }
             DialogKeyAction::Cancel => do_cancel_dialog(&view, &id, cx),
@@ -1481,31 +2168,72 @@ impl SessionView {
         self.client.is_some()
             && matches!(self.projection.run_phase, RunPhase::Streaming)
             && self.projection.pending_dialogs.is_empty()
-            && !self.composer.read(cx).value().trim().is_empty()
+            && (!self.composer.read(cx).value().trim().is_empty()
+                || !self.pending_attachments.is_empty())
     }
 
     pub(crate) fn do_follow_up(&mut self, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
-        if text.trim().is_empty() {
+        let text = self.composer_draft(cx);
+        if text.trim().is_empty() && self.pending_attachments.is_empty() {
             return;
         }
         let Some(client) = self.client.clone() else {
             return;
         };
 
-        self.projection.push_user_message(text.clone());
+        let wire_images = pending_images_to_wire(&self.pending_attachments);
+        let images = (!wire_images.is_empty()).then_some(wire_images);
+        let message = compose_message_with_attachments(&text, &self.pending_attachments);
+        let display = if message.trim().is_empty() {
+            let n = self
+                .pending_attachments
+                .iter()
+                .filter(|a| a.is_image())
+                .count();
+            format!("[{n} image{}]", if n == 1 { "" } else { "s" })
+        } else {
+            message.clone()
+        };
+        self.projection.push_user_message(display);
+        let message = if message.trim().is_empty() {
+            "(image)".to_owned()
+        } else {
+            message
+        };
         self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
+        self.pending_attachments.clear();
+        self.at_mention_open = false;
+        self.large_paste_pending = None;
         self.refocus_composer = true;
         cx.notify();
 
-        cx.spawn(async move |_, _| {
-            let _ = client
-                .send(RpcCommandBody::FollowUp {
-                    message: text,
-                    images: None,
-                })
-                .await;
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::FollowUp { message, images })
+                .await
+            {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "follow_up failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("follow_up".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("failed to send follow_up (images?): {error}"),
+                            code: Some("follow_up".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
         })
         .detach();
     }
@@ -1708,19 +2436,47 @@ impl SessionView {
     }
 
     pub(crate) fn rename_session(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
+        if self.client.is_none() {
             return;
-        };
+        }
         let cwd = self
             .session_cwd
             .as_deref()
             .unwrap_or(self.launcher_cwd.as_path());
         let current = projection_session_name(&self.projection, cwd);
-        // Lightweight rename: append a short stamp so it's actionable without a modal.
-        let name = format!(
-            "{current} · {stamp}",
-            stamp = current_unix_seconds() % 10_000
-        );
+        self.palette_open = false;
+        self.about_open = false;
+        self.branch_picker = None;
+        self.login_picker = None;
+        self.rename_open = true;
+        self.pending_rename_sync = Some(current);
+        self.refocus_rename_input = true;
+        cx.notify();
+    }
+
+    pub(crate) fn close_rename(&mut self, cx: &mut Context<Self>) {
+        if self.rename_open {
+            self.rename_open = false;
+            self.pending_rename_sync = None;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_rename(&mut self, cx: &mut Context<Self>) {
+        let name = self.rename_input.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "session name cannot be empty".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.rename_open = false;
+        self.refocus_composer = true;
         let name_for_state = name.clone();
         cx.spawn(async move |view, cx| {
             match client
@@ -1765,21 +2521,52 @@ impl SessionView {
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    pub(crate) fn on_rename_input_event(
+        &mut self,
+        _input: gpui::Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.rename_open {
+            return;
+        }
+        if let InputEvent::PressEnter {
+            secondary: false,
+            shift: false,
+        } = event
+        {
+            self.confirm_rename(cx);
+        }
     }
 
     pub(crate) fn take_pending_workspace_palette(&mut self) -> Option<PaletteActionId> {
         self.pending_workspace_palette.take()
     }
 
+    pub(crate) fn take_pending_new_tab_cwd(&mut self) -> Option<PathBuf> {
+        self.pending_new_tab_cwd.take()
+    }
+
     pub(crate) fn toggle_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = !self.palette_open;
         if self.palette_open {
             self.about_open = false;
-            self.palette_query.clear();
+            self.rename_open = false;
+            self.branch_picker = None;
+            self.login_picker = None;
             self.palette_selected = 0;
             self.model_picker_open = false;
             self.thinking_picker_open = false;
             self.slash_menu = SlashMenuState::Closed;
+            self.clear_palette_search = true;
+            self.refocus_palette_search = true;
+            self.refocus_composer = false;
+        } else {
+            self.clear_palette_search = true;
+            self.refocus_composer = true;
         }
         cx.notify();
     }
@@ -1787,14 +2574,18 @@ impl SessionView {
     pub(crate) fn close_palette(&mut self, cx: &mut Context<Self>) {
         if self.palette_open {
             self.palette_open = false;
-            self.palette_query.clear();
             self.palette_selected = 0;
+            self.clear_palette_search = true;
+            self.refocus_composer = true;
             cx.notify();
         }
     }
 
     pub(crate) fn show_about(&mut self, cx: &mut Context<Self>) {
         self.palette_open = false;
+        self.rename_open = false;
+        self.branch_picker = None;
+        self.login_picker = None;
         self.about_open = true;
         cx.notify();
     }
@@ -1913,6 +2704,13 @@ impl SessionView {
                     cx.notify();
                 }
             }
+            PaletteActionId::CycleModel => self.cycle_model(cx),
+            PaletteActionId::CycleThinking => self.cycle_thinking(cx),
+            PaletteActionId::Compact => self.request_compact(cx),
+            PaletteActionId::AbortRetry => self.request_abort_retry(cx),
+            PaletteActionId::AbortAndPrompt => self.request_abort_and_prompt(cx),
+            PaletteActionId::BranchSession => self.open_branch_picker(cx),
+            PaletteActionId::LoginProviders => self.open_login_picker(cx),
             PaletteActionId::NewSession
             | PaletteActionId::CloseSession
             | PaletteActionId::ToggleRail
@@ -1924,6 +2722,550 @@ impl SessionView {
         }
     }
 
+    pub(crate) fn request_abort_and_prompt(&mut self, cx: &mut Context<Self>) {
+        let text = self.composer_draft(cx);
+        if text.trim().is_empty() && self.pending_attachments.is_empty() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "abort_and_prompt needs composer text or attachments".into(),
+            ));
+            self.refocus_composer = true;
+            cx.notify();
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let wire_images = pending_images_to_wire(&self.pending_attachments);
+        let images = (!wire_images.is_empty()).then_some(wire_images);
+        let message = compose_message_with_attachments(&text, &self.pending_attachments);
+        let display = if message.trim().is_empty() {
+            let n = self
+                .pending_attachments
+                .iter()
+                .filter(|a| a.is_image())
+                .count();
+            format!("[{n} image{}]", if n == 1 { "" } else { "s" })
+        } else {
+            message.clone()
+        };
+        self.projection.push_user_message(display);
+        self.close_slash_menu();
+        self.at_mention_open = false;
+        self.large_paste_pending = None;
+        self.pending_composer_value = Some(String::new());
+        self.clear_composer = true;
+        self.pending_attachments.clear();
+        self.refocus_composer = true;
+        self.clear_abort_arm();
+        cx.notify();
+
+        let message = if message.trim().is_empty() {
+            "(image)".to_owned()
+        } else {
+            message
+        };
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::AbortAndPrompt { message, images })
+                .await
+            {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "abort_and_prompt failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("abort_and_prompt".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("abort_and_prompt: {error}"),
+                            code: Some("abort_and_prompt".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn cycle_model(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        // Prefer OMP's cycle_model; fall back to local catalog walk if the
+        // response is hard to parse or the command fails.
+        cx.spawn(
+            async move |view, cx| match client.send(RpcCommandBody::CycleModel).await {
+                Ok(resp) if resp.success => {
+                    let label = resp
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("model").or(Some(data)))
+                        .and_then(format_model_label);
+                    let thinking = resp
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("thinkingLevel"))
+                        .cloned();
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(label) = label {
+                            this.projection.state.model = Some(label);
+                        }
+                        if let Some(thinking) = thinking {
+                            this.projection.state.thinking = Some(thinking);
+                        }
+                        this.sync_status_model();
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Ok(_) | Err(_) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.cycle_model_local(cx);
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    pub(crate) fn cycle_model_local(&mut self, cx: &mut Context<Self>) {
+        if self.available_models.is_empty() {
+            self.start_catalog_load(cx);
+            return;
+        }
+        let current = self.projection.state.model.clone();
+        let idx = self
+            .available_models
+            .iter()
+            .position(|m| {
+                current
+                    .as_deref()
+                    .is_some_and(|cur| format!("{}/{}", m.provider, m.id) == cur)
+            })
+            .unwrap_or(0);
+        let next = &self.available_models[(idx + 1) % self.available_models.len()];
+        self.set_model(next.provider.clone(), next.id.clone(), cx);
+    }
+
+    pub(crate) fn cycle_thinking(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::CycleThinkingLevel).await {
+                Ok(resp) if resp.success => {
+                    let level = resp
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("level"))
+                        .cloned();
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(level) = level {
+                            this.projection.state.thinking = Some(level);
+                            this.sync_status_model();
+                        }
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Ok(_) | Err(_) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.cycle_thinking_local(cx);
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn cycle_thinking_local(&mut self, cx: &mut Context<Self>) {
+        let options = thinking_options_for_model(find_model_choice(
+            &self.available_models,
+            self.projection.state.model.as_deref(),
+        ));
+        if options.is_empty() {
+            self.projection.transcript.push(TranscriptEntry::Notice(
+                "current model has no controllable thinking levels".into(),
+            ));
+            cx.notify();
+            return;
+        }
+        let current =
+            thinking_label(self.projection.state.thinking.as_ref()).unwrap_or_else(|| "off".into());
+        let idx = options.iter().position(|o| o == &current).unwrap_or(0);
+        let next = options[(idx + 1) % options.len()].clone();
+        self.set_thinking_level(&next, cx);
+    }
+
+    pub(crate) fn request_compact(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Compact {
+                    custom_instructions: None,
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "compact failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("compact".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("compact: {error}"),
+                            code: Some("compact".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn request_abort_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        cx.spawn(
+            async move |view, cx| match client.send(RpcCommandBody::AbortRetry).await {
+                Ok(resp) if resp.success => {}
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "abort_retry failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("abort_retry".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("abort_retry: {error}"),
+                            code: Some("abort_retry".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            },
+        )
+        .detach();
+    }
+
+    pub(crate) fn open_branch_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.rename_open = false;
+        self.login_picker = None;
+        self.about_open = false;
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::GetBranchMessages).await {
+                Ok(resp) if resp.success => {
+                    let messages = parse_branch_messages(resp.data.as_ref());
+                    let _ = view.update(cx, |this, cx| {
+                        if messages.is_empty() {
+                            this.projection.transcript.push(TranscriptEntry::Notice(
+                                "no branchable user messages yet".into(),
+                            ));
+                        } else {
+                            this.branch_picker_selected = 0;
+                            this.branch_picker = Some(messages);
+                        }
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "get_branch_messages failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("get_branch_messages".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("get_branch_messages: {error}"),
+                            code: Some("get_branch_messages".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn close_branch_picker(&mut self, cx: &mut Context<Self>) {
+        if self.branch_picker.take().is_some() {
+            self.branch_picker_selected = 0;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_branch_pick(&mut self, entry_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let cwd = self
+            .session_cwd
+            .clone()
+            .unwrap_or_else(|| self.launcher_cwd.clone());
+        self.branch_picker = None;
+        self.branch_picker_selected = 0;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Branch {
+                    entry_id: entry_id.clone(),
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let cancelled = resp
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("cancelled"))
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let _ = view.update(cx, |this, cx| {
+                        if cancelled {
+                            this.projection
+                                .transcript
+                                .push(TranscriptEntry::Notice("branch cancelled".into()));
+                        } else {
+                            this.projection
+                                .transcript
+                                .push(TranscriptEntry::Notice(format!("branched from {entry_id}")));
+                            // Current connection is now the branch; open a parallel
+                            // tab for the same cwd (fresh connect — not switch_session).
+                            this.pending_new_tab_cwd = Some(cwd);
+                            this.refresh_state(cx);
+                        }
+                        this.refocus_composer = true;
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "branch failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("branch".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("branch: {error}"),
+                            code: Some("branch".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn open_login_picker(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.rename_open = false;
+        self.branch_picker = None;
+        self.about_open = false;
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::GetLoginProviders).await {
+                Ok(resp) if resp.success => {
+                    let providers = parse_login_providers(resp.data.as_ref());
+                    let _ = view.update(cx, |this, cx| {
+                        if providers.is_empty() {
+                            this.projection.transcript.push(TranscriptEntry::Notice(
+                                "no login providers reported".into(),
+                            ));
+                        } else {
+                            this.login_picker_selected = 0;
+                            this.login_picker = Some(providers);
+                        }
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "get_login_providers failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("get_login_providers".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("get_login_providers: {error}"),
+                            code: Some("get_login_providers".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn close_login_picker(&mut self, cx: &mut Context<Self>) {
+        if self.login_picker.take().is_some() {
+            self.login_picker_selected = 0;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn confirm_login_provider(&mut self, provider_id: String, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.login_picker = None;
+        self.login_picker_selected = 0;
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::Login {
+                    provider_id: provider_id.clone(),
+                })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(format!(
+                                "login started for {provider_id}"
+                            )));
+                        this.refocus_composer = true;
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "login failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("login".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("login: {error}"),
+                            code: Some("login".into()),
+                        });
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_todo_task(
+        &mut self,
+        phase_ix: usize,
+        task_ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(raw) = self.projection.todos_raw.clone() else {
+            return;
+        };
+        let Some(phases) = toggle_todo_in_phases_json(&raw, phase_ix, task_ix) else {
+            return;
+        };
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        // Optimistic local mirror; OMP `set_todos` response / get_state win.
+        self.projection.todos_raw = Some(phases.clone());
+        cx.notify();
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetTodos { phases }).await {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, |this, cx| {
+                        if let Some(data) = resp.data.as_ref() {
+                            if let Some(todos) = data
+                                .get("todoPhases")
+                                .or_else(|| data.get("phases"))
+                                .cloned()
+                            {
+                                this.projection.todos_raw = Some(todos);
+                            } else if data.is_array() {
+                                this.projection.todos_raw = Some(data.clone());
+                            }
+                        }
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Ok(resp) => {
+                    let error = resp.error.unwrap_or_else(|| "set_todos failed".into());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: error,
+                            code: Some("set_todos".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_todos: {error}"),
+                            code: Some("set_todos".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn handle_palette_key(
         &mut self,
         event: &KeyDownEvent,
@@ -1933,8 +3275,10 @@ impl SessionView {
         if !self.palette_open {
             return false;
         }
-        let key = event.keystroke.key.as_str();
-        let matches = filter_palette_entries(&self.palette_query);
+        let key = event.keystroke.key.to_ascii_lowercase();
+        let key = key.as_str();
+        let query = self.palette_search.read(cx).value().to_string();
+        let matches = filter_palette_entries(&query);
         if matches.is_empty() {
             self.palette_selected = 0;
         } else {
@@ -1963,28 +3307,37 @@ impl SessionView {
             "enter" | "return" => {
                 if let Some(entry) = matches.get(self.palette_selected) {
                     let id = entry.id;
-                    // Workspace-only actions need the parent; emit notice and still try local.
                     self.run_palette_action(id, window, cx);
                 }
                 true
             }
-            "backspace" => {
-                self.palette_query.pop();
+            // Let printable keys reach the focused palette Input.
+            _ => false,
+        }
+    }
+
+    pub(crate) fn on_palette_search_event(
+        &mut self,
+        _input: gpui::Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.palette_open {
+            return;
+        }
+        match event {
+            InputEvent::Change => {
                 self.palette_selected = 0;
                 cx.notify();
-                true
             }
-            _ if key.len() == 1
-                && !event.keystroke.modifiers.platform
-                && !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.alt =>
-            {
-                self.palette_query.push_str(key);
-                self.palette_selected = 0;
+            InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            } => {
+                self.pending_palette_enter = true;
                 cx.notify();
-                true
             }
-            _ => true, // swallow while open
+            _ => {}
         }
     }
 
@@ -2005,6 +3358,110 @@ impl SessionView {
             self.close_about(cx);
         }
         true
+    }
+
+    pub(crate) fn handle_rename_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.rename_open {
+            return false;
+        }
+        if !event.keystroke.modifiers.modified()
+            && matches!(event.keystroke.key.as_str(), "escape" | "esc")
+        {
+            self.close_rename(cx);
+            return true;
+        }
+        // Let printable keys / Enter reach the rename Input.
+        false
+    }
+
+    pub(crate) fn handle_branch_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(len) = self.branch_picker.as_ref().map(Vec::len) else {
+            return false;
+        };
+        if len == 0 {
+            return false;
+        }
+        let key = event.keystroke.key.to_ascii_lowercase();
+        match key.as_str() {
+            "escape" | "esc" => {
+                self.close_branch_picker(cx);
+                true
+            }
+            "up" | "arrowup" => {
+                self.branch_picker_selected = (self.branch_picker_selected + len - 1) % len;
+                cx.notify();
+                true
+            }
+            "down" | "arrowdown" => {
+                self.branch_picker_selected = (self.branch_picker_selected + 1) % len;
+                cx.notify();
+                true
+            }
+            "enter" | "return" => {
+                let entry_id = self
+                    .branch_picker
+                    .as_ref()
+                    .and_then(|m| m.get(self.branch_picker_selected))
+                    .map(|c| c.entry_id.clone());
+                if let Some(entry_id) = entry_id {
+                    self.confirm_branch_pick(entry_id, cx);
+                }
+                true
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) fn handle_login_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(len) = self.login_picker.as_ref().map(Vec::len) else {
+            return false;
+        };
+        if len == 0 {
+            return false;
+        }
+        let key = event.keystroke.key.to_ascii_lowercase();
+        match key.as_str() {
+            "escape" | "esc" => {
+                self.close_login_picker(cx);
+                true
+            }
+            "up" | "arrowup" => {
+                self.login_picker_selected = (self.login_picker_selected + len - 1) % len;
+                cx.notify();
+                true
+            }
+            "down" | "arrowdown" => {
+                self.login_picker_selected = (self.login_picker_selected + 1) % len;
+                cx.notify();
+                true
+            }
+            "enter" | "return" => {
+                let choice = self
+                    .login_picker
+                    .as_ref()
+                    .and_then(|p| p.get(self.login_picker_selected))
+                    .cloned();
+                if let Some(choice) = choice
+                    && choice.available
+                {
+                    self.confirm_login_provider(choice.id, cx);
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     pub(crate) fn rail_entry(&self, ix: usize) -> RailEntry {
@@ -2028,6 +3485,14 @@ impl SessionView {
             phase: phase.to_owned(),
             cwd: cwd.to_owned(),
             attention: self.rail_attention(),
+            session_file: self
+                .projection
+                .state
+                .session_file
+                .as_deref()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from),
         }
     }
 
@@ -2043,10 +3508,25 @@ impl SessionView {
             .session_cwd
             .as_deref()
             .unwrap_or(self.launcher_cwd.as_path());
-        workspace_window_title(
+        let base = workspace_window_title(
             &projection_session_name(&self.projection, cwd),
             &self.projection.run_phase,
-        )
+        );
+        // OMP only emits setTitle when PI_RPC_EMIT_TITLE is set; mirror that
+        // for the OS window title, while inspector always shows display.title.
+        if emit_rpc_titles()
+            && let Some(title) = self
+                .projection
+                .display
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+        {
+            format!("{base} — {title}")
+        } else {
+            base
+        }
     }
 
     pub(crate) fn shutdown_session(&mut self, cx: &mut Context<Self>) {
@@ -2055,6 +3535,8 @@ impl SessionView {
         self.pump.take();
         self.running_tool_started.clear();
         self.running_tool_timer.take();
+        self.dialog_timeout_gens.clear();
+        self.dialog_input_bound_id = None;
         cx.notify();
     }
 }
@@ -2063,6 +3545,16 @@ impl SessionView {
 
 pub(crate) fn short_model_label(full: &str) -> String {
     full.strip_prefix("cursor/").unwrap_or(full).to_owned()
+}
+
+pub(crate) fn role_color_tag(color: OmpRoleColor) -> Tag {
+    match color {
+        OmpRoleColor::Success => Tag::success(),
+        OmpRoleColor::Warning => Tag::warning(),
+        OmpRoleColor::Accent => Tag::info(),
+        OmpRoleColor::Error => Tag::danger(),
+        OmpRoleColor::Muted | OmpRoleColor::Dim => Tag::secondary(),
+    }
 }
 
 pub(crate) fn phase_tag(phase: &str) -> Tag {
@@ -2089,6 +3581,41 @@ pub(crate) fn format_running_elapsed(elapsed: Duration) -> String {
 
 pub(crate) fn composer_uses_steer(phase: &RunPhase) -> bool {
     matches!(phase, RunPhase::Streaming)
+}
+
+pub(crate) fn emit_rpc_titles() -> bool {
+    match std::env::var("PI_RPC_EMIT_TITLE") {
+        Ok(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Non-empty `setStatus` lines for chrome (key → text).
+pub(crate) fn display_status_lines(display: &DisplayState) -> Vec<(String, String)> {
+    display
+        .statuses
+        .iter()
+        .filter_map(|(key, text)| {
+            let text = text.as_deref()?.trim();
+            (!text.is_empty()).then(|| (key.clone(), text.to_owned()))
+        })
+        .collect()
+}
+
+pub(crate) fn display_widget_lines(raw: &serde_json::Value) -> Vec<String> {
+    raw.get("widgetLines")
+        .and_then(serde_json::Value::as_array)
+        .map(|lines| {
+            lines
+                .iter()
+                .filter_map(|line| line.as_str().map(str::to_owned))
+                .filter(|line| !line.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn phase_allows_send(phase: &RunPhase) -> bool {
@@ -2284,19 +3811,38 @@ pub(crate) fn todo_open_count(phases: &[TodoPhaseView]) -> usize {
         .count()
 }
 
-pub(crate) fn render_todo_task(task: &TodoTaskView, theme: &Theme) -> gpui::AnyElement {
+pub(crate) fn render_todo_task_editable(
+    task: &TodoTaskView,
+    phase_ix: usize,
+    task_ix: usize,
+    connected: bool,
+    session: &gpui::Entity<SessionView>,
+    window: &mut Window,
+    theme: &Theme,
+) -> gpui::AnyElement {
     let blocker = (task.status == "blocked")
         .then(|| task.blocker.clone())
         .flatten();
+    let label = format!("{} {}", todo_status_glyph(&task.status), task.content);
     v_flex()
         .w_full()
         .gap_0()
         .child(
-            h_flex()
-                .w_full()
-                .gap_2()
-                .child(Label::new(todo_status_glyph(&task.status)).text_xs())
-                .child(Label::new(task.content.clone()).text_sm()),
+            Button::new((
+                "todo-toggle",
+                phase_ix.saturating_mul(10_000).saturating_add(task_ix),
+            ))
+            .label(label)
+            .small()
+            .ghost()
+            .w_full()
+            .disabled(!connected)
+            .on_click(window.listener_for(
+                session,
+                move |this, _: &ClickEvent, _window, cx| {
+                    this.toggle_todo_task(phase_ix, task_ix, cx);
+                },
+            )),
         )
         .when_some(blocker, |row, blocker| {
             row.child(
@@ -2331,6 +3877,44 @@ impl Render for SessionView {
             self.model_search.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
+        }
+        if self.clear_palette_search {
+            self.clear_palette_search = false;
+            self.palette_search.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
+        if let Some((placeholder, value)) = self.pending_dialog_input_sync.take() {
+            self.dialog_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+                input.set_value(value, window, cx);
+            });
+        }
+        if let Some(value) = self.pending_rename_sync.take() {
+            self.rename_input.update(cx, |input, cx| {
+                input.set_value(value, window, cx);
+            });
+        }
+        if self.refocus_rename_input {
+            self.refocus_rename_input = false;
+            self.rename_input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        if self.refocus_palette_search {
+            self.refocus_palette_search = false;
+            self.palette_search.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        if self.pending_palette_enter {
+            self.pending_palette_enter = false;
+            let query = self.palette_search.read(cx).value().to_string();
+            let matches = filter_palette_entries(&query);
+            if let Some(entry) = matches.get(self.palette_selected) {
+                let id = entry.id;
+                self.run_palette_action(id, window, cx);
+            }
         }
 
         if self.launcher_phase != LauncherPhase::Hidden {
@@ -2402,40 +3986,75 @@ impl Render for SessionView {
             .slash_selected
             .min(slash_matches.len().saturating_sub(1));
         let slash_has_matches = !slash_matches.is_empty();
-        let palette_matches = filter_palette_entries(&self.palette_query);
+        let large_paste_lines = self
+            .large_paste_pending
+            .as_ref()
+            .map(|text| count_text_lines(text));
+        let at_mention_cwd = self.session_cwd_path();
+        let at_mention_items = if self.at_mention_open {
+            self.at_mention_candidates
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let at_mention_selected = self
+            .at_mention_selected
+            .min(at_mention_items.len().saturating_sub(1));
+        let palette_query = self.palette_search.read(cx).value().to_string();
+        let palette_matches = filter_palette_entries(&palette_query);
         if palette_matches.is_empty() {
             self.palette_selected = 0;
         } else {
             self.palette_selected = self.palette_selected.min(palette_matches.len() - 1);
         }
         let palette_selected = self.palette_selected;
-        let palette_query_label = if self.palette_query.is_empty() {
-            "Type to filter…".to_owned()
-        } else {
-            self.palette_query.clone()
-        };
         let pending_revert = self.pending_revert.clone();
         let transcript_empty = self.projection.transcript.is_empty();
+        let display_statuses = display_status_lines(&self.projection.display);
+        let display_widgets = self
+            .projection
+            .display
+            .widgets
+            .iter()
+            .map(|(key, raw)| {
+                let lines = display_widget_lines(raw);
+                (key.clone(), lines)
+            })
+            .collect::<Vec<_>>();
+        let fast_supported = current_model.is_some_and(|choice| {
+            model_supports_fast_mode(&choice.provider, choice.api.as_deref(), &choice.id)
+        }) || self.projection.state.model.as_deref().is_some_and(|label| {
+            split_model_label(label)
+                .is_some_and(|(provider, id)| model_supports_fast_mode(&provider, None, &id))
+        });
 
         div()
             .size_full()
             .relative()
+            .capture_key_down(cx.listener(|this, event, window, cx| {
+                let handled = this.handle_about_key(event, cx)
+                    || this.handle_rename_key(event, cx)
+                    || this.handle_branch_picker_key(event, cx)
+                    || this.handle_login_picker_key(event, cx)
+                    || this.handle_palette_key(event, window, cx)
+                    || this.handle_dialog_key(event, cx)
+                    || this.handle_attachment_overlay_key(event, cx)
+                    || this.handle_composer_paste_key(event, window, cx)
+                    || this.handle_slash_key(event, window, cx)
+                    || this.handle_abort_esc_key(event, cx)
+                    || this.handle_transcript_nav_key(event, window, cx);
+                if handled {
+                    cx.stop_propagation();
+                }
+            }))
             .child(
                 v_flex()
                     .size_full()
                     .bg(theme.background)
                     .text_color(theme.foreground)
-                    .capture_key_down(cx.listener(|this, event, window, cx| {
-                        let handled = this.handle_about_key(event, cx)
-                            || this.handle_palette_key(event, window, cx)
-                            || this.handle_dialog_key(event, cx)
-                            || this.handle_slash_key(event, window, cx)
-                            || this.handle_abort_esc_key(event, cx)
-                            || this.handle_transcript_nav_key(event, window, cx);
-                        if handled {
-                            cx.stop_propagation();
-                        }
-                    }))
                     .child(
                         v_flex()
                             .w_full()
@@ -2490,41 +4109,8 @@ impl Render for SessionView {
                                         h_flex()
                                             .justify_end()
                                             .gap_2()
-                                            .child(
-                                                Button::new("model-picker")
-                                                    .label(model_button_label)
-                                                    .small()
-                                                    .ghost()
-                                                    .disabled(!can_pick)
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.toggle_model_picker(cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .when(show_thinking_control, |group| {
-                                                group.child(
-                                                    Button::new("thinking-picker")
-                                                        .label(thinking_button_label)
-                                                        .small()
-                                                        .ghost()
-                                                        .disabled(!can_pick)
-                                                        .on_click(cx.listener(
-                                                            |this, _: &ClickEvent, _window, cx| {
-                                                                this.toggle_thinking_picker(cx);
-                                                            },
-                                                        )),
-                                                )
-                                            })
                                             .when(!self.inspector_open, |group| {
                                                 group
-                                                    .child(
-                                                        div()
-                                                            .w(px(1.))
-                                                            .h(px(16.))
-                                                            .mx_1()
-                                                            .bg(theme.border),
-                                                    )
                                                     .child(
                                                         Button::new("todo-panel-toggle")
                                                             .label("Checklist")
@@ -2560,10 +4146,14 @@ impl Render for SessionView {
                                                                 },
                                                             )),
                                                     )
+                                                    .child(
+                                                        div()
+                                                            .w(px(1.))
+                                                            .h(px(16.))
+                                                            .mx_1()
+                                                            .bg(theme.border),
+                                                    )
                                             })
-                                            .child(
-                                                div().w(px(1.)).h(px(16.)).mx_1().bg(theme.border),
-                                            )
                                             .child(
                                                 Button::new("more-actions")
                                                     .label("More")
@@ -2577,90 +4167,50 @@ impl Render for SessionView {
                                             ),
                                     ),
                             )
-                            .when(self.model_picker_open, |parent| {
-                                parent.child(
+                            .when(!display_statuses.is_empty(), |bar| {
+                                bar.child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .pb_2()
+                                        .gap_2()
+                                        .flex_wrap()
+                                        .children(display_statuses.into_iter().map(
+                                            |(key, text)| {
+                                                Label::new(format!("{key}: {text}"))
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                            },
+                                        )),
+                                )
+                            })
+                            .when(!display_widgets.is_empty(), |bar| {
+                                bar.child(
                                     v_flex()
                                         .w_full()
                                         .px_3()
                                         .pb_2()
                                         .gap_1()
-                                        .border_b_1()
-                                        .border_color(theme.border)
-                                        .child(
-                                            Input::new(&self.model_search)
-                                                .appearance(true)
-                                                .focus_bordered(true),
-                                        )
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .overflow_y_scrollbar()
-                                                .max_h(px(240.))
-                                                .children(visible.iter().enumerate().map(
-                                                    |(ix, choice)| {
-                                                        let label = format!(
-                                                            "{}/{}",
-                                                            choice.provider, choice.id
-                                                        );
-                                                        let provider = choice.provider.clone();
-                                                        let id = choice.id.clone();
-                                                        Button::new(("model-choice", ix))
-                                                            .label(label)
-                                                            .ghost()
-                                                            .small()
-                                                            .w_full()
-                                                            .on_click(window.listener_for(
-                                                                &view,
-                                                                move |this, _, _window, cx| {
-                                                                    this.close_model_picker(cx);
-                                                                    this.set_model(
-                                                                        provider.clone(),
-                                                                        id.clone(),
-                                                                        cx,
-                                                                    );
-                                                                },
-                                                            ))
-                                                    },
-                                                )),
-                                        )
-                                        .when(!footer.is_empty(), |panel| {
-                                            panel.child(
-                                                Label::new(footer)
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground),
-                                            )
-                                        })
-                                        .when(visible.is_empty(), |panel| {
-                                            panel.child(
-                                                Label::new("(no matches)")
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground),
-                                            )
-                                        }),
-                                )
-                            })
-                            .when(self.thinking_picker_open, |parent| {
-                                parent.child(
-                                    h_flex()
-                                        .w_full()
-                                        .px_3()
-                                        .pb_2()
-                                        .gap_1()
-                                        .border_b_1()
-                                        .border_color(theme.border)
-                                        .children(thinking_options.iter().enumerate().map(
-                                            |(ix, level)| {
-                                                let level = level.clone();
-                                                Button::new(("thinking-choice", ix))
-                                                    .label(level.clone())
-                                                    .ghost()
-                                                    .small()
-                                                    .on_click(window.listener_for(
-                                                        &view,
-                                                        move |this, _, _window, cx| {
-                                                            this.set_thinking_level(&level, cx);
-                                                        },
-                                                    ))
+                                        .children(display_widgets.into_iter().map(
+                                            |(key, lines)| {
+                                                v_flex()
+                                                    .w_full()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        Label::new(format!("widget:{key}"))
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                    )
+                                                    .when(lines.is_empty(), |slot| {
+                                                        slot.child(
+                                                            Label::new("(empty)")
+                                                                .text_xs()
+                                                                .text_color(theme.muted_foreground),
+                                                        )
+                                                    })
+                                                    .children(lines.into_iter().map(|line| {
+                                                        Label::new(line).text_xs()
+                                                    }))
                                             },
                                         )),
                                 )
@@ -2861,158 +4411,710 @@ impl Render for SessionView {
                         },
                     )
                     .child(
-                        h_flex()
+                        v_flex()
                             .w_full()
-                            .px_3()
-                            .py_2()
-                            .gap_2()
                             .bg(theme.secondary)
                             .border_t_1()
                             .border_color(theme.border)
-                            .when(!self.projection.pending_dialogs.is_empty(), |row| {
-                                row.opacity(0.55)
+                            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                                let paths = paths.paths().to_vec();
+                                this.add_attachment_paths(&paths, cx);
+                            }))
+                            .when(!self.projection.pending_dialogs.is_empty(), |band| {
+                                band.opacity(0.55)
                             })
                             .child(
-                                div()
-                                    .relative()
-                                    .flex_1()
+                                h_flex()
+                                    .w_full()
+                                    .px_3()
+                                    .pt_2()
+                                    .pb_1()
+                                    .gap_2()
+                                    .items_center()
                                     .child(
-                                        Input::new(&self.composer)
-                                            .appearance(false)
-                                            .focus_bordered(false),
+                                        Button::new("composer-model-picker")
+                                            .label(model_button_label.clone())
+                                            .small()
+                                            .ghost()
+                                            .disabled(!can_pick)
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, _window, cx| {
+                                                    this.toggle_model_picker(cx);
+                                                },
+                                            )),
                                     )
-                                    .when(slash_menu_visible, |parent| {
-                                        parent.child(
+                                    .children(
+                                        roles_matching_model(
+                                            &self.omp_roles,
+                                            self.projection.state.model.as_deref(),
+                                        )
+                                        .into_iter()
+                                        .map(|role| {
+                                            role_color_tag(role.color)
+                                                .small()
+                                                .child(role.display_name.clone())
+                                        }),
+                                    )
+                                    .when(show_thinking_control, |row| {
+                                        row.child(
+                                            Button::new("composer-thinking-picker")
+                                                .label(thinking_button_label.clone())
+                                                .small()
+                                                .ghost()
+                                                .disabled(!can_pick)
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _window, cx| {
+                                                        this.toggle_thinking_picker(cx);
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .child(
+                                        Switch::new("composer-fast-mode")
+                                            .label("Fast")
+                                            .small()
+                                            .checked(
+                                                self.projection
+                                                    .state
+                                                    .fast_mode_enabled
+                                                    .unwrap_or(false),
+                                            )
+                                            .disabled(!can_pick || !fast_supported)
+                                            .on_click(cx.listener(
+                                                |this, _checked: &bool, _window, cx| {
+                                                    this.toggle_fast_mode(cx);
+                                                },
+                                            )),
+                                    )
+                                    .when(!fast_supported, |row| {
+                                        row.child(
+                                            Label::new("n/a · no service tier")
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                    }),
+                            )
+                            .when(self.model_picker_open, |band| {
+                                band.child(
+                                    v_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .pb_2()
+                                        .child(
                                             v_flex()
-                                                .absolute()
-                                                .bottom_full()
-                                                .left_0()
-                                                .right_0()
-                                                .max_h(px(280.))
-                                                .overflow_y_scrollbar()
-                                                .gap_0()
-                                                .p_1()
-                                                .bg(theme.background)
+                                                .w_full()
+                                                .gap_2()
+                                                .p_3()
+                                                .rounded_lg()
                                                 .border_1()
                                                 .border_color(theme.border)
-                                                .children(slash_matches.iter().enumerate().map(
-                                                    |(ix, command)| {
-                                                        let command_for_click = command.clone();
-                                                        Button::new(("slash-command", ix))
-                                                            .ghost()
-                                                            .small()
-                                                            .w_full()
-                                                            .when(
-                                                                ix == self.slash_selected,
-                                                                |button| button.bg(theme.secondary),
-                                                            )
-                                                            .on_click(window.listener_for(
-                                                                &view,
-                                                                move |this, _, _window, cx| {
-                                                                    this.accept_slash_command(
-                                                                        &command_for_click,
-                                                                        cx,
-                                                                    );
-                                                                },
+                                                .bg(theme.popover)
+                                                .shadow_xl()
+                                                .child(
+                                                    Label::new("Model")
+                                                        .text_sm()
+                                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                                )
+                                                .child(
+                                                    Input::new(&self.model_search)
+                                                        .appearance(true)
+                                                        .focus_bordered(true),
+                                                )
+                                                .when(!self.omp_roles.is_empty(), |panel| {
+                                                    let current_label = self
+                                                        .projection
+                                                        .state
+                                                        .model
+                                                        .as_deref()
+                                                        .map_or_else(
+                                                            || "(no model)".into(),
+                                                            short_model_label,
+                                                        );
+                                                    panel
+                                                        .child(Separator::horizontal())
+                                                        .child(
+                                                            Label::new(format!(
+                                                                "Assign current model ({current_label}) to a role — writes omp config"
                                                             ))
-                                                            .child(
-                                                                h_flex()
-                                                                    .w_full()
-                                                                    .gap_2()
-                                                                    .child(
-                                                                        Label::new(
-                                                                            command.name.clone(),
-                                                                        )
-                                                                        .text_sm(),
-                                                                    )
-                                                                    .when(
-                                                                        !command
-                                                                            .description
-                                                                            .is_empty(),
-                                                                        |row| {
-                                                                            row.child(
-                                                                        Label::new(
-                                                                            command
-                                                                                .description
-                                                                                .clone(),
-                                                                        )
-                                                                        .text_xs()
-                                                                        .text_color(
-                                                                            theme.muted_foreground,
-                                                                        ),
-                                                                    )
-                                                                        },
-                                                                    ),
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                        )
+                                                        .child(
+                                                            h_flex().w_full().flex_wrap().gap_1().children(
+                                                                self.omp_roles.iter().enumerate().map(
+                                                                    |(ix, role)| {
+                                                                        let role_name =
+                                                                            role.name.clone();
+                                                                        let label = format!(
+                                                                            "→ {}",
+                                                                            role.display_name
+                                                                        );
+                                                                        Button::new((
+                                                                            "omp-role-assign",
+                                                                            ix,
+                                                                        ))
+                                                                        .label(label)
+                                                                        .small()
+                                                                        .ghost()
+                                                                        .on_click(window.listener_for(
+                                                                            &view,
+                                                                            move |this,
+                                                                                  _,
+                                                                                  _window,
+                                                                                  cx| {
+                                                                                this.assign_current_model_to_role(
+                                                                                    &role_name,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        ))
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        )
+                                                        .child(
+                                                            Label::new(
+                                                                "Or switch session to a role’s model",
                                                             )
-                                                    },
-                                                ))
-                                                .when(!slash_has_matches, |panel| {
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                        )
+                                                        .child(
+                                                            h_flex().w_full().flex_wrap().gap_1().children(
+                                                                self.omp_roles.iter().enumerate().map(
+                                                                    |(ix, role)| {
+                                                                        let provider =
+                                                                            role.provider.clone();
+                                                                        let id = role.id.clone();
+                                                                        let chip = format!(
+                                                                            "{} · {}",
+                                                                            role.display_name,
+                                                                            short_model_label(
+                                                                                &format!(
+                                                                                    "{}/{}",
+                                                                                    role.provider,
+                                                                                    role.id
+                                                                                ),
+                                                                            )
+                                                                        );
+                                                                        h_flex()
+                                                                            .gap_1()
+                                                                            .items_center()
+                                                                            .child(
+                                                                                role_color_tag(
+                                                                                    role.color,
+                                                                                )
+                                                                                .small()
+                                                                                .child(
+                                                                                    role.display_name
+                                                                                        .clone(),
+                                                                                ),
+                                                                            )
+                                                                            .child(
+                                                                                Button::new((
+                                                                                    "omp-role-switch",
+                                                                                    ix,
+                                                                                ))
+                                                                                .label(chip)
+                                                                                .small()
+                                                                                .ghost()
+                                                                                .on_click(window.listener_for(
+                                                                                    &view,
+                                                                                    move |this,
+                                                                                          _,
+                                                                                          _window,
+                                                                                          cx| {
+                                                                                        this.close_model_picker(
+                                                                                            cx,
+                                                                                        );
+                                                                                        this.set_model(
+                                                                                            provider.clone(),
+                                                                                            id.clone(),
+                                                                                            cx,
+                                                                                        );
+                                                                                    },
+                                                                                )),
+                                                                            )
+                                                                    },
+                                                                ),
+                                                            ),
+                                                        )
+                                                })
+                                                .child(
+                                                    div()
+                                                        .w_full()
+                                                        .max_h(px(260.))
+                                                        .overflow_y_scrollbar()
+                                                        .gap_1()
+                                                        .children(visible.iter().enumerate().map(
+                                                            |(ix, choice)| {
+                                                                let label = format!(
+                                                                    "{}/{}",
+                                                                    choice.provider, choice.id
+                                                                );
+                                                                let provider =
+                                                                    choice.provider.clone();
+                                                                let id = choice.id.clone();
+                                                                let current =
+                                                                    model_label.as_str()
+                                                                        == label.as_str();
+                                                                Button::new(("model-choice", ix))
+                                                                    .label(label)
+                                                                    .small()
+                                                                    .w_full()
+                                                                    .when(current, Button::primary)
+                                                                    .when(!current, Button::ghost)
+                                                                    .on_click(window.listener_for(
+                                                                        &view,
+                                                                        move |this,
+                                                                              _,
+                                                                              _window,
+                                                                              cx| {
+                                                                            this.close_model_picker(
+                                                                                cx,
+                                                                            );
+                                                                            this.set_model(
+                                                                                provider.clone(),
+                                                                                id.clone(),
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    ))
+                                                            },
+                                                        )),
+                                                )
+                                                .when(!footer.is_empty(), |panel| {
+                                                    panel.child(
+                                                        Label::new(footer.clone())
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                    )
+                                                })
+                                                .when(visible.is_empty(), |panel| {
                                                     panel.child(
                                                         Label::new("(no matches)")
                                                             .text_xs()
                                                             .text_color(theme.muted_foreground),
                                                     )
                                                 }),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                Label::new(if cfg!(target_os = "macos") {
-                                    "⌘↩"
-                                } else {
-                                    "Ctrl+Enter"
-                                })
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
-                            )
-                            .child(
-                                Button::new("send")
-                                    .primary()
-                                    .label(if composer_uses_steer(&self.projection.run_phase) {
-                                        "Steer"
-                                    } else {
-                                        "Send"
-                                    })
-                                    .disabled(!self.can_send())
-                                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                        this.send_composer_message(cx);
-                                        this.clear_composer = false;
-                                        this.pending_composer_value = None;
-                                        this.composer.update(cx, |input, cx| {
-                                            input.set_value("", window, cx);
-                                        });
-                                    })),
-                            )
-                            .when_some(self.send_disabled_reason(), |row, reason| {
-                                row.child(
-                                    Label::new(reason)
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
+                                        ),
                                 )
                             })
-                            .when(
-                                matches!(self.projection.run_phase, RunPhase::Streaming),
-                                |parent| {
-                                    parent.child(
-                                        Button::new("follow-up")
-                                            .label("Follow-up")
+                            .when(self.thinking_picker_open, |band| {
+                                band.child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .pb_2()
+                                        .gap_1()
+                                        .flex_wrap()
+                                        .children(thinking_options.iter().enumerate().map(
+                                            |(ix, level)| {
+                                                let level = level.clone();
+                                                Button::new(("thinking-choice", ix))
+                                                    .label(level.clone())
+                                                    .ghost()
+                                                    .small()
+                                                    .on_click(window.listener_for(
+                                                        &view,
+                                                        move |this, _, _window, cx| {
+                                                            this.set_thinking_level(&level, cx);
+                                                        },
+                                                    ))
+                                            },
+                                        )),
+                                )
+                            })
+                            .when(!self.pending_attachments.is_empty(), |band| {
+                                band.child(
+                                    h_flex()
+                                        .w_full()
+                                        .px_3()
+                                        .pb_1()
+                                        .gap_1()
+                                        .flex_wrap()
+                                        .children(self.pending_attachments.iter().enumerate().map(
+                                            |(ix, attachment)| {
+                                                let kind = if attachment.is_image() {
+                                                    "img"
+                                                } else {
+                                                    "@"
+                                                };
+                                                let label =
+                                                    format!("{kind} {}", attachment.chip_label());
+                                                h_flex()
+                                                    .gap_1()
+                                                    .px_2()
+                                                    .py_0p5()
+                                                    .rounded_md()
+                                                    .bg(theme.background)
+                                                    .border_1()
+                                                    .border_color(theme.border)
+                                                    .child(Label::new(label).text_xs())
+                                                    .child(
+                                                        Button::new(("remove-attachment", ix))
+                                                            .label("×")
+                                                            .small()
+                                                            .ghost()
+                                                            .on_click(cx.listener(
+                                                                move |this,
+                                                                      _: &ClickEvent,
+                                                                      _window,
+                                                                      cx| {
+                                                                    this.remove_attachment_at(
+                                                                        ix, cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                            },
+                                        )),
+                                )
+                            })
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .flex_1()
+                                            .child(
+                                                Input::new(&self.composer)
+                                                    .appearance(false)
+                                                    .focus_bordered(false),
+                                            )
+                                            .when(slash_menu_visible, |parent| {
+                                                parent.child(
+                                                    v_flex()
+                                                        .absolute()
+                                                        .bottom_full()
+                                                        .left_0()
+                                                        .right_0()
+                                                        .max_h(px(280.))
+                                                        .overflow_y_scrollbar()
+                                                        .gap_0()
+                                                        .p_1()
+                                                        .bg(theme.popover)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .shadow_lg()
+                                                        .rounded_md()
+                                                        .children(
+                                                            slash_matches.iter().enumerate().map(
+                                                                |(ix, command)| {
+                                                                    let command_for_click =
+                                                                        command.clone();
+                                                                    Button::new((
+                                                                        "slash-command",
+                                                                        ix,
+                                                                    ))
+                                                                    .ghost()
+                                                                    .small()
+                                                                    .w_full()
+                                                                    .when(
+                                                                        ix == self.slash_selected,
+                                                                        |button| {
+                                                                            button
+                                                                                .bg(theme.secondary)
+                                                                        },
+                                                                    )
+                                                                    .on_click(window.listener_for(
+                                                                        &view,
+                                                                        move |this,
+                                                                              _,
+                                                                              _window,
+                                                                              cx| {
+                                                                            this.accept_slash_command(
+                                                                                &command_for_click,
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    ))
+                                                                    .child(
+                                                                        v_flex()
+                                                                            .w_full()
+                                                                            .gap_0p5()
+                                                                            .child(
+                                                                                Label::new(
+                                                                                    command
+                                                                                        .name
+                                                                                        .clone(),
+                                                                                )
+                                                                                .text_sm(),
+                                                                            )
+                                                                            .when(
+                                                                                !command
+                                                                                    .description
+                                                                                    .is_empty(),
+                                                                                |col| {
+                                                                                    col.child(
+                                                                                        Label::new(
+                                                                                            command
+                                                                                                .description
+                                                                                                .clone(),
+                                                                                        )
+                                                                                        .text_xs()
+                                                                                        .text_color(
+                                                                                            theme
+                                                                                                .muted_foreground,
+                                                                                        ),
+                                                                                    )
+                                                                                },
+                                                                            ),
+                                                                    )
+                                                                },
+                                                            ),
+                                                        )
+                                                        .when(!slash_has_matches, |panel| {
+                                                            panel.child(
+                                                                Label::new("(no matches)")
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    ),
+                                                            )
+                                                        }),
+                                                )
+                                            })
+                                            .when_some(large_paste_lines, |parent, lines| {
+                                                parent.child(
+                                                    v_flex()
+                                                        .absolute()
+                                                        .bottom_full()
+                                                        .left_0()
+                                                        .right_0()
+                                                        .gap_1()
+                                                        .p_2()
+                                                        .mb_1()
+                                                        .bg(theme.popover)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .shadow_lg()
+                                                        .rounded_md()
+                                                        .child(
+                                                            Label::new(format!(
+                                                                "Pasted {lines} lines"
+                                                            ))
+                                                            .text_sm()
+                                                            .font_weight(gpui::FontWeight::SEMIBOLD),
+                                                        )
+                                                        .child(
+                                                            Label::new(
+                                                                "Wrap in <attachment>, save local://paste, or paste inline",
+                                                            )
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                        )
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_1()
+                                                                .child(
+                                                                    Button::new("large-paste-wrap")
+                                                                        .label("Wrap")
+                                                                        .small()
+                                                                        .primary()
+                                                                        .on_click(cx.listener(
+                                                                            |this,
+                                                                             _: &ClickEvent,
+                                                                             _w,
+                                                                             cx| {
+                                                                                this.apply_large_paste_choice(
+                                                                                    LargePasteChoice::Wrap,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        )),
+                                                                )
+                                                                .child(
+                                                                    Button::new("large-paste-save")
+                                                                        .label("Save local://")
+                                                                        .small()
+                                                                        .ghost()
+                                                                        .on_click(cx.listener(
+                                                                            |this,
+                                                                             _: &ClickEvent,
+                                                                             _w,
+                                                                             cx| {
+                                                                                this.apply_large_paste_choice(
+                                                                                    LargePasteChoice::SaveLocal,
+                                                                                    cx,
+                                                                                );
+                                                                            },
+                                                                        )),
+                                                                )
+                                                                .child(
+                                                                    Button::new(
+                                                                        "large-paste-inline",
+                                                                    )
+                                                                    .label("Inline")
+                                                                    .small()
+                                                                    .ghost()
+                                                                    .on_click(cx.listener(
+                                                                        |this,
+                                                                         _: &ClickEvent,
+                                                                         _w,
+                                                                         cx| {
+                                                                            this.apply_large_paste_choice(
+                                                                                LargePasteChoice::Inline,
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    )),
+                                                                ),
+                                                        ),
+                                                )
+                                            })
+                                            .when(!at_mention_items.is_empty(), |parent| {
+                                                parent.child(
+                                                    v_flex()
+                                                        .absolute()
+                                                        .bottom_full()
+                                                        .left_0()
+                                                        .right_0()
+                                                        .max_h(px(240.))
+                                                        .overflow_y_scrollbar()
+                                                        .gap_0()
+                                                        .p_1()
+                                                        .mb_1()
+                                                        .bg(theme.popover)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .shadow_lg()
+                                                        .rounded_md()
+                                                        .children(
+                                                            at_mention_items
+                                                                .iter()
+                                                                .enumerate()
+                                                                .map(|(ix, path)| {
+                                                                    let path_for_click =
+                                                                        path.clone();
+                                                                    let label =
+                                                                        path_mention_display(
+                                                                            path,
+                                                                            Some(
+                                                                                at_mention_cwd
+                                                                                    .as_path(),
+                                                                            ),
+                                                                        );
+                                                                    Button::new((
+                                                                        "at-mention",
+                                                                        ix,
+                                                                    ))
+                                                                    .ghost()
+                                                                    .small()
+                                                                    .w_full()
+                                                                    .when(
+                                                                        ix == at_mention_selected,
+                                                                        |button| {
+                                                                            button.bg(
+                                                                                theme.secondary,
+                                                                            )
+                                                                        },
+                                                                    )
+                                                                    .label(label)
+                                                                    .on_click(window.listener_for(
+                                                                        &view,
+                                                                        move |this,
+                                                                              _,
+                                                                              _window,
+                                                                              cx| {
+                                                                            this.accept_at_mention(
+                                                                                &path_for_click,
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    ))
+                                                                }),
+                                                        ),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("attach-files")
+                                            .label("Attach")
+                                            .small()
                                             .ghost()
-                                            .disabled(!self.can_follow_up(cx))
+                                            .disabled(!can_pick)
                                             .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.do_follow_up(cx);
+                                                |this, _: &ClickEvent, window, cx| {
+                                                    this.prompt_attach_files(window, cx);
                                                 },
                                             )),
                                     )
-                                },
-                            )
-                            .when(self.can_abort(), |parent| {
-                                parent.child(Button::new("abort").danger().label("Abort").on_click(
-                                    cx.listener(|this, _: &ClickEvent, _window, cx| {
-                                        this.do_abort(cx);
+                                    .child(
+                                        Label::new(if cfg!(target_os = "macos") {
+                                            "⌘↩"
+                                        } else {
+                                            "Ctrl+Enter"
+                                        })
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                    )
+                                    .child(
+                                        Button::new("send")
+                                            .primary()
+                                            .label(if composer_uses_steer(
+                                                &self.projection.run_phase,
+                                            ) {
+                                                "Steer"
+                                            } else {
+                                                "Send"
+                                            })
+                                            .disabled(!self.can_send())
+                                            .on_click(cx.listener(
+                                                |this, _: &ClickEvent, window, cx| {
+                                                    this.send_composer_message(cx);
+                                                    this.clear_composer = false;
+                                                    this.pending_composer_value = None;
+                                                    this.composer.update(cx, |input, cx| {
+                                                        input.set_value("", window, cx);
+                                                    });
+                                                },
+                                            )),
+                                    )
+                                    .when_some(self.send_disabled_reason(), |row, reason| {
+                                        row.child(
+                                            Label::new(reason)
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                    })
+                                    .when(
+                                        matches!(
+                                            self.projection.run_phase,
+                                            RunPhase::Streaming
+                                        ),
+                                        |parent| {
+                                            parent.child(
+                                                Button::new("follow-up")
+                                                    .label("Follow-up")
+                                                    .ghost()
+                                                    .disabled(!self.can_follow_up(cx))
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.do_follow_up(cx);
+                                                        },
+                                                    )),
+                                            )
+                                        },
+                                    )
+                                    .when(self.can_abort(), |parent| {
+                                        parent.child(
+                                            Button::new("abort")
+                                                .danger()
+                                                .label("Abort")
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _window, cx| {
+                                                        this.do_abort(cx);
+                                                    },
+                                                )),
+                                        )
                                     }),
-                                ))
-                            }),
+                            ),
                     ),
             )
             .when(self.palette_open, |parent| {
@@ -3037,10 +5139,11 @@ impl Render for SessionView {
                                 .max_h(px(420.))
                                 .gap_1()
                                 .p_3()
-                                .rounded_md()
+                                .rounded_lg()
                                 .border_1()
                                 .border_color(theme.border)
-                                .bg(theme.background)
+                                .bg(theme.popover)
+                                .shadow_xl()
                                 .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
                                     cx.stop_propagation();
                                 }))
@@ -3050,33 +5153,52 @@ impl Render for SessionView {
                                         .text_color(theme.muted_foreground),
                                 )
                                 .child(
-                                    Label::new(format!("> {palette_query_label}"))
-                                        .text_sm()
-                                        .font_family(theme.mono_font_family.clone()),
+                                    Input::new(&self.palette_search)
+                                        .appearance(true)
+                                        .focus_bordered(true),
                                 )
-                                .children(palette_matches.iter().enumerate().map(|(ix, entry)| {
-                                    let id = entry.id;
-                                    let selected = ix == palette_selected;
-                                    let theme_pref = cx.global::<ThemePreferenceState>().0;
-                                    Button::new(("palette-entry", ix))
-                                        .label(palette_entry_display_label(entry, theme_pref))
-                                        .small()
+                                .child(
+                                    v_flex()
                                         .w_full()
-                                        .when(selected, Button::primary)
-                                        .when(!selected, Button::ghost)
-                                        .on_click(cx.listener(
-                                            move |this, _: &ClickEvent, window, cx| {
-                                                this.run_palette_action(id, window, cx);
-                                            },
-                                        ))
-                                }))
-                                .when(palette_matches.is_empty(), |panel| {
-                                    panel.child(
-                                        Label::new("(no matches)")
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground),
-                                    )
-                                }),
+                                        .max_h(px(340.))
+                                        .overflow_y_scrollbar()
+                                        .gap_1()
+                                        .children(
+                                            palette_matches.iter().enumerate().map(
+                                                |(ix, entry)| {
+                                                    let id = entry.id;
+                                                    let selected = ix == palette_selected;
+                                                    let theme_pref =
+                                                        cx.global::<ThemePreferenceState>().0;
+                                                    Button::new(("palette-entry", ix))
+                                                        .label(palette_entry_display_label(
+                                                            entry, theme_pref,
+                                                        ))
+                                                        .small()
+                                                        .w_full()
+                                                        .when(selected, Button::primary)
+                                                        .when(!selected, Button::ghost)
+                                                        .on_click(cx.listener(
+                                                            move |this,
+                                                                  _: &ClickEvent,
+                                                                  window,
+                                                                  cx| {
+                                                                this.run_palette_action(
+                                                                    id, window, cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                },
+                                            ),
+                                        )
+                                        .when(palette_matches.is_empty(), |list| {
+                                            list.child(
+                                                Label::new("(no matches)")
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        }),
+                                ),
                         ),
                 )
             })
@@ -3104,10 +5226,11 @@ impl Render for SessionView {
                                 .w(px(420.))
                                 .gap_3()
                                 .p_5()
-                                .rounded_md()
+                                .rounded_lg()
                                 .border_1()
                                 .border_color(theme.border)
-                                .bg(theme.background)
+                                .bg(theme.popover)
+                                .shadow_xl()
                                 .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
                                     cx.stop_propagation();
                                 }))
@@ -3126,7 +5249,7 @@ impl Render for SessionView {
                                 .child(Label::new(version).text_sm())
                                 .child(
                                     Label::new(
-                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript",
+                                        "⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript · palette: Cycle model/thinking, Abort and prompt, Branch, Login",
                                     )
                                     .text_xs()
                                     .text_color(theme.muted_foreground),
@@ -3143,6 +5266,222 @@ impl Render for SessionView {
                                         }),
                                     ),
                                 )),
+                        ),
+                )
+            })
+            .when(self.rename_open, |parent| {
+                parent.child(
+                    div()
+                        .id("rename-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_rename(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("rename-panel")
+                                .w(px(380.))
+                                .gap_3()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Rename session")
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Input::new(&self.rename_input)
+                                        .appearance(true)
+                                        .focus_bordered(true),
+                                )
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_end()
+                                        .gap_2()
+                                        .child(
+                                            Button::new("rename-cancel")
+                                                .label("Cancel")
+                                                .ghost()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.close_rename(cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            Button::new("rename-confirm")
+                                                .label("Rename")
+                                                .primary()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.confirm_rename(cx);
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        ),
+                )
+            })
+            .when_some(self.branch_picker.clone(), |parent, messages| {
+                let selected = self.branch_picker_selected;
+                parent.child(
+                    div()
+                        .id("branch-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_branch_picker(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("branch-panel")
+                                .w(px(440.))
+                                .max_h(px(420.))
+                                .gap_2()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Branch into new tab")
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    Label::new("Pick a user message to fork from")
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .max_h(px(320.))
+                                        .overflow_y_scrollbar()
+                                        .gap_1()
+                                        .children(messages.into_iter().enumerate().map(
+                                            |(ix, msg)| {
+                                                let entry_id = msg.entry_id.clone();
+                                                let preview =
+                                                    branch_message_preview(&msg.text, 96);
+                                                let label =
+                                                    format!("{} · {preview}", msg.entry_id);
+                                                Button::new(("branch-msg", ix))
+                                                    .label(label)
+                                                    .small()
+                                                    .w_full()
+                                                    .when(ix == selected, Button::primary)
+                                                    .when(ix != selected, Button::ghost)
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _w, cx| {
+                                                            this.confirm_branch_pick(
+                                                                entry_id.clone(),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                            },
+                                        )),
+                                ),
+                        ),
+                )
+            })
+            .when_some(self.login_picker.clone(), |parent, providers| {
+                let selected = self.login_picker_selected;
+                parent.child(
+                    div()
+                        .id("login-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_login_picker(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("login-panel")
+                                .w(px(400.))
+                                .max_h(px(360.))
+                                .gap_2()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    Label::new("Login providers")
+                                        .text_sm()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .max_h(px(280.))
+                                        .overflow_y_scrollbar()
+                                        .gap_1()
+                                        .children(providers.into_iter().enumerate().map(
+                                            |(ix, provider)| {
+                                                let provider_id = provider.id.clone();
+                                                let status = if provider.authenticated {
+                                                    "signed in"
+                                                } else if provider.available {
+                                                    "available"
+                                                } else {
+                                                    "unavailable"
+                                                };
+                                                let label = format!(
+                                                    "{} · {status}",
+                                                    provider.name
+                                                );
+                                                Button::new(("login-provider", ix))
+                                                    .label(label)
+                                                    .small()
+                                                    .w_full()
+                                                    .disabled(!provider.available)
+                                                    .when(ix == selected, Button::primary)
+                                                    .when(ix != selected, Button::ghost)
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _w, cx| {
+                                                            this.confirm_login_provider(
+                                                                provider_id.clone(),
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                            },
+                                        )),
+                                ),
                         ),
                 )
             })
@@ -3446,7 +5785,7 @@ pub(crate) fn try_connect_omp(
     let _sub = smol::block_on(async {
         client
             .send(RpcCommandBody::SetSubagentSubscription {
-                level: SubagentSubscriptionLevel::Progress,
+                level: SubagentSubscriptionLevel::Events,
             })
             .await
     });

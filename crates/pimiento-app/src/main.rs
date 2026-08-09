@@ -12,9 +12,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
-    App, Bounds, ClickEvent, ClipboardItem, Context, ElementId, Focusable, FollowMode, Global,
-    KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions, Pixels, Render, Task,
-    Window, WindowAppearance, WindowBounds, WindowOptions, div, list, point, prelude::*, px, size,
+    App, Bounds, ClickEvent, ClipboardItem, Context, ElementId, ExternalPaths, Focusable,
+    FollowMode, Global, KeyDownEvent, ListAlignment, ListOffset, ListState, PathPromptOptions,
+    Pixels, Render, Task, Window, WindowAppearance, WindowBounds, WindowOptions, div, list, point,
+    prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode,
@@ -39,13 +40,16 @@ use omp_rpc_client::{
 };
 use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
-    projection::{RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label},
+    projection::{
+        DisplayState, RunPhase, SessionProjection, UiDialog, format_model_label, split_model_label,
+    },
     todos::{TodoPhaseView, TodoTaskView, parse_todo_phases, todo_status_glyph},
     transcript::{CompactionPhase, ToolStatus, TranscriptEntry},
 };
 use serde::{Deserialize, Serialize};
 
 mod app_state;
+mod git_status;
 mod models;
 mod palette;
 mod session;
@@ -56,6 +60,8 @@ mod workspace;
 // during this behavior-preserving split.
 #[allow(clippy::wildcard_imports)]
 use app_state::*;
+#[allow(clippy::wildcard_imports)]
+use git_status::*;
 #[allow(clippy::wildcard_imports)]
 use models::*;
 #[allow(clippy::wildcard_imports)]

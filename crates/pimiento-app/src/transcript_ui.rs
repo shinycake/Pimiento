@@ -391,6 +391,45 @@ pub(crate) fn render_entry(
                 .into_any_element()
         }
         TranscriptEntry::Unknown { raw } => {
+            if let Some(summary) = format_file_mention_summary(raw) {
+                let summary_for_copy = summary.clone();
+                return div()
+                    .w_full()
+                    .group("transcript-row")
+                    .py_2()
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(theme.secondary)
+                            .border_l_2()
+                            .border_color(theme.border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .child(summary),
+                            )
+                            .child(
+                                Button::new(("copy-file-mention", row_ix))
+                                    .label("Copy")
+                                    .small()
+                                    .ghost()
+                                    .invisible()
+                                    .group_hover("transcript-row", gpui::Styled::visible)
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            summary_for_copy.clone(),
+                                        ));
+                                    }),
+                            ),
+                    )
+                    .into_any_element();
+            }
             let raw_for_copy = compact_json(raw);
             div()
                 .w_full()
@@ -816,6 +855,7 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
         .child(match dialog.method.as_str() {
             "select" => render_select_dialog(dialog, &select_dialog_options(dialog), cx),
             "confirm" => render_confirm_dialog(dialog, cx),
+            "input" | "editor" => render_text_dialog(dialog, cx),
             "open_url" => render_open_url_dialog(dialog, cx),
             _ => render_cancel_button(dialog, cx),
         })
@@ -880,7 +920,7 @@ pub(crate) fn render_confirm_dialog(
                 .ghost()
                 .on_click(move |_, _, cx| {
                     let mut fields = serde_json::Map::new();
-                    fields.insert("accepted".into(), serde_json::Value::Bool(false));
+                    fields.insert("confirmed".into(), serde_json::Value::Bool(false));
                     do_dialog_response(&view, &id_no, fields, cx);
                 })
         })
@@ -892,7 +932,7 @@ pub(crate) fn render_confirm_dialog(
                 .small()
                 .on_click(move |_, _, cx| {
                     let mut fields = serde_json::Map::new();
-                    fields.insert("accepted".into(), serde_json::Value::Bool(true));
+                    fields.insert("confirmed".into(), serde_json::Value::Bool(true));
                     do_dialog_response(&view, &id_yes, fields, cx);
                 })
         })
@@ -990,6 +1030,62 @@ pub(crate) fn render_open_url_dialog(
         .into_any_element()
 }
 
+pub(crate) fn render_text_dialog(
+    dialog: &UiDialog,
+    cx: &mut Context<SessionView>,
+) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    let view = cx.entity().downgrade();
+    let id = dialog.id.clone();
+    let id_submit = dialog.id.clone();
+    let dialog_input = cx.entity().read(cx).dialog_input.clone();
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_end()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .px_2()
+                .py_1()
+                .child(
+                    Input::new(&dialog_input)
+                        .appearance(false)
+                        .focus_bordered(false),
+                ),
+        )
+        .child({
+            let view = view.clone();
+            Button::new("dialog-submit")
+                .primary()
+                .label("Submit")
+                .small()
+                .on_click(move |_, _, cx| {
+                    let Some(entity) = view.upgrade() else {
+                        return;
+                    };
+                    let value = entity.read(cx).dialog_input.read(cx).value().to_string();
+                    let mut fields = serde_json::Map::new();
+                    fields.insert("value".into(), serde_json::Value::String(value));
+                    do_dialog_response(&view, &id_submit, fields, cx);
+                })
+        })
+        .child({
+            let view = view.clone();
+            Button::new("cancel-text-dialog")
+                .label("Cancel")
+                .small()
+                .ghost()
+                .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
+        })
+        .into_any_element()
+}
+
 pub(crate) fn render_cancel_button(
     dialog: &UiDialog,
     cx: &mut Context<SessionView>,
@@ -1004,10 +1100,18 @@ pub(crate) fn render_cancel_button(
         .into_any_element()
 }
 
-pub(crate) fn do_cancel_dialog(view: &gpui::WeakEntity<SessionView>, id: &str, cx: &mut gpui::App) {
+/// OMP `extension_ui_response` cancel payload (`cancelled` + optional `timedOut`).
+pub(crate) fn dialog_cancel_fields(timed_out: bool) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
-    fields.insert("cancel".into(), serde_json::Value::Bool(true));
-    do_dialog_response(view, id, fields, cx);
+    fields.insert("cancelled".into(), serde_json::Value::Bool(true));
+    if timed_out {
+        fields.insert("timedOut".into(), serde_json::Value::Bool(true));
+    }
+    fields
+}
+
+pub(crate) fn do_cancel_dialog(view: &gpui::WeakEntity<SessionView>, id: &str, cx: &mut gpui::App) {
+    do_dialog_response(view, id, dialog_cancel_fields(false), cx);
 }
 
 /// OMP often emits tool-mount chatter as notices; keep the text, drop the label.
@@ -1055,6 +1159,7 @@ pub(crate) fn do_dialog_response(
         let id2 = id.to_owned();
         let _ = view.update(cx, |this, cx| {
             this.projection.pending_dialogs.retain(|d| d.id != id2);
+            this.sync_pending_dialogs(cx);
             cx.notify();
         });
     }
