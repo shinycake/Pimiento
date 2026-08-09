@@ -51,6 +51,7 @@ pimiento-core  = { path = "crates/pimiento-core" }
 gpui = { git = "https://github.com/zed-industries/zed" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "181cf147d1d68ff33bae60abb58a24917658142e" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "181cf147d1d68ff33bae60abb58a24917658142e" }
 
 # Serialization / protocol
 serde = { version = "1", features = ["derive"] }

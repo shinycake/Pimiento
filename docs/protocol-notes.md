@@ -192,6 +192,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - The pinned Apache-2.0 `gpui-component` exposes `ThemeSet`, `ThemeConfig`, `ThemeRegistry::load_themes_from_str`, `ThemeRegistry::watch_dir`, and `Theme::apply_config`. Pimiento uses that public registry directly for bundled and user-authored JSON themes; no Zed GPL UI code is copied.
 - Theme persistence mirrors Zed's useful behavior at a smaller scope: one appearance mode (`system`, `light`, or `dark`) plus separately selected light/dark theme names. Existing `ui.json` files containing only the legacy `theme` field migrate through serde defaults.
 - Compatible custom theme files under `PIMIENTO_HOME/themes` (normally `~/.pimiento/themes`) reload without restarting. Invalid files are ignored by the registry and cannot replace the bundled Quiet Pepper fallback pair.
+- `IconName` only resolves SVG paths; GPUI still needs an `AssetSource`. Applications using the bundled icon set must start with `gpui_platform::application().with_assets(gpui_component_assets::Assets)`. Without that registration, icon-only buttons keep their click targets and tooltips but paint blank.
 
 ## Compaction and retry fallback UX — 2026-08-08
 

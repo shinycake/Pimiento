@@ -1952,13 +1952,6 @@ impl SessionView {
         match event {
             InputEvent::Change => {
                 if self.slash_menu == SlashMenuState::Dismissed {
-                    let text = self.composer.read(cx).value().to_string();
-                    let commands =
-                        parse_slash_commands(self.projection.available_commands_raw.as_ref());
-                    if slash_draft_is_open(&commands, &text) {
-                        cx.notify();
-                        return;
-                    }
                     self.slash_menu = SlashMenuState::Closed;
                 }
                 self.update_slash_menu(cx);
@@ -4854,6 +4847,142 @@ pub(crate) fn render_todo_task_editable(
         })
         .into_any_element()
 }
+
+#[allow(clippy::too_many_lines)] // One declarative element keeps the panel's content and click wiring together.
+fn render_slash_suggestion_panel(
+    suggestions: &[SlashSuggestion],
+    selected: usize,
+    session: &gpui::Entity<SessionView>,
+    window: &mut Window,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    div()
+        .id("slash-suggestion-backdrop")
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom(px(128.))
+        .flex()
+        .items_end()
+        .justify_center()
+        .px_3()
+        .on_click(window.listener_for(session, |this, _, _window, cx| {
+            this.close_slash_menu();
+            cx.notify();
+        }))
+        .child(
+            v_flex()
+                .id("slash-suggestion-panel")
+                .w_full()
+                .max_w(px(720.))
+                .max_h(px(280.))
+                .gap_0()
+                .p_1()
+                .occlude()
+                .bg(theme.popover)
+                .border_1()
+                .border_color(theme.border)
+                .shadow_lg()
+                .rounded_md()
+                .on_click(window.listener_for(session, |_this, _, _window, cx| {
+                    cx.stop_propagation();
+                }))
+                .overflow_y_scrollbar()
+                .children(suggestions.iter().enumerate().map(|(ix, suggestion)| {
+                    let suggestion_for_click = suggestion.clone();
+                    v_flex()
+                        .id(("slash-command", ix))
+                        .w_full()
+                        .gap_1()
+                        .p_2()
+                        .rounded_sm()
+                        .cursor_pointer()
+                        .when(ix == selected, |row| row.bg(theme.secondary))
+                        .hover(|row| row.bg(theme.secondary_hover))
+                        .on_click(window.listener_for(session, move |this, _, _window, cx| {
+                            this.accept_slash_command(&suggestion_for_click, cx);
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_start()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .child(soft_wrap_dynamic_text(&suggestion.title)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .max_w(gpui::relative(0.4))
+                                        .px_1()
+                                        .py_0p5()
+                                        .rounded_sm()
+                                        .bg(theme.secondary)
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(soft_wrap_dynamic_text(
+                                            &suggestion.source.clone().unwrap_or_else(|| {
+                                                if suggestion.is_subcommand {
+                                                    "subcommand".into()
+                                                } else {
+                                                    "command".into()
+                                                }
+                                            }),
+                                        )),
+                                ),
+                        )
+                        .when(!suggestion.description.is_empty(), |col| {
+                            col.child(
+                                div()
+                                    .w_full()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(soft_wrap_dynamic_text(&suggestion.description)),
+                            )
+                        })
+                        .when_some(suggestion.usage_hint.clone(), |col, hint| {
+                            col.child(
+                                div()
+                                    .w_full()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child(soft_wrap_dynamic_text(&format!("Usage: {hint}"))),
+                            )
+                        })
+                }))
+                .when(suggestions.is_empty(), |panel| {
+                    panel.child(
+                        Label::new("(no matches)")
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_2()
+                        .justify_between()
+                        .px_2()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("↑↓ Navigate")
+                        .child("Enter Complete · Esc Dismiss"),
+                ),
+        )
+        .into_any_element()
+}
+
 impl Render for SessionView {
     #[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5010,7 +5139,6 @@ impl Render for SessionView {
         self.slash_selected = self
             .slash_selected
             .min(slash_matches.len().saturating_sub(1));
-        let slash_has_matches = !slash_matches.is_empty();
         let large_paste_lines = self
             .large_paste_pending
             .as_ref()
@@ -5115,8 +5243,7 @@ impl Render for SessionView {
                                     .px_3()
                                     .py_2()
                                     .items_start()
-                                    .flex_wrap()
-                                    .gap_4()
+                                    .gap_2()
                                     .child(
                                         h_flex()
                                             .flex_1()
@@ -5152,35 +5279,35 @@ impl Render for SessionView {
                                                     .child(toolbar_status.label()),
                                             ),
                                     )
+                                    // The inspector already owns ctx% / tps. Do not leave an
+                                    // empty flex spacer that can squeeze toolbar actions away.
+                                    .when(!self.inspector_open, |bar| {
+                                        bar.child(
+                                            h_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex_wrap()
+                                                .justify_center()
+                                                .gap_2()
+                                                .when_some(context_label, |group, context| {
+                                                    group.child(
+                                                        Label::new(context)
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                    )
+                                                })
+                                                .when_some(tokens_label, |group, tokens| {
+                                                    group.child(
+                                                        Label::new(tokens)
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground),
+                                                    )
+                                                }),
+                                        )
+                                    })
                                     .child(
                                         h_flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex_wrap()
-                                            .justify_center()
-                                            .gap_2()
-                                            // When the Context inspector is open it already
-                                            // shows ctx% / tps — keep the toolbar quiet.
-                                            .when(!self.inspector_open, |group| {
-                                                group
-                                                    .when_some(context_label, |group, context| {
-                                                        group.child(
-                                                            Label::new(context)
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground),
-                                                        )
-                                                    })
-                                                    .when_some(tokens_label, |group, tokens| {
-                                                        group.child(
-                                                            Label::new(tokens)
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground),
-                                                        )
-                                                    })
-                                            }),
-                                    )
-                                    .child(
-                                        h_flex()
+                                            .flex_shrink_0()
                                             .flex_wrap()
                                             .justify_end()
                                             .gap_2()
@@ -5997,171 +6124,6 @@ impl Render for SessionView {
                                                     .appearance(false)
                                                     .focus_bordered(false),
                                             )
-                                            .when(slash_menu_visible, |parent| {
-                                                parent.child(
-                                                    v_flex()
-                                                        .absolute()
-                                                        .bottom_full()
-                                                        .left_0()
-                                                        .right_0()
-                                                        .max_h(px(280.))
-                                                        .overflow_y_scrollbar()
-                                                        .gap_0()
-                                                        .p_1()
-                                                        .bg(theme.popover)
-                                                        .border_1()
-                                                        .border_color(theme.border)
-                                                        .shadow_lg()
-                                                        .rounded_md()
-                                                        .children(
-                                                            slash_matches.iter().enumerate().map(
-                                                                |(ix, suggestion)| {
-                                                                    let suggestion_for_click =
-                                                                        suggestion.clone();
-                                                                    Button::new((
-                                                                        "slash-command",
-                                                                        ix,
-                                                                    ))
-                                                                    .ghost()
-                                                                    .w_full()
-                                                                    .when(
-                                                                        ix == self.slash_selected,
-                                                                        |button| {
-                                                                            button
-                                                                                .bg(theme.secondary)
-                                                                        },
-                                                                    )
-                                                                    .on_click(window.listener_for(
-                                                                        &view,
-                                                                        move |this,
-                                                                              _,
-                                                                              _window,
-                                                                              cx| {
-                                                                            this.accept_slash_command(
-                                                                                &suggestion_for_click,
-                                                                                cx,
-                                                                            );
-                                                                        },
-                                                                    ))
-                                                                    .child(
-                                                                        v_flex()
-                                                                            .w_full()
-                                                                            .gap_1()
-                                                                            .child(
-                                                                                h_flex()
-                                                                                    .w_full()
-                                                                                    .justify_between()
-                                                                                    .gap_2()
-                                                                                    .child(
-                                                                                        Label::new(
-                                                                                            suggestion
-                                                                                                .title
-                                                                                                .clone(),
-                                                                                        )
-                                                                                        .text_sm(),
-                                                                                    )
-                                                                                    .child(
-                                                                                        div()
-                                                                                            .px_1()
-                                                                                            .py_0p5()
-                                                                                            .rounded_sm()
-                                                                                            .bg(theme.secondary)
-                                                                                            .text_xs()
-                                                                                            .text_color(
-                                                                                                theme
-                                                                                                    .muted_foreground,
-                                                                                            )
-                                                                                            .child(
-                                                                                                suggestion
-                                                                                                    .source
-                                                                                                    .clone()
-                                                                                                    .unwrap_or_else(|| {
-                                                                                                        if suggestion
-                                                                                                            .is_subcommand
-                                                                                                        {
-                                                                                                            "subcommand"
-                                                                                                                .into()
-                                                                                                        } else {
-                                                                                                            "command"
-                                                                                                                .into()
-                                                                                                        }
-                                                                                                    }),
-                                                                                            ),
-                                                                                    ),
-                                                                            )
-                                                                            .when(
-                                                                                !suggestion
-                                                                                    .description
-                                                                                    .is_empty(),
-                                                                                |col| {
-                                                                                    col.child(
-                                                                                        div()
-                                                                                            .w_full()
-                                                                                        .text_xs()
-                                                                                        .text_color(
-                                                                                            theme
-                                                                                                .muted_foreground,
-                                                                                        )
-                                                                                        .child(
-                                                                                            suggestion
-                                                                                                .description
-                                                                                                .clone(),
-                                                                                        ),
-                                                                                    )
-                                                                                },
-                                                                            )
-                                                                            .when_some(
-                                                                                suggestion
-                                                                                    .usage_hint
-                                                                                    .clone(),
-                                                                                |col, hint| {
-                                                                                    col.child(
-                                                                                        div()
-                                                                                            .w_full()
-                                                                                            .text_xs()
-                                                                                            .text_color(
-                                                                                                theme
-                                                                                                    .muted_foreground,
-                                                                                            )
-                                                                                            .child(
-                                                                                                format!(
-                                                                                                    "Usage: {hint}"
-                                                                                                ),
-                                                                                            ),
-                                                                                    )
-                                                                                },
-                                                                            )
-                                                                    )
-                                                                },
-                                                            ),
-                                                        )
-                                                        .when(!slash_has_matches, |panel| {
-                                                            panel.child(
-                                                                Label::new("(no matches)")
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        theme.muted_foreground,
-                                                                    ),
-                                                            )
-                                                        })
-                                                        .child(
-                                                            h_flex()
-                                                                .w_full()
-                                                                .items_start()
-                                                                .flex_wrap()
-                                                                .gap_2()
-                                                                .justify_between()
-                                                                .px_2()
-                                                                .py_1()
-                                                                .border_t_1()
-                                                                .border_color(theme.border)
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground)
-                                                                .child("↑↓ Navigate")
-                                                                .child("Enter Complete · Esc Dismiss"),
-                                                        ),
-                                                )
-                                            })
                                             .when_some(large_paste_lines, |parent, lines| {
                                                 parent.child(
                                                     v_flex()
@@ -6401,6 +6363,15 @@ impl Render for SessionView {
                             ),
                     ),
             )
+            .when(slash_menu_visible, |root| {
+                root.child(render_slash_suggestion_panel(
+                    &slash_matches,
+                    self.slash_selected,
+                    &view,
+                    window,
+                    &theme,
+                ))
+            })
             .when(self.subagent_modal_open, |parent| {
                 let (agent_id, agent_summary) = subagent_modal_agent.unwrap_or_else(|| {
                     (

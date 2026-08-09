@@ -117,7 +117,8 @@ fn main() {
     let theme_override = std::env::var_os("PIMIENTO_THEME");
     let initial_theme = initial_theme_selection(theme_override.as_deref(), &persistence);
 
-    gpui_platform::application().run(move |cx| {
+    let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    app.run(move |cx| {
         gpui_component::init(cx);
         initialize_theme_registry(&persistence, initial_theme.clone(), cx);
         cx.spawn(async move |cx| {

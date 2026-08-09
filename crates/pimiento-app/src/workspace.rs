@@ -660,6 +660,11 @@ pub(crate) fn render_inspector(
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
+    let inspector_width = if window.viewport_size().width < px(900.) {
+        px(200.)
+    } else {
+        px(248.)
+    };
     let (
         cwd,
         model,
@@ -780,7 +785,7 @@ pub(crate) fn render_inspector(
     let phase_status = StatusKind::from_phase_label(&phase);
 
     v_flex()
-        .w(px(248.))
+        .w(inspector_width)
         .h_full()
         .flex_shrink_0()
         .overflow_y_scrollbar()
@@ -1390,6 +1395,11 @@ impl Render for WorkspaceView {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_active();
+        let rail_width = if window.viewport_size().width < px(900.) {
+            px(184.)
+        } else {
+            px(240.)
+        };
         if let Some(session) = self.sessions.get(self.active).cloned() {
             let pending =
                 session.update(cx, |session, _cx| session.take_pending_workspace_palette());
@@ -1443,7 +1453,7 @@ impl Render for WorkspaceView {
             .when(!self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()
-                        .w(px(240.))
+                        .w(rail_width)
                         .h_full()
                         .p_2()
                         .gap_2()
