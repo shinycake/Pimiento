@@ -5361,6 +5361,7 @@ impl Render for SessionView {
                                             .child(
                                                 Button::new("theme-actions")
                                                     .icon(IconName::Palette)
+                                                    .label("Theme")
                                                     .tooltip("Choose theme")
                                                     .small()
                                                     .ghost()
