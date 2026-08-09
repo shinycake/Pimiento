@@ -876,6 +876,27 @@ fn subagent_snapshot_refresh_preserves_only_an_explicit_present_selection() {
 }
 
 #[test]
+fn subagent_events_refresh_snapshots_only_for_unseen_agents() {
+    let snapshots = vec![serde_json::json!({"id": "worker-1"})];
+    assert!(!subagent_event_needs_snapshot_refresh(
+        &serde_json::json!({"id": "worker-1"}),
+        &snapshots
+    ));
+    assert!(subagent_event_needs_snapshot_refresh(
+        &serde_json::json!({"subagentId": "worker-2"}),
+        &snapshots
+    ));
+    assert!(subagent_event_needs_snapshot_refresh(
+        &serde_json::json!({"kind": "started"}),
+        &[]
+    ));
+    assert!(!subagent_event_needs_snapshot_refresh(
+        &serde_json::json!({"kind": "progress"}),
+        &snapshots
+    ));
+}
+
+#[test]
 fn theme_preference_cycles_system_light_dark() {
     assert_eq!(
         next_theme_preference(ThemePreference::System),

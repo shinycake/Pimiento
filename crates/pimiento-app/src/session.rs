@@ -103,6 +103,7 @@ pub(crate) struct SessionView {
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
     pub(crate) subagent_subscription: SubagentSubscriptionLevel,
+    pub(crate) subagent_refresh_in_flight: bool,
     pub(crate) selected_subagent_id: Option<String>,
     pub(crate) subagent_modal_open: bool,
     pub(crate) subagent_modal_status: String,
@@ -273,6 +274,7 @@ impl SessionView {
             omp_roles: load_omp_roles_from_home(home_dir().as_deref()),
             subagent_snapshots: Vec::new(),
             subagent_subscription: SubagentSubscriptionLevel::Events,
+            subagent_refresh_in_flight: false,
             selected_subagent_id: None,
             subagent_modal_open: false,
             subagent_modal_status: String::new(),
@@ -335,11 +337,32 @@ impl SessionView {
                         ClientEvent::Frame(frame) => {
                             let is_model_changed = frame.raw.get("type").and_then(|v| v.as_str())
                                 == Some("model_changed");
+                            let refresh_subagents = match &frame.kind {
+                                omp_rpc_client::frames::IncomingFrameKind::SubagentLifecycle(
+                                    payload,
+                                )
+                                | omp_rpc_client::frames::IncomingFrameKind::SubagentProgress(
+                                    payload,
+                                )
+                                | omp_rpc_client::frames::IncomingFrameKind::SubagentEvent(
+                                    payload,
+                                ) => {
+                                    !this.subagent_refresh_in_flight
+                                        && subagent_event_needs_snapshot_refresh(
+                                            &payload.payload,
+                                            &this.subagent_snapshots,
+                                        )
+                                }
+                                _ => false,
+                            };
                             this.observe_host_bridge_frame(frame);
                             this.projection.apply(frame);
                             this.sync_pending_dialogs(cx);
                             if is_model_changed {
                                 this.refresh_state(cx);
+                            }
+                            if refresh_subagents {
+                                this.refresh_subagents(cx);
                             }
                         }
                         ClientEvent::Closed(info) => {
@@ -735,13 +758,17 @@ impl SessionView {
     }
 
     pub(crate) fn ensure_subagent_snapshots(&mut self, cx: &mut Context<Self>) {
-        if self.subagent_snapshots.is_empty() && self.client.is_some() {
+        if self.subagent_snapshots.is_empty()
+            && self.client.is_some()
+            && !self.subagent_refresh_in_flight
+        {
             self.refresh_subagents(cx);
         }
     }
 
     pub(crate) fn clear_subagent_drawer_state(&mut self) {
         self.subagent_snapshots.clear();
+        self.subagent_refresh_in_flight = false;
         self.selected_subagent_id = None;
         self.subagent_modal_open = false;
         self.subagent_modal_status.clear();
@@ -754,32 +781,40 @@ impl SessionView {
 
     pub(crate) fn refresh_subagents(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
+            self.subagent_refresh_in_flight = false;
             "OMP is not connected".clone_into(&mut self.subagent_drawer_status);
             return;
         };
+        if self.subagent_refresh_in_flight {
+            return;
+        }
+        self.subagent_refresh_in_flight = true;
         "Loading agents…".clone_into(&mut self.subagent_drawer_status);
         cx.spawn(async move |view, cx| {
             let result = client.send(RpcCommandBody::GetSubagents).await;
-            let _ = view.update(cx, |this, cx| match result {
-                Ok(response) if response.success => {
-                    let snapshots = response
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.get("subagents"))
-                        .and_then(serde_json::Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    this.apply_subagent_snapshots(snapshots, cx);
-                }
-                Ok(response) => {
-                    this.subagent_drawer_status = response
-                        .error
-                        .unwrap_or_else(|| "get_subagents failed".to_owned());
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.subagent_drawer_status = format!("get_subagents: {error}");
-                    cx.notify();
+            let _ = view.update(cx, |this, cx| {
+                this.subagent_refresh_in_flight = false;
+                match result {
+                    Ok(response) if response.success => {
+                        let snapshots = response
+                            .data
+                            .as_ref()
+                            .and_then(|data| data.get("subagents"))
+                            .and_then(serde_json::Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        this.apply_subagent_snapshots(snapshots, cx);
+                    }
+                    Ok(response) => {
+                        this.subagent_drawer_status = response
+                            .error
+                            .unwrap_or_else(|| "get_subagents failed".to_owned());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.subagent_drawer_status = format!("get_subagents: {error}");
+                        cx.notify();
+                    }
                 }
             });
         })
@@ -6566,6 +6601,25 @@ pub(crate) fn retained_subagent_selection(
         }
         _ => None,
     }
+}
+
+pub(crate) fn subagent_event_needs_snapshot_refresh(
+    payload: &serde_json::Value,
+    snapshots: &[serde_json::Value],
+) -> bool {
+    let event_id = payload
+        .get("id")
+        .or_else(|| payload.get("subagentId"))
+        .or_else(|| payload.get("subagent_id"))
+        .and_then(serde_json::Value::as_str);
+    event_id.map_or_else(
+        || snapshots.is_empty(),
+        |id| {
+            !snapshots
+                .iter()
+                .any(|snapshot| subagent_snapshot_id(snapshot) == Some(id))
+        },
+    )
 }
 
 pub(crate) fn subagent_snapshot_id(snapshot: &serde_json::Value) -> Option<&str> {

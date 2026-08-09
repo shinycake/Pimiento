@@ -177,6 +177,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 ## Subagent work modal + transcript paging — 2026-08-08
 
 - `get_subagents` returns `{ subagents: RpcSubagentSnapshot[] }`; the Context inspector renders each authoritative snapshot tolerantly, preserving raw values rather than assuming every optional field exists.
+- An unseen `subagent_lifecycle`, `subagent_progress`, or `subagent_event` id triggers one guarded `get_subagents` refresh, so an already-open inspector discovers newly spawned agents without manual refresh or duplicate in-flight requests.
 - Subagents have one workspace representation: summary rows in the inspector's **Agents** section. Clicking a row opens a centered work modal backed by `get_subagent_messages`; message tails are not duplicated inline in the narrow inspector or in a strip above the transcript.
 - `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back when the same agent is opened again for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied. The modal remains visible while loading and is dismissed by backdrop click, **Close**, or Esc.
 - PageUp/PageDown/Home/End navigate the transcript `ListState`; PageUp/PageDown/Home leave tail-follow mode and End re-enables it at the transcript tail. Keys are ignored while the composer or model-search input is focused so Home/End still move the caret.
