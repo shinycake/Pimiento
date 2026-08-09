@@ -69,7 +69,7 @@
 68:- `set_model { provider, modelId }` success `data` is the Model object.
 69:- `model_changed` is a **bare** event `{ type: "model_changed" }` with **no** model payload. Clients must refresh via `get_state` or trust the preceding `set_model` response.
 
-Pimiento loads the full `models` array into the status-strip picker (searchable; no provider shortlist gate).
+Pimiento loads the full `models` array into the composer-band model picker (searchable; no provider shortlist gate). Roles chips peek `~/.omp/agent/config.yml` `modelRoles` (read-only).
 70:
 
 ## Model catalog loading — 2026-08-08
@@ -155,7 +155,18 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Thinking collapse + session rename — 2026-08-08
 
 - Collapsed thinking rows expand on click; expanded rows offer collapse.
-- Status strip **Rename** calls `set_session_name` with a stamped label (modal rename can come later).
+- Palette **Rename session** opens an About-style floating popover (`popover` + `shadow_xl`) with an Input prefilled from the current projected name; Confirm sends `set_session_name` (Cancel / Esc dismisses).
+
+## Branch new tab + git chrome — 2026-08-08
+
+- Palette **Branch into new tab** calls `get_branch_messages` → floating picker (`entryId` + text preview) → `branch { entryId }`. On success (not cancelled), the current RPC session is the branch; Pimiento sets `pending_new_tab_cwd` so Workspace opens a **fresh** tab via `add_session_for_cwd` (never `switch_session`).
+- Palette **Login providers** → `get_login_providers` → floating list → `login { providerId }` (existing `open_url` dialogs handle OAuth).
+- Context inspector **Git** section: host-side `probe_git_inspector(cwd)` shows `summary_line` + optional worktree label; omitted when cwd is not a git work tree. Read-only chrome — not OMP authority.
+- Inspector Session extras surface `queuedMessageCount` / `messageCount` / token in·out / `cost` from `get_state` raw only when present.
+- Checklist tasks are clickable: toggle status via `set_todos { phases }` after carefully mutating `todos_raw` (pending↔completed).
+- Connect-time subagent subscription uses `events` (was `progress`) so the Agents hub stays fresher; Refresh still calls `get_subagents`.
+- `abort_and_prompt` palette action sends composer draft + pending attachments (same compose path as Prompt), then clears the composer — not bare `abort`.
+- `cycle_model` / `cycle_thinking_level` prefer the RPC commands; local catalog walk remains the fallback.
 
 ## Confirmed revert + command palette — 2026-08-08
 
@@ -283,7 +294,7 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 
 ## Toolbar deference when inspector open — 2026-08-08
 
-- While the Context inspector is visible, the session toolbar hides the duplicated Checklist/Agents shortcuts and ctx%/tps readouts (those facts already live in the inspector). Model/thinking/More remain. Presentation-only.
+- While the Context inspector is visible, the session toolbar hides the duplicated Checklist/Agents shortcuts and ctx%/tps readouts (those facts already live in the inspector). Model/thinking/Fast live on the composer band (not the status strip). Presentation-only.
 
 ## Thinking collapse preview — 2026-08-08
 
@@ -303,3 +314,22 @@ Pimiento loads the full `models` array into the status-strip picker (searchable;
 ## Toolbar phase Tag — 2026-08-08
 
 - The status strip renders the projected run phase as a small gpui-component `Tag` (info/warning/danger/secondary) beside the OMP version, matching rail phase badges.
+
+## UI depth + composer band — 2026-08-08
+
+- **Depth recipe (Zed / gpui-component Apache crates):** docked chrome (rail, composer band, inspector) = tone step (`sidebar` / `secondary`) + hairline border, no shadow. Floating overlays (model picker, command palette, About, slash menu) = `popover` fill + border + radius + `shadow_lg` / `shadow_xl` over `overlay` scrim. Prefer pinned `gpui` / `gpui_platform` / `gpui-component` checkouts under `~/.cargo/git/checkouts/` for API truth; Zed `ui` / `editor` / `agent_ui` are GPL — patterns only, never copy source.
+- **Session rail:** selected row is `sidebar_accent` wash + rounded — no primary accent bar. Hover × closes the in-app tab and `forget_session` from Pimiento `recent.json` — does **not** delete OMP files under `~/.omp`. Per-workspace `+` reconnects that cwd; top **Workspace…** is a directory picker → new tab without full-screen launcher when possible.
+- **Composer band:** model + thinking + Fast `Switch` live immediately above the input (removed from the status-strip trailing cluster). Model opens a floating picker with search, provider-grouped list, and **Roles (from omp config)** chips.
+- **`modelRoles` / `modelTags`:** not on rpc-ui. Pimiento peeks `~/.omp/agent/config.yml` for roles + tag colors (built-in OMP colors for default/smol/slow/…). Click a role to `set_model`. **Set** assigns the current session model to that role via `omp config set modelRoles` (full-record merge — never hand-edit YAML).
+- **Fast mode:** OMP `/fast` only works for models with a service-tier family (OpenAI / Google / Anthropic-messages / matching OpenRouter ids). Cursor/Grok has none — Switch is disabled with `n/a · no service tier`. Failed `set_fast_mode` reverts optimistic UI and shows OMP's error as a notice.
+- **Composer attachments (OMP parity):** Attach / DnD / clipboard accept **any file**. Images → `PendingAttachment::Image` with OMP resize (max edge 1568, min edge 200, ~500 KiB raw target; keep original png/jpeg/gif/webp when already under budget; honor `images.autoResize`, default true; else wire-budget clamp ~700KB b64). Non-images → `PathMention` inserting `@path` into the message (rpc-ui has no document content type). Message text carries `[Image #N, WxH]` markers via `compose_message_with_image_markers`. Wire images only: `{type:"image", mimeType, data}` on `prompt` / `steer` / `follow_up`. Large paste (≥ `paste.largeMenuThreshold`, default 100) offers Wrap `<attachment>` / `local://paste-N.md` under `{session.jsonl−suffix}/local/` / Inline. `@` token opens a capped cwd file picker. Hydrated `role: fileMention` messages stay `TranscriptEntry::Unknown` and render as a quiet “File mention: …” row. Send errors (including `FrameTooLarge`) surface in the transcript.
+- **Command palette:** focused search `Input` (typing works); Esc / arrows handled on the outer capture layer (overlay is a sibling of the old capture tree — that was why Esc/typing felt dead). Panel uses `popover` + `shadow_xl`.
+- **Inspector:** omit empty Checklist/Tools; Fast lives on the composer band only; no LSP/MCP footer (rpc-ui does not publish those statuses).
+
+## Extension UI confirm / cancel / timeout — 2026-08-08
+
+- Confirm responses must use `confirmed: true|false` (not `accepted`). OMP rpc-types (`RpcExtensionUIResponse`) and record-fixture ask-dialog replies both use `confirmed`.
+- Cancel / Esc / dialog expiry use `cancelled: true`, with `timedOut: true` when the client fires the wire `timeout` ms locally.
+- `input` / `editor` responses carry `value: string`. Pimiento renders a text field + Submit (and Cancel) for those methods; Cancel alone is not enough.
+- Non-dialog display methods (`setTitle` / `setStatus` / `setWidget` / `set_editor_text`) project into `DisplayState` and surface in the status strip / inspector only when present. OS window title follows `setTitle` only when `PI_RPC_EMIT_TITLE` is truthy (OMP's emit gate).
+- `image_end` projects to a visible `TranscriptEntry::Notice` with mime/type summary so image blocks are never dropped silently.

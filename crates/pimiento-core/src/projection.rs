@@ -290,6 +290,7 @@ impl SessionProjection {
                 }
                 Some("assistant") => self.hydrate_assistant_message(message),
                 Some("toolResult") => self.hydrate_tool_result(message),
+                // Includes `fileMention` — preserved as Unknown for app-side rendering.
                 _ => self.push_unknown(message),
             }
         }
@@ -570,14 +571,22 @@ impl SessionProjection {
                     *streaming = false;
                 }
             }
-            AssistantMessageEventKind::ImageEnd { .. }
-            | AssistantMessageEventKind::ToolcallStart { .. }
+            AssistantMessageEventKind::ImageEnd { content_index } => {
+                // Surface a visible row so image blocks are never dropped
+                // silently (Doctrine §9). Prefer mime/type summary from the
+                // wire `content` object when present.
+                let summary = mu
+                    .assistant_message_event
+                    .image_content()
+                    .map_or_else(|| format!("Image #{content_index}"), image_content_summary);
+                self.transcript.push(TranscriptEntry::Notice(summary));
+            }
+            AssistantMessageEventKind::ToolcallStart { .. }
             | AssistantMessageEventKind::ToolcallDelta { .. }
             | AssistantMessageEventKind::ToolcallEnd { .. } => {
                 // Tool-row lifecycle is driven by `tool_execution_*` frames.
-                // Image blocks and toolcall content blocks are represented
-                // there (and in the retained raw `message` for lossless
-                // round-tripping); no separate transcript row here.
+                // Toolcall content blocks are represented there (and in the
+                // retained raw `message` for lossless round-tripping).
             }
             AssistantMessageEventKind::Done { .. } => {
                 // Final message reconciliation: mark every streaming row
@@ -1061,6 +1070,26 @@ fn fallback_banner_text(from: Option<&str>, to: Option<&str>, role: Option<&str>
         (None, Some(to), None) => format!("Using fallback model {to}"),
         (Some(from), None, None) => format!("Using a fallback model (instead of {from})"),
         (None, None, None) => "Using a fallback model".to_owned(),
+    }
+}
+
+fn image_content_summary(content: &Value) -> String {
+    let mime = content
+        .get("mimeType")
+        .or_else(|| content.get("mime_type"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let ty = content
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (mime, ty) {
+        (Some(mime), Some(ty)) if ty != "image" => format!("Image ({ty}, {mime})"),
+        (Some(mime), _) => format!("Image ({mime})"),
+        (None, Some(ty)) => format!("Image ({ty})"),
+        (None, None) => "Image".to_owned(),
     }
 }
 

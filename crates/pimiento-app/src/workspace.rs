@@ -41,6 +41,7 @@ pub(crate) struct RailEntry {
     pub(crate) phase: String,
     pub(crate) cwd: PathBuf,
     pub(crate) attention: RailAttention,
+    pub(crate) session_file: Option<PathBuf>,
 }
 
 pub(crate) fn workspace_display_name(path: &Path) -> String {
@@ -222,6 +223,15 @@ impl WorkspaceView {
     }
 
     pub(crate) fn add_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.push_launcher_session(self.initial_cwd.clone(), window, cx);
+    }
+
+    pub(crate) fn push_launcher_session(
+        &mut self,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Entity<SessionView> {
         let remembered = self.persistence.load_recent_sessions();
         let last_session = self
             .persistence
@@ -229,13 +239,12 @@ impl WorkspaceView {
             .filter(|resume| resume.exists());
         let recent = collect_launcher_sessions(
             &self.persistence,
-            &self.initial_cwd,
+            &cwd,
             omp_sessions_root().as_deref(),
             home_dir().as_deref(),
             std::env::temp_dir().as_path(),
         );
         let persistence = self.persistence.clone();
-        let cwd = self.initial_cwd.clone();
         let session = cx.new(|cx| {
             SessionView::new(
                 window,
@@ -259,23 +268,73 @@ impl WorkspaceView {
         let subscription = cx.observe(&session, |_this, _session, cx| {
             cx.notify();
         });
-        self.sessions.push(session);
+        self.sessions.push(session.clone());
         self.session_subscriptions.push(subscription);
         self.active = self.sessions.len() - 1;
         self.sync_inspector_open_to_sessions(cx);
         cx.notify();
+        session
+    }
+
+    pub(crate) fn add_session_for_cwd(
+        &mut self,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let session = self.push_launcher_session(cwd.clone(), window, cx);
+        session.update(cx, |session, cx| {
+            session.begin_connection(window, cwd, None, false, cx);
+        });
+    }
+
+    #[allow(clippy::unused_self)] // instance API for listeners; work is in the path-prompt future
+    pub(crate) fn prompt_new_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Select a workspace directory".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().find(|path| path.is_dir()) else {
+                return;
+            };
+            let _ = view.update_in(cx, |this, window, cx| {
+                this.add_session_for_cwd(path, window, cx);
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn close_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sessions.is_empty() {
             return;
         }
-        let idx = self.active;
-        if let Some(session) = self.sessions.get(idx).cloned() {
+        self.close_session_at(self.active, window, cx);
+    }
+
+    pub(crate) fn close_session_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.sessions.len() {
+            return;
+        }
+        if let Some(session) = self.sessions.get(index).cloned() {
+            let forget = session.read(cx).rail_entry(index).session_file;
+            if let Some(path) = forget {
+                self.persistence.forget_session(&path);
+            }
             session.update(cx, SessionView::shutdown_session);
         }
-        self.sessions.remove(idx);
-        drop(self.session_subscriptions.remove(idx));
+        self.sessions.remove(index);
+        drop(self.session_subscriptions.remove(index));
         if self.sessions.is_empty() {
             self.add_session(window, cx);
         } else {
@@ -452,8 +511,6 @@ pub(crate) fn render_inspector(
         phase,
         context,
         tokens,
-        fast_enabled,
-        fast_active,
         connected,
         todo_phases,
         subagent_rows,
@@ -462,7 +519,12 @@ pub(crate) fn render_inspector(
         subagent_status,
         fallback_subagent_events,
         tool_names,
-        has_tool_state,
+        display_title,
+        display_statuses,
+        display_widgets,
+        display_editor_text,
+        extra_status_lines,
+        git_info,
     ) = {
         let session_view = session.read(cx);
         let cwd = session_view
@@ -482,6 +544,26 @@ pub(crate) fn render_inspector(
         let state = &session_view.projection.state;
         let raw_state = state.state.as_ref();
         let tool_names = tool_names_from_state(raw_state);
+        let extra_status_lines = inspector_extra_status_lines(raw_state);
+        let git_info = probe_git_inspector(&cwd);
+        let display = &session_view.projection.display;
+        let display_title = display
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+        let display_statuses = display_status_lines(display);
+        let display_widgets = display
+            .widgets
+            .iter()
+            .map(|(key, raw)| (key.clone(), display_widget_lines(raw)))
+            .collect::<Vec<_>>();
+        let display_editor_text = display
+            .editor_text
+            .as_ref()
+            .filter(|t| !t.is_empty())
+            .cloned();
         (
             cwd,
             state
@@ -492,8 +574,6 @@ pub(crate) fn render_inspector(
             phase,
             context_percent(state.context.as_ref()),
             tokens_per_second_label(state.tokens.as_ref()),
-            state.fast_mode_enabled,
-            state.fast_mode_active,
             session_view.client.is_some(),
             parse_todo_phases(session_view.projection.todos_raw.as_ref()),
             session_view
@@ -516,23 +596,17 @@ pub(crate) fn render_inspector(
                 .map(subagent_payload_summary)
                 .collect::<Vec<_>>(),
             tool_names,
-            raw_state.is_some_and(|state| state.get("dumpTools").is_some()),
+            display_title,
+            display_statuses,
+            display_widgets,
+            display_editor_text,
+            extra_status_lines,
+            git_info,
         )
     };
     let todo_count = todo_open_count(&todo_phases);
     let path = cwd.display().to_string();
     let path = truncate_subagent_text(&path, 44);
-    let fast_diverges =
-        fast_enabled.is_some() && fast_active.is_some() && fast_enabled != fast_active;
-    let fast_detail = match (fast_enabled, fast_active) {
-        (Some(enabled), Some(active)) if fast_diverges => Some(format!(
-            "{} · enabled: {enabled} · active: {active}",
-            fast_mode_label(fast_enabled, fast_active)
-        )),
-        (None, _) | (_, None) => Some("Fast state is not published yet".to_owned()),
-        _ => None,
-    };
-    let switch_session = session.clone();
     let refresh_session = session.clone();
 
     v_flex()
@@ -632,84 +706,131 @@ pub(crate) fn render_inspector(
                             .text_xs()
                             .text_color(theme.muted_foreground),
                     )
-                }),
-        )
-        .child(Separator::horizontal())
-        .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    Label::new("Fast")
+                })
+                .children(extra_status_lines.into_iter().map(|line| {
+                    Label::new(line)
                         .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground),
-                )
-                .child(
-                    Switch::new("inspector-fast-mode")
-                        .label("Fast mode")
-                        .small()
-                        .checked(fast_enabled.unwrap_or(false))
-                        .disabled(!connected)
-                        .on_click(window.listener_for(
-                            &switch_session,
-                            |this, _checked: &bool, _window, cx| {
-                                this.toggle_fast_mode(cx);
-                            },
-                        )),
-                )
-                .when_some(fast_detail, |section, detail| {
-                    section.child(
-                        Label::new(detail)
+                        .text_color(theme.muted_foreground)
+                })),
+        )
+        .when_some(git_info, |parent, git| {
+            parent.child(Separator::horizontal()).child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        Label::new("Git")
                             .text_xs()
+                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.muted_foreground),
                     )
-                }),
-        )
-        .child(Separator::horizontal())
-        .child(
-            v_flex()
-                .w_full()
-                .gap_2()
-                .when(focus == InspectorFocus::Checklist, |section| {
-                    section.border_l_2().border_color(theme.primary).pl_2()
-                })
-                .child(
-                    h_flex()
-                        .w_full()
-                        .justify_between()
-                        .child(
-                            Label::new("Checklist")
+                    .child(Label::new(git.summary_line()).text_xs())
+                    .when_some(git.worktree_label, |section, label| {
+                        section.child(
+                            Label::new(format!("Worktree: {label}"))
                                 .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground),
                         )
-                        .child(Tag::secondary().small().child(todo_count.to_string())),
-                )
-                .when(todo_phases.is_empty(), |section| {
-                    section.child(
-                        Label::new("No checklist items yet")
-                            .text_xs()
-                            .text_color(theme.muted_foreground),
-                    )
-                })
-                .children(todo_phases.iter().map(|phase| {
+                    }),
+            )
+        })
+        .when(
+            display_title.is_some()
+                || !display_statuses.is_empty()
+                || !display_widgets.is_empty()
+                || display_editor_text.is_some(),
+            |parent| {
+                parent.child(Separator::horizontal()).child(
                     v_flex()
                         .w_full()
                         .gap_1()
                         .child(
-                            Label::new(phase.name.clone())
+                            Label::new("Display")
                                 .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground),
                         )
-                        .children(
-                            phase
-                                .tasks
-                                .iter()
-                                .map(|task| render_todo_task(task, &theme)),
-                        )
-                })),
+                        .when_some(display_title, |section, title| {
+                            section.child(Label::new(format!("Title: {title}")).text_xs())
+                        })
+                        .children(display_statuses.into_iter().map(|(key, text)| {
+                            Label::new(format!("{key}: {text}"))
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                        }))
+                        .children(display_widgets.into_iter().map(|(key, lines)| {
+                            v_flex()
+                                .w_full()
+                                .gap_0p5()
+                                .child(
+                                    Label::new(format!("widget:{key}"))
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .when(lines.is_empty(), |slot| {
+                                    slot.child(
+                                        Label::new("(empty)")
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                })
+                                .children(lines.into_iter().map(|line| Label::new(line).text_xs()))
+                        }))
+                        .when_some(display_editor_text, |section, text| {
+                            section.child(
+                                v_flex()
+                                    .w_full()
+                                    .gap_0p5()
+                                    .child(
+                                        Label::new("Editor text")
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(
+                                        Label::new(truncate_subagent_text(&text, 240)).text_xs(),
+                                    ),
+                            )
+                        }),
+                )
+            },
         )
+        .when(!todo_phases.is_empty(), |parent| {
+            parent.child(Separator::horizontal()).child(
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .when(focus == InspectorFocus::Checklist, |section| {
+                        section.border_l_2().border_color(theme.primary).pl_2()
+                    })
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .child(
+                                Label::new("Checklist")
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .child(Tag::secondary().small().child(todo_count.to_string())),
+                    )
+                    .children(todo_phases.iter().enumerate().map(|(phase_ix, phase)| {
+                        v_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                Label::new(phase.name.clone())
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground),
+                            )
+                            .children(phase.tasks.iter().enumerate().map(|(task_ix, task)| {
+                                render_todo_task_editable(
+                                    task, phase_ix, task_ix, connected, session, window, &theme,
+                                )
+                            }))
+                    })),
+            )
+        })
         .child(Separator::horizontal())
         .child(
             v_flex()
@@ -787,36 +908,34 @@ pub(crate) fn render_inspector(
                     },
                 ),
         )
-        .child(Separator::horizontal())
-        .child(
-            v_flex()
-                .w_full()
-                .gap_1()
-                .child(if tool_names.len() > 8 {
-                    Button::new("inspector-tools-toggle")
-                        .label(format!(
-                            "{} Tools ({})",
-                            if tools_expanded { "▾" } else { "▸" },
-                            tool_names.len()
-                        ))
-                        .small()
-                        .ghost()
-                        .w_full()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.tools_expanded = !this.tools_expanded;
-                            cx.notify();
-                        }))
-                        .into_any_element()
-                } else {
-                    Label::new(format!("Tools ({})", tool_names.len()))
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.muted_foreground)
-                        .into_any_element()
-                })
-                .when(
-                    !tool_names.is_empty() && (tool_names.len() <= 8 || tools_expanded),
-                    |section| {
+        .when(!tool_names.is_empty(), |parent| {
+            parent.child(Separator::horizontal()).child(
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(if tool_names.len() > 8 {
+                        Button::new("inspector-tools-toggle")
+                            .label(format!(
+                                "{} Tools ({})",
+                                if tools_expanded { "▾" } else { "▸" },
+                                tool_names.len()
+                            ))
+                            .small()
+                            .ghost()
+                            .w_full()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                this.tools_expanded = !this.tools_expanded;
+                                cx.notify();
+                            }))
+                            .into_any_element()
+                    } else {
+                        Label::new(format!("Tools ({})", tool_names.len()))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.muted_foreground)
+                            .into_any_element()
+                    })
+                    .when(tool_names.len() <= 8 || tools_expanded, |section| {
                         let hidden = tool_names.len().saturating_sub(12);
                         section
                             .child(
@@ -834,26 +953,9 @@ pub(crate) fn render_inspector(
                                         .text_color(theme.muted_foreground),
                                 )
                             })
-                    },
-                )
-                .when(tool_names.is_empty(), |section| {
-                    section.child(
-                        Label::new(if has_tool_state {
-                            "No tools reported"
-                        } else {
-                            "Tools not in session state"
-                        })
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
-                    )
-                }),
-        )
-        .child(Separator::horizontal())
-        .child(
-            Label::new("LSP/MCP status is not published on OMP rpc-ui.")
-                .text_xs()
-                .text_color(theme.muted_foreground),
-        )
+                    }),
+            )
+        })
         .into_any_element()
 }
 
@@ -866,6 +968,10 @@ impl Render for WorkspaceView {
                 session.update(cx, |session, _cx| session.take_pending_workspace_palette());
             if let Some(action) = pending {
                 self.run_workspace_palette_action(action, window, cx);
+            }
+            let pending_cwd = session.update(cx, |session, _cx| session.take_pending_new_tab_cwd());
+            if let Some(cwd) = pending_cwd {
+                self.add_session_for_cwd(cwd, window, cx);
             }
         }
         let theme = cx.theme().clone();
@@ -910,9 +1016,10 @@ impl Render for WorkspaceView {
             .when(!self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()
-                        .w(px(252.))
+                        .w(px(260.))
                         .h_full()
                         .p_3()
+                        .gap_2()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
@@ -920,30 +1027,20 @@ impl Render for WorkspaceView {
                         .child(
                             h_flex()
                                 .w_full()
+                                .items_center()
                                 .gap_2()
                                 .child(
-                                    Button::new("workspace-new-session")
-                                        .label("New")
+                                    Button::new("workspace-new-workspace")
+                                        .label("Workspace…")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(
                                             |this, _: &ClickEvent, window, cx| {
-                                                this.add_session(window, cx);
+                                                this.prompt_new_workspace(window, cx);
                                             },
                                         )),
                                 )
-                                .child(
-                                    Button::new("workspace-close-session")
-                                        .label("Close")
-                                        .small()
-                                        .ghost()
-                                        .disabled(self.sessions.is_empty())
-                                        .on_click(cx.listener(
-                                            |this, _: &ClickEvent, window, cx| {
-                                                this.close_active(window, cx);
-                                            },
-                                        )),
-                                )
+                                .child(div().flex_1())
                                 .child(
                                     Button::new("workspace-hide-rail")
                                         .label("Hide")
@@ -959,78 +1056,160 @@ impl Render for WorkspaceView {
                                         .text_color(theme.muted_foreground),
                                 ),
                         )
-                        .child(div().h(px(8.)))
-                        .children(groups.into_iter().enumerate().map(
-                            |(group_ix, (cwd, entries))| {
-                                v_flex()
-                                    .w_full()
-                                    .gap_1()
-                                    .when(group_ix > 0, gpui::Styled::mt_2)
-                                    .child(
-                                        Separator::horizontal().label(workspace_display_name(&cwd)),
-                                    )
-                                    .children(entries.into_iter().map(|entry| {
-                                        let selected = entry.ix == active;
-                                        let ix = entry.ix;
-                                        let attention_color = match entry.attention {
-                                            RailAttention::Quiet => None,
-                                            RailAttention::Active => Some(theme.info),
-                                            RailAttention::Unread => Some(theme.warning),
-                                        };
-                                        h_flex()
-                                            .id(("workspace-session", ix))
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .flex_1()
+                                .gap_3()
+                                .overflow_y_scrollbar()
+                                .children(groups.into_iter().enumerate().map(
+                                    |(group_ix, (cwd, entries))| {
+                                        let cwd_for_add = cwd.clone();
+                                        let display = workspace_display_name(&cwd);
+                                        let path_label = truncate_subagent_text(
+                                            &cwd.display().to_string(),
+                                            36,
+                                        );
+                                        v_flex()
                                             .w_full()
-                                            .justify_between()
-                                            .gap_2()
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .when(selected, |row| {
-                                                // Soft selection: secondary wash + accent bar.
-                                                // Solid primary fill is too loud on dark themes.
-                                                row.bg(theme.secondary)
-                                                    .border_l_2()
-                                                    .border_color(theme.primary)
-                                            })
-                                            .when(!selected, |row| {
-                                                row.hover(|row| row.bg(theme.secondary))
-                                            })
+                                            .gap_1()
+                                            .when(group_ix > 0, gpui::Styled::pt_1)
                                             .child(
                                                 h_flex()
-                                                    .flex_1()
-                                                    .gap_2()
-                                                    .when_some(attention_color, |label, color| {
-                                                        label.child(
-                                                            div()
-                                                                .size(px(7.))
-                                                                .rounded_full()
-                                                                .bg(color),
-                                                        )
-                                                    })
+                                                    .w_full()
+                                                    .items_center()
+                                                    .gap_1()
                                                     .child(
-                                                        Label::new(entry.label)
-                                                            .text_sm()
+                                                        v_flex()
                                                             .flex_1()
-                                                            .truncate()
-                                                            .when(selected, |label| {
-                                                                label.font_weight(
-                                                                    gpui::FontWeight::MEDIUM,
-                                                                )
-                                                            }),
+                                                            .min_w_0()
+                                                            .child(
+                                                                Label::new(display)
+                                                                    .text_xs()
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::SEMIBOLD,
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Label::new(path_label)
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    )
+                                                                    .truncate(),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        Button::new((
+                                                            "workspace-add-session",
+                                                            group_ix,
+                                                        ))
+                                                        .label("+")
+                                                        .small()
+                                                        .ghost()
+                                                        .on_click(cx.listener(
+                                                            move |this,
+                                                                  _: &ClickEvent,
+                                                                  window,
+                                                                  cx| {
+                                                                this.add_session_for_cwd(
+                                                                    cwd_for_add.clone(),
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
                                                     ),
                                             )
-                                            .child(
-                                                phase_tag(&entry.phase).small().child(entry.phase),
-                                            )
-                                            .on_click(cx.listener(
-                                                move |this, _: &ClickEvent, _window, cx| {
-                                                    this.select_session(ix, cx);
-                                                },
-                                            ))
-                                    }))
-                            },
-                        )),
+                                            .children(entries.into_iter().map(|entry| {
+                                                let selected = entry.ix == active;
+                                                let ix = entry.ix;
+                                                let attention_color = match entry.attention {
+                                                    RailAttention::Quiet => None,
+                                                    RailAttention::Active => Some(theme.info),
+                                                    RailAttention::Unread => Some(theme.warning),
+                                                };
+                                                h_flex()
+                                                    .id(("workspace-session", ix))
+                                                    .group("rail-row")
+                                                    .w_full()
+                                                    .justify_between()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .when(selected, |row| {
+                                                        row.bg(theme.sidebar_accent).rounded_md()
+                                                    })
+                                                    .when(!selected, |row| {
+                                                        row.rounded_md()
+                                                            .hover(|row| row.bg(theme.secondary))
+                                                    })
+                                                    .child(
+                                                        h_flex()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .gap_2()
+                                                            .when_some(
+                                                                attention_color,
+                                                                |label, color| {
+                                                                    label.child(
+                                                                        div()
+                                                                            .size(px(7.))
+                                                                            .rounded_full()
+                                                                            .bg(color),
+                                                                    )
+                                                                },
+                                                            )
+                                                            .child(
+                                                                Label::new(entry.label)
+                                                                    .text_sm()
+                                                                    .flex_1()
+                                                                    .truncate()
+                                                                    .when(selected, |label| {
+                                                                        label.font_weight(
+                                                                            gpui::FontWeight::MEDIUM,
+                                                                        )
+                                                                    }),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        phase_tag(&entry.phase)
+                                                            .small()
+                                                            .child(entry.phase),
+                                                    )
+                                                    .child(
+                                                        Button::new(("workspace-close-session", ix))
+                                                            .label("×")
+                                                            .small()
+                                                            .ghost()
+                                                            .invisible()
+                                                            .group_hover(
+                                                                "rail-row",
+                                                                gpui::Styled::visible,
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                move |this,
+                                                                      _: &ClickEvent,
+                                                                      window,
+                                                                      cx| {
+                                                                    this.close_session_at(
+                                                                        ix, window, cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this, _: &ClickEvent, _window, cx| {
+                                                            this.select_session(ix, cx);
+                                                        },
+                                                    ))
+                                            }))
+                                    },
+                                )),
+                        ),
                 )
             })
             .when(self.rail_collapsed, |parent| {
@@ -1253,6 +1432,8 @@ pub(crate) fn tokens_per_second_label(v: Option<&serde_json::Value>) -> Option<S
     Some(format!("{tps:.1}"))
 }
 
+/// Presentation helper for enabled vs active fast mode (used by tests / notices).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fast_mode_label(enabled: Option<bool>, active: Option<bool>) -> &'static str {
     match (enabled, active) {
         (_, Some(true)) => "fast:active",

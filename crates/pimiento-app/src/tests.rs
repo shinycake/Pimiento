@@ -81,6 +81,245 @@ fn fast_mode_label_distinguishes_off_on_and_active() {
 }
 
 #[test]
+fn parse_omp_model_roles_yaml_reads_provider_id_pairs() {
+    let roles = parse_omp_model_roles_yaml(
+        r#"
+modelRoles:
+  task: cursor/gpt-5.6-luna
+  draft: openai/gpt-4.1-mini
+  smol: cursor/composer-2.5
+  broken: not-a-label
+  empty: ""
+modelTags:
+  draft:
+    name: "Draft work"
+    color: warning
+other: ignore
+"#,
+    );
+    assert_eq!(roles.len(), 3);
+    assert_eq!(roles[0].name, "draft");
+    assert_eq!(roles[0].display_name, "Draft work");
+    assert_eq!(roles[0].color, OmpRoleColor::Warning);
+    assert_eq!(roles[0].provider, "openai");
+    assert_eq!(roles[1].name, "smol");
+    assert_eq!(roles[1].display_name, "Fast");
+    assert_eq!(roles[1].color, OmpRoleColor::Warning);
+    assert_eq!(roles[2].name, "task");
+    assert_eq!(roles[2].display_name, "Subtask");
+    assert_eq!(roles[2].color, OmpRoleColor::Muted);
+    assert!(parse_omp_model_roles_yaml("not: yaml: [[[").is_empty());
+}
+
+#[test]
+fn model_supports_fast_mode_matches_omp_service_tier_families() {
+    assert!(model_supports_fast_mode("openai", None, "gpt-4.1"));
+    assert!(model_supports_fast_mode(
+        "anthropic",
+        Some("anthropic-messages"),
+        "claude-opus-4"
+    ));
+    assert!(model_supports_fast_mode(
+        "openrouter",
+        None,
+        "anthropic/claude-3-haiku"
+    ));
+    assert!(!model_supports_fast_mode(
+        "cursor",
+        None,
+        "cursor-grok-4.5-high"
+    ));
+    assert!(!model_supports_fast_mode("cursor", None, "composer-2.5"));
+}
+
+#[test]
+fn pending_images_to_wire_uses_mime_and_base64_data() {
+    assert_eq!(
+        image_mime_for_path(Path::new("shot.PNG")),
+        Some("image/png")
+    );
+    assert_eq!(image_mime_for_path(Path::new("notes.txt")), None);
+    assert_eq!(image_mime_for_path(Path::new("legacy.bmp")), None);
+    assert!(is_supported_image_path(Path::new("shot.webp")));
+    assert!(!is_supported_image_path(Path::new("notes.txt")));
+
+    let attachments = [
+        PendingAttachment::Image {
+            path: Some(PathBuf::from("/tmp/a.png")),
+            mime: "image/png".into(),
+            width: 64,
+            height: 48,
+            data_b64: "Zm9v".into(),
+            label: "a.png".into(),
+            marker_index: 1,
+        },
+        PendingAttachment::PathMention {
+            path: PathBuf::from("/tmp/notes.txt"),
+            display: "@/tmp/notes.txt".into(),
+        },
+    ];
+    let images = pending_images_to_wire(&attachments);
+    assert_eq!(
+        images,
+        vec![serde_json::json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "data": "Zm9v",
+        })]
+    );
+}
+
+#[test]
+fn encode_image_for_rpc_matches_omp_budget_and_returns_dims() {
+    let mut png = Vec::new();
+    {
+        // Above min edge so auto-resize can keep the original when under budget.
+        let img = image::RgbImage::from_pixel(240, 240, image::Rgb([20, 40, 60]));
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        dyn_img
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("write png");
+    }
+    let encoded = encode_image_for_rpc_with_auto_resize(&png, true).expect("encode");
+    assert!(
+        encoded.mime == "image/png" || encoded.mime == "image/jpeg" || encoded.mime == "image/webp"
+    );
+    assert!(!encoded.data_b64.is_empty());
+    assert!(encoded.data_b64.len() < 700_000);
+    assert!(encoded.width >= 200);
+    assert!(encoded.height >= 200);
+    assert!(encoded.width <= 1568);
+    assert!(encoded.height <= 1568);
+
+    let kept = encode_image_for_rpc_with_auto_resize(&png, false).expect("no-resize");
+    assert_eq!(kept.mime, "image/png");
+    assert_eq!(kept.width, 240);
+    assert_eq!(kept.height, 240);
+}
+
+#[test]
+fn image_markers_and_paste_helpers() {
+    assert_eq!(image_marker(2, 800, 600), "[Image #2, 800x600]");
+    assert_eq!(wrap_attachment("hi"), "<attachment>\nhi\n</attachment>");
+    assert_eq!(inline_paste_marker(1, 30, 900), "[Paste #1, +30 lines]");
+    assert_eq!(inline_paste_marker(3, 4, 120), "[Paste #3, 120 chars]");
+    let _threshold = large_paste_threshold(); // peeks config; default 100
+
+    let attachments = [PendingAttachment::Image {
+        path: None,
+        mime: "image/png".into(),
+        width: 10,
+        height: 20,
+        data_b64: "Zm9v".into(),
+        label: "clip".into(),
+        marker_index: 1,
+    }];
+    let composed = compose_message_with_image_markers("look", &attachments);
+    assert!(composed.contains("[Image #1, 10x20]"));
+    assert!(composed.starts_with("look"));
+
+    let already = compose_message_with_image_markers("see [Image #1, 10x20] please", &attachments);
+    assert_eq!(already, "see [Image #1, 10x20] please");
+}
+
+#[test]
+fn load_pending_attachment_path_mention_for_non_images() {
+    let att = load_pending_attachment(Path::new("/tmp/readme.md"), 1).expect("path mention");
+    match att {
+        PendingAttachment::PathMention { path, display } => {
+            assert_eq!(path, PathBuf::from("/tmp/readme.md"));
+            assert_eq!(display, "@/tmp/readme.md");
+        }
+        PendingAttachment::Image { .. } => panic!("expected PathMention"),
+    }
+}
+
+#[test]
+fn compose_and_strip_attachment_markers() {
+    let attachments = [
+        PendingAttachment::Image {
+            path: None,
+            mime: "image/png".into(),
+            width: 100,
+            height: 80,
+            data_b64: "Zm9v".into(),
+            label: "a".into(),
+            marker_index: 1,
+        },
+        PendingAttachment::PathMention {
+            path: PathBuf::from("src/main.rs"),
+            display: "@src/main.rs".into(),
+        },
+    ];
+    let composed = compose_message_with_attachments("hello", &attachments);
+    assert!(composed.contains("[Image #1, 100x80]"));
+    assert!(composed.contains("@src/main.rs"));
+    assert_eq!(
+        strip_image_marker("see [Image #1, 100x80] please", 1),
+        "see please"
+    );
+    assert_eq!(
+        strip_path_mention("read @src/main.rs now", "@src/main.rs"),
+        "read now"
+    );
+    assert_eq!(at_mention_query("look at @src/m"), Some("src/m"));
+    assert_eq!(at_mention_query("email me@host.com"), None);
+    assert_eq!(
+        format_file_mention_summary(&serde_json::json!({
+            "role": "fileMention",
+            "files": [{"path": "a.rs", "lineCount": 12}],
+        })),
+        Some("File mention: a.rs (12 lines)".into())
+    );
+}
+
+#[test]
+fn roles_matching_model_finds_assigned_roles() {
+    let roles = vec![
+        OmpRole {
+            name: "default".into(),
+            display_name: "Default".into(),
+            provider: "cursor".into(),
+            id: "cursor-grok-4.5-high".into(),
+            color: OmpRoleColor::Success,
+        },
+        OmpRole {
+            name: "smol".into(),
+            display_name: "Fast".into(),
+            provider: "cursor".into(),
+            id: "composer-2.5".into(),
+            color: OmpRoleColor::Warning,
+        },
+    ];
+    let matched = roles_matching_model(&roles, Some("cursor/cursor-grok-4.5-high"));
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].name, "default");
+}
+
+#[test]
+fn rail_close_forgets_recent_session_file() {
+    let root = std::env::temp_dir().join(format!(
+        "pimiento-rail-forget-{}-{}",
+        std::process::id(),
+        current_unix_seconds()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("temp persistence root");
+    let persistence = SessionPersistence::from_root(root.clone());
+    persistence.remember_recent_session(
+        Some("/tmp/rail-session.jsonl"),
+        Some(Path::new("/tmp/work")),
+        Some("work"),
+    );
+    assert_eq!(persistence.load_recent_sessions().len(), 1);
+    // Rail × closes the in-app tab and forgets Pimiento recent.json only —
+    // never deletes OMP session files under ~/.omp.
+    persistence.forget_session(Path::new("/tmp/rail-session.jsonl"));
+    assert!(persistence.load_recent_sessions().is_empty());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn todo_count_only_includes_open_and_in_progress() {
     let raw = serde_json::json!([{
         "name": "Ship",
@@ -93,6 +332,62 @@ fn todo_count_only_includes_open_and_in_progress() {
     }]);
     let phases = parse_todo_phases(Some(&raw));
     assert_eq!(todo_open_count(&phases), 2);
+}
+
+#[test]
+fn toggle_todo_in_phases_json_cycles_status() {
+    let raw = serde_json::json!([{
+        "name": "Ship",
+        "tasks": [
+            {"content": "Build", "status": "pending"},
+            {"content": "Done", "status": "completed"}
+        ]
+    }]);
+    let toggled = toggle_todo_in_phases_json(&raw, 0, 0).expect("toggle");
+    assert_eq!(toggled[0]["tasks"][0]["status"].as_str(), Some("completed"));
+    let toggled_back = toggle_todo_in_phases_json(&toggled, 0, 1).expect("toggle back");
+    assert_eq!(
+        toggled_back[0]["tasks"][1]["status"].as_str(),
+        Some("pending")
+    );
+}
+
+#[test]
+fn parse_branch_and_login_wire_shapes() {
+    let branch = parse_branch_messages(Some(&serde_json::json!({
+        "messages": [
+            {"entryId": "e1", "text": "hello\nworld"},
+            {"entryId": "", "text": "skip"},
+            {"entryId": "e2", "text": "second"}
+        ]
+    })));
+    assert_eq!(branch.len(), 2);
+    assert_eq!(branch[0].entry_id, "e1");
+    assert_eq!(branch_message_preview(&branch[0].text, 8), "hello wo…");
+
+    let providers = parse_login_providers(Some(&serde_json::json!({
+        "providers": [
+            {"id": "openai", "name": "OpenAI", "available": true, "authenticated": false},
+            {"id": "gh", "available": false, "authenticated": true}
+        ]
+    })));
+    assert_eq!(providers.len(), 2);
+    assert_eq!(providers[1].name, "gh");
+    assert!(!providers[1].available);
+}
+
+#[test]
+fn inspector_extra_status_lines_are_honest() {
+    let lines = inspector_extra_status_lines(Some(&serde_json::json!({
+        "queuedMessageCount": 2,
+        "messageCount": 10,
+        "tokens": {"input": 100, "output": 50},
+        "cost": 0.0123
+    })));
+    assert!(lines.iter().any(|l| l == "Queue: 2"));
+    assert!(lines.iter().any(|l| l.contains("Tokens: 100 in / 50 out")));
+    assert!(lines.iter().any(|l| l.starts_with("Cost: $")));
+    assert!(inspector_extra_status_lines(None).is_empty());
 }
 
 #[test]
@@ -308,6 +603,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
             phase: "idle".to_owned(),
             cwd: PathBuf::from("/tmp/zulu"),
             attention: RailAttention::Quiet,
+            session_file: None,
         },
         RailEntry {
             ix: 1,
@@ -315,6 +611,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
             phase: "stream".to_owned(),
             cwd: PathBuf::from("/tmp/alpha"),
             attention: RailAttention::Active,
+            session_file: None,
         },
         RailEntry {
             ix: 0,
@@ -322,6 +619,7 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
             phase: "idle".to_owned(),
             cwd: PathBuf::from("/tmp/alpha"),
             attention: RailAttention::Unread,
+            session_file: None,
         },
     ];
 
@@ -565,6 +863,7 @@ fn thinking_options_preserve_supported_order_and_deduplicate() {
     let choice = ModelChoice {
         provider: "anthropic".into(),
         id: "claude".into(),
+        api: Some("anthropic-messages".into()),
         thinking_efforts: Some(vec![
             "minimal".into(),
             "low".into(),
@@ -925,4 +1224,29 @@ mod open_url_tests {
             Some("https://example.com/b")
         );
     }
+}
+
+#[test]
+fn dialog_cancel_fields_use_cancelled_and_timed_out() {
+    let cancel = dialog_cancel_fields(false);
+    assert_eq!(
+        cancel.get("cancelled"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(cancel.get("timedOut").is_none());
+    assert!(cancel.get("cancel").is_none());
+
+    let timed = dialog_cancel_fields(true);
+    assert_eq!(timed.get("cancelled"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(timed.get("timedOut"), Some(&serde_json::Value::Bool(true)));
+}
+
+#[test]
+fn display_status_lines_skip_empty() {
+    let mut display = DisplayState::default();
+    display.statuses.insert("k".into(), Some("hello".into()));
+    display.statuses.insert("empty".into(), Some("  ".into()));
+    display.statuses.insert("cleared".into(), None);
+    let lines = display_status_lines(&display);
+    assert_eq!(lines, vec![("k".into(), "hello".into())]);
 }

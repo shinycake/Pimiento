@@ -17,6 +17,9 @@ gpui-component = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
+base64 = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
 smol = { workspace = true }
 anyhow = { workspace = true }
 
