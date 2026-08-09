@@ -432,13 +432,6 @@ impl WorkspaceView {
             }
             return true;
         }
-        // Keep Cmd/Ctrl+K as an alternate palette chord.
-        if !mods.shift && matches!(key, "k" | "K") {
-            if let Some(session) = self.sessions.get(self.active).cloned() {
-                session.update(cx, SessionView::toggle_palette);
-            }
-            return true;
-        }
         if mods.shift {
             // Other Shift+chords (e.g. future) are not workspace shortcuts.
             return false;
@@ -451,25 +444,8 @@ impl WorkspaceView {
             }
             return false;
         }
-        match key {
-            "t" | "T" => {
-                self.add_session(window, cx);
-                true
-            }
-            "w" | "W" => {
-                self.close_active(window, cx);
-                true
-            }
-            "b" | "B" => {
-                self.toggle_rail(cx);
-                true
-            }
-            "j" | "J" => {
-                self.toggle_inspector(cx);
-                true
-            }
-            _ => false,
-        }
+        let _ = window;
+        false
     }
 
     pub(crate) fn rename_session_at(
@@ -1450,6 +1426,22 @@ impl Render for WorkspaceView {
                     cx.stop_propagation();
                 }
             }))
+            .on_action(cx.listener(Self::handle_about_menu))
+            .on_action(cx.listener(Self::handle_open_workspace_menu))
+            .on_action(cx.listener(Self::handle_new_session_menu))
+            .on_action(cx.listener(Self::handle_close_session_menu))
+            .on_action(cx.listener(Self::handle_palette_menu))
+            .on_action(cx.listener(Self::handle_theme_menu))
+            .on_action(cx.listener(Self::handle_toggle_rail_menu))
+            .on_action(cx.listener(Self::handle_toggle_inspector_menu))
+            .on_action(cx.listener(Self::handle_rename_menu))
+            .on_action(cx.listener(Self::handle_branch_menu))
+            .on_action(cx.listener(Self::handle_export_menu))
+            .on_action(cx.listener(Self::handle_share_menu))
+            .on_action(cx.listener(Self::handle_abort_menu))
+            .on_action(cx.listener(Self::handle_minimize_menu))
+            .on_action(cx.listener(Self::handle_zoom_menu))
+            .on_action(cx.listener(Self::handle_fullscreen_menu))
             .when(!self.rail_collapsed, |parent| {
                 parent.child(
                     v_flex()

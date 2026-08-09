@@ -12,22 +12,20 @@ Pimiento uses your existing `omp` installation, configuration, and session store
 
 ## Quick start
 
+Use the development loop so every launch rebuilds and replaces any stale debug process:
+
 ```sh
-cargo build -p pimiento-app
-./scripts/run_app.sh
+./scripts/dev_loop.sh
 ```
 
-Rebuild and replace a running debug instance:
+For a one-shot build and restart:
 
 ```sh
 cargo build -p pimiento-app && PIMIENTO_RESTART=1 ./scripts/run_app.sh
 ```
 
-Or:
-
-```sh
-./scripts/dev_loop.sh
-```
+Avoid launching an already-built bare executable without the restart step during development; an
+older Pimiento process may otherwise remain active and hide menu or focus changes.
 
 Set `PIMIENTO_AUTO_CONNECT=1` when launching to automatically connect (also the default in `scripts/run_app.sh`):
 

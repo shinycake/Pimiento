@@ -712,6 +712,64 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
+fn native_menu_spec_has_product_labels_and_action_mapping() {
+    let menus = app_menus();
+    assert_eq!(
+        menus
+            .iter()
+            .map(|menu| menu.name.as_ref())
+            .collect::<Vec<_>>(),
+        MENU_TITLES
+    );
+
+    let action_name = |menu_name: &str, item_name: &str| {
+        menus
+            .iter()
+            .find(|menu| menu.name.as_ref() == menu_name)
+            .and_then(|menu| {
+                menu.items.iter().find_map(|item| match item {
+                    gpui::MenuItem::Action { name, action, .. } if name.as_ref() == item_name => {
+                        Some(action.name())
+                    }
+                    _ => None,
+                })
+            })
+    };
+
+    assert_eq!(
+        action_name("Pimiento", "About Pimiento"),
+        Some("pimiento_menu::AboutPimiento")
+    );
+    assert_eq!(
+        action_name("File", "Open Workspace…"),
+        Some("pimiento_menu::OpenWorkspace")
+    );
+    assert_eq!(
+        action_name("View", "Command Palette…"),
+        Some("pimiento_menu::OpenCommandPalette")
+    );
+    assert_eq!(
+        action_name("Session", "Branch/Fork from Turn…"),
+        Some("pimiento_menu::BranchFromTurn")
+    );
+    assert_eq!(
+        action_name("Window", "Enter Full Screen"),
+        Some("pimiento_menu::EnterFullScreen")
+    );
+    assert_eq!(action_name("Edit", "Undo"), Some("input::Undo"));
+    assert_eq!(action_name("Edit", "Paste"), Some("input::Paste"));
+    assert_eq!(action_name("Edit", "Select All"), Some("input::SelectAll"));
+
+    let app_menu = &menus[0];
+    assert!(app_menu.items.iter().any(|item| matches!(
+        item,
+        gpui::MenuItem::SystemMenu(menu)
+            if menu.name.as_ref() == "Services"
+                && menu.menu_type == gpui::SystemMenuType::Services
+    )));
+}
+
+#[test]
 fn native_slash_catalog_maps_only_supported_gui_actions() {
     let mappings = native_slash_catalog()
         .iter()

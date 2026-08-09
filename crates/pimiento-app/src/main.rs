@@ -52,6 +52,7 @@ use pimiento_core::{
 };
 use serde::{Deserialize, Serialize};
 
+mod app_menu;
 mod app_state;
 mod git_status;
 mod host_bridge;
@@ -65,6 +66,8 @@ mod workspace;
 
 // These glob imports form the crate-local module facade used by sibling modules
 // during this behavior-preserving split.
+#[allow(clippy::wildcard_imports)]
+use app_menu::*;
 #[allow(clippy::wildcard_imports)]
 use app_state::*;
 #[allow(clippy::wildcard_imports)]
@@ -118,9 +121,22 @@ fn main() {
     let initial_theme = initial_theme_selection(theme_override.as_deref(), &persistence);
 
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
+    app.on_reopen(|cx| {
+        cx.activate(true);
+        if let Some(window) = cx
+            .window_stack()
+            .and_then(|windows| windows.first().copied())
+        {
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        } else if let Some(window) = cx.windows().first().copied() {
+            let _ = window.update(cx, |_, window, _| window.activate_window());
+        }
+    });
     app.run(move |cx| {
         gpui_component::init(cx);
         initialize_theme_registry(&persistence, initial_theme.clone(), cx);
+        cx.activate(true);
+        install_app_menu(cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 window_bounds: saved_window_bounds.map(WindowBounds::Windowed),
