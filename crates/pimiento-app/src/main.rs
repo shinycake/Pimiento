@@ -36,7 +36,7 @@ use omp_rpc_client::{
     discovery::{
         DiscoveryInputs, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport, discover,
     },
-    frames::{RpcCommandBody, SubagentSubscriptionLevel},
+    frames::{InterruptMode, QueueMode, RpcCommandBody, SubagentSubscriptionLevel},
 };
 use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},
@@ -53,6 +53,7 @@ mod git_status;
 mod models;
 mod palette;
 mod session;
+mod tokens;
 mod transcript_ui;
 mod workspace;
 
@@ -68,6 +69,8 @@ use models::*;
 use palette::*;
 #[allow(clippy::wildcard_imports)]
 use session::*;
+#[allow(clippy::wildcard_imports)]
+use tokens::*;
 #[allow(clippy::wildcard_imports)]
 use transcript_ui::*;
 #[allow(clippy::wildcard_imports)]
@@ -119,6 +122,7 @@ fn main() {
                             cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
                         if follows_system {
                             Theme::sync_system_appearance(Some(window), cx);
+                            apply_pimiento_brand(cx);
                         }
                     })
                     .detach();

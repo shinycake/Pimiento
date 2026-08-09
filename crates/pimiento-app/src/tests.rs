@@ -15,6 +15,21 @@ fn composer_steers_only_while_streaming() {
 }
 
 #[test]
+fn queue_mode_cycles_between_all_and_one_at_a_time() {
+    assert_eq!(cycle_queue_mode(Some("all")), QueueMode::OneAtATime);
+    assert_eq!(cycle_queue_mode(Some("one-at-a-time")), QueueMode::All);
+    assert_eq!(cycle_queue_mode(None), QueueMode::OneAtATime);
+    assert_eq!(cycle_queue_mode(Some("future-mode")), QueueMode::OneAtATime);
+}
+
+#[test]
+fn interrupt_mode_cycles_between_immediate_and_wait() {
+    assert_eq!(cycle_interrupt_mode(Some("immediate")), InterruptMode::Wait);
+    assert_eq!(cycle_interrupt_mode(Some("wait")), InterruptMode::Immediate);
+    assert_eq!(cycle_interrupt_mode(None), InterruptMode::Immediate);
+}
+
+#[test]
 fn version_gate_notice_only_formats_outside_tested_baseline() {
     assert_eq!(format_version_gate_notice(MIN_SUPPORTED), None);
 

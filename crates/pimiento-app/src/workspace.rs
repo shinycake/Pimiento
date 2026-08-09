@@ -512,6 +512,12 @@ pub(crate) fn render_inspector(
         context,
         tokens,
         connected,
+        steering_mode,
+        follow_up_mode,
+        interrupt_mode,
+        auto_compaction_enabled,
+        auto_retry_enabled,
+        queued_message_count,
         todo_phases,
         subagent_rows,
         selected_subagent_id,
@@ -575,6 +581,12 @@ pub(crate) fn render_inspector(
             context_percent(state.context.as_ref()),
             tokens_per_second_label(state.tokens.as_ref()),
             session_view.client.is_some(),
+            state.steering_mode.clone(),
+            state.follow_up_mode.clone(),
+            state.interrupt_mode.clone(),
+            state.auto_compaction_enabled,
+            state.auto_retry_enabled,
+            state.queued_message_count.unwrap_or_default(),
             parse_todo_phases(session_view.projection.todos_raw.as_ref()),
             session_view
                 .subagent_snapshots
@@ -608,6 +620,15 @@ pub(crate) fn render_inspector(
     let path = cwd.display().to_string();
     let path = truncate_subagent_text(&path, 44);
     let refresh_session = session.clone();
+    let steering_session = session.clone();
+    let follow_up_session = session.clone();
+    let interrupt_session = session.clone();
+    let auto_compaction_session = session.clone();
+    let auto_retry_session = session.clone();
+    let steering_label = steering_mode.unwrap_or_else(|| "unknown".to_owned());
+    let follow_up_label = follow_up_mode.unwrap_or_else(|| "unknown".to_owned());
+    let interrupt_label = interrupt_mode.unwrap_or_else(|| "unknown".to_owned());
+    let phase_status = StatusKind::from_phase_label(&phase);
 
     v_flex()
         .w(px(272.))
@@ -657,7 +678,7 @@ pub(crate) fn render_inspector(
                 .w_full()
                 .gap_1()
                 .when(focus == InspectorFocus::Session, |section| {
-                    section.border_l_2().border_color(theme.primary).pl_2()
+                    section.bg(theme.secondary).rounded_sm().p_2()
                 })
                 .child(
                     h_flex()
@@ -669,7 +690,7 @@ pub(crate) fn render_inspector(
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.muted_foreground),
                         )
-                        .child(phase_tag(&phase).small().child(phase)),
+                        .child(phase_tag(&phase).small().child(phase_status.label())),
                 )
                 .child(Label::new(workspace_display_name(&cwd)).text_sm())
                 .child(
@@ -712,6 +733,117 @@ pub(crate) fn render_inspector(
                         .text_xs()
                         .text_color(theme.muted_foreground)
                 })),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child(
+                            Label::new("Queue")
+                                .text_xs()
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.muted_foreground),
+                        )
+                        .when(queued_message_count > 0, |row| {
+                            row.child(
+                                Tag::secondary()
+                                    .small()
+                                    .child(format!("queue:{queued_message_count}")),
+                            )
+                        }),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .child(Label::new("Steering").text_xs())
+                        .child(
+                            Button::new("inspector-steering-mode")
+                                .label(steering_label)
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(cx.listener(
+                                    move |_this, _: &ClickEvent, _window, cx| {
+                                        steering_session.update(cx, |session, cx| {
+                                            session.toggle_steering_mode(cx);
+                                        });
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .child(Label::new("Follow-up").text_xs())
+                        .child(
+                            Button::new("inspector-follow-up-mode")
+                                .label(follow_up_label)
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(cx.listener(
+                                    move |_this, _: &ClickEvent, _window, cx| {
+                                        follow_up_session.update(cx, |session, cx| {
+                                            session.toggle_follow_up_mode(cx);
+                                        });
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .items_center()
+                        .child(Label::new("Interrupt").text_xs())
+                        .child(
+                            Button::new("inspector-interrupt-mode")
+                                .label(interrupt_label)
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(cx.listener(
+                                    move |_this, _: &ClickEvent, _window, cx| {
+                                        interrupt_session.update(cx, |session, cx| {
+                                            session.toggle_interrupt_mode(cx);
+                                        });
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    Switch::new("inspector-auto-compaction")
+                        .label("Auto compact")
+                        .small()
+                        .checked(auto_compaction_enabled.unwrap_or(false))
+                        .disabled(!connected)
+                        .on_click(cx.listener(move |_this, _checked: &bool, _window, cx| {
+                            auto_compaction_session.update(cx, |session, cx| {
+                                session.toggle_auto_compaction(cx);
+                            });
+                        })),
+                )
+                .child(
+                    Switch::new("inspector-auto-retry")
+                        .label("Auto retry")
+                        .small()
+                        .checked(auto_retry_enabled.unwrap_or(false))
+                        .disabled(!connected)
+                        .on_click(cx.listener(move |_this, _checked: &bool, _window, cx| {
+                            auto_retry_session.update(cx, |session, cx| {
+                                session.toggle_auto_retry(cx);
+                            });
+                        })),
+                ),
         )
         .when_some(git_info, |parent, git| {
             parent.child(Separator::horizontal()).child(

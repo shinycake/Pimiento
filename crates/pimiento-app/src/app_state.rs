@@ -64,6 +64,7 @@ pub(crate) fn apply_theme_preference(
             Theme::change(ThemeMode::Dark, Some(window), cx);
         }
     }
+    apply_pimiento_brand(cx);
     // The label changes even when returning to System keeps the same concrete mode.
     window.refresh();
 }

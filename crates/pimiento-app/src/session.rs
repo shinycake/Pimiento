@@ -1180,6 +1180,224 @@ impl SessionView {
         .detach();
     }
 
+    pub(crate) fn toggle_steering_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let previous = self.projection.state.steering_mode.clone();
+        let mode = cycle_queue_mode(previous.as_deref());
+        self.projection.state.steering_mode = Some(mode.as_wire().to_owned());
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetSteeringMode { mode }).await {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "set_steering_mode failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.steering_mode = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.steering_mode = previous;
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_steering_mode: {error}"),
+                            code: Some("set_steering_mode".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_follow_up_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let previous = self.projection.state.follow_up_mode.clone();
+        let mode = cycle_queue_mode(previous.as_deref());
+        self.projection.state.follow_up_mode = Some(mode.as_wire().to_owned());
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetFollowUpMode { mode }).await {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "set_follow_up_mode failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.follow_up_mode = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.follow_up_mode = previous;
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_follow_up_mode: {error}"),
+                            code: Some("set_follow_up_mode".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_interrupt_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let previous = self.projection.state.interrupt_mode.clone();
+        let mode = cycle_interrupt_mode(previous.as_deref());
+        self.projection.state.interrupt_mode = Some(mode.as_wire().to_owned());
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetInterruptMode { mode }).await {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "set_interrupt_mode failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.interrupt_mode = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.interrupt_mode = previous;
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_interrupt_mode: {error}"),
+                            code: Some("set_interrupt_mode".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_auto_compaction(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let previous = self.projection.state.auto_compaction_enabled;
+        let enabled = !previous.unwrap_or(false);
+        self.projection.state.auto_compaction_enabled = Some(enabled);
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client
+                .send(RpcCommandBody::SetAutoCompaction { enabled })
+                .await
+            {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "set_auto_compaction failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.auto_compaction_enabled = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.auto_compaction_enabled = previous;
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_auto_compaction: {error}"),
+                            code: Some("set_auto_compaction".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn toggle_auto_retry(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let previous = self.projection.state.auto_retry_enabled;
+        let enabled = !previous.unwrap_or(false);
+        self.projection.state.auto_retry_enabled = Some(enabled);
+        cx.notify();
+
+        cx.spawn(async move |view, cx| {
+            match client.send(RpcCommandBody::SetAutoRetry { enabled }).await {
+                Ok(resp) if resp.success => {
+                    let _ = view.update(cx, SessionView::refresh_state);
+                }
+                Ok(resp) => {
+                    let error = resp
+                        .error
+                        .unwrap_or_else(|| "set_auto_retry failed".to_owned());
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.auto_retry_enabled = previous;
+                        this.projection
+                            .transcript
+                            .push(TranscriptEntry::Notice(error));
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+                Err(error) => {
+                    let _ = view.update(cx, |this, cx| {
+                        this.projection.state.auto_retry_enabled = previous;
+                        this.projection.transcript.push(TranscriptEntry::Error {
+                            message: format!("set_auto_retry: {error}"),
+                            code: Some("set_auto_retry".into()),
+                        });
+                        this.refresh_state(cx);
+                        cx.notify();
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn assign_current_model_to_role(&mut self, role: &str, cx: &mut Context<Self>) {
         let Some((provider, id)) = self
             .projection
@@ -3558,14 +3776,20 @@ pub(crate) fn role_color_tag(color: OmpRoleColor) -> Tag {
 }
 
 pub(crate) fn phase_tag(phase: &str) -> Tag {
-    let key = phase.trim_end_matches('…').trim_end_matches('.');
-    match key {
-        "stream" | "streaming" | "await" | "awaiting" => Tag::info(),
-        "compact" | "compacting" | "retry" | "retrying" | "restart" | "restarting" => {
-            Tag::warning()
-        }
-        "dead" => Tag::danger(),
-        _ => Tag::secondary(),
+    status_pill_for_label(phase)
+}
+
+pub(crate) fn cycle_queue_mode(current: Option<&str>) -> QueueMode {
+    match current {
+        Some("one-at-a-time") => QueueMode::All,
+        _ => QueueMode::OneAtATime,
+    }
+}
+
+pub(crate) fn cycle_interrupt_mode(current: Option<&str>) -> InterruptMode {
+    match current {
+        Some("immediate") => InterruptMode::Wait,
+        _ => InterruptMode::Immediate,
     }
 }
 
@@ -3922,15 +4146,21 @@ impl Render for SessionView {
         }
 
         let theme = cx.theme().clone();
-        let phase_label = match self.projection.run_phase {
-            RunPhase::Idle => "idle",
-            RunPhase::Streaming => "streaming",
-            RunPhase::AwaitingResume => "awaiting",
-            RunPhase::Compacting => "compacting",
-            RunPhase::Retrying => "retrying",
-            RunPhase::Restarting => "restarting",
-            RunPhase::Dead => "dead",
+        let toolbar_status = if self.projection.pending_dialogs.is_empty() {
+            StatusKind::from_run_phase(&self.projection.run_phase)
+        } else {
+            StatusKind::Approval
         };
+        let toolbar_status_tag = if self.projection.pending_dialogs.is_empty() {
+            status_pill_for_phase(&self.projection.run_phase)
+        } else {
+            StatusKind::Approval.tag()
+        };
+        let queued_message_count = self
+            .projection
+            .state
+            .queued_message_count
+            .unwrap_or_default();
         let model_label = self
             .projection
             .state
@@ -4078,7 +4308,11 @@ impl Render for SessionView {
                                                         |label| label.text_color(theme.warning),
                                                     ),
                                             )
-                                            .child(phase_tag(phase_label).small().child(phase_label)),
+                                            .child(
+                                                toolbar_status_tag
+                                                    .small()
+                                                    .child(toolbar_status.label()),
+                                            ),
                                     )
                                     .child(
                                         h_flex()
@@ -4416,6 +4650,7 @@ impl Render for SessionView {
                             .bg(theme.secondary)
                             .border_t_1()
                             .border_color(theme.border)
+                            .shadow_lg()
                             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                                 let paths = paths.paths().to_vec();
                                 this.add_attachment_paths(&paths, cx);
@@ -4487,6 +4722,13 @@ impl Render for SessionView {
                                                 },
                                             )),
                                     )
+                                    .when(queued_message_count > 0, |row| {
+                                        row.child(
+                                            Tag::secondary()
+                                                .small()
+                                                .child(format!("queue:{queued_message_count}")),
+                                        )
+                                    })
                                     .when(!fast_supported, |row| {
                                         row.child(
                                             Label::new("n/a · no service tier")
