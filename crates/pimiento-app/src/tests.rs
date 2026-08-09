@@ -1620,11 +1620,11 @@ fn hub_job_summary_reads_wire_fields_only() {
 }
 
 #[test]
-fn bash_abort_only_when_running_bash_card() {
-    assert!(bash_abort_is_correlatable("bash", ToolStatus::Running));
-    assert!(bash_abort_is_correlatable("Bash", ToolStatus::Running));
-    assert!(!bash_abort_is_correlatable("bash", ToolStatus::Ok));
-    assert!(!bash_abort_is_correlatable("hub", ToolStatus::Running));
+fn abort_bash_has_no_correlatable_target_field() {
+    assert_eq!(
+        serde_json::to_value(RpcCommandBody::AbortBash).expect("serialize abort_bash"),
+        serde_json::json!({"type": "abort_bash"})
+    );
 }
 
 #[test]
@@ -1638,9 +1638,22 @@ fn task_and_eval_digests_require_wire_fields() {
         .as_deref(),
         Some("sa-1")
     );
+    assert_eq!(
+        task_linkage_id(
+            "TASK",
+            &serde_json::json!({}),
+            &serde_json::json!({"details": {"toolCallId": "call-2"}})
+        )
+        .as_deref(),
+        Some("call-2")
+    );
     assert!(task_linkage_id("task", &serde_json::json!({}), &serde_json::json!({})).is_none());
-    let eval = parse_eval_card_summary("eval", &serde_json::json!({"code": "1 + 1"}))
-        .expect("eval summary");
-    assert!(eval.digest.contains("1 + 1"));
+    let eval = parse_eval_card_summary(
+        "eval",
+        &serde_json::json!({"language": "py", "title": "imports", "code": "import json"}),
+    )
+    .expect("eval summary");
+    assert_eq!(eval.title, "Eval · imports");
+    assert_eq!(eval.digest, "Python · import json");
     assert!(parse_eval_card_summary("bash", &serde_json::json!({"code": "1 + 1"})).is_none());
 }

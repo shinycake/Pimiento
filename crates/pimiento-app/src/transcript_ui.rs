@@ -737,9 +737,13 @@ pub(crate) fn render_tool_card(
     let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
     let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
     let show_abort_bash = bash_abort_is_correlatable(&tc.name, tc.status);
-    let tool_title = eval_summary
-        .as_ref()
-        .map_or_else(|| tc.name.clone(), |summary| summary.title.clone());
+    let tool_title = if hub_summary.is_some() {
+        "Jobs".to_owned()
+    } else {
+        eval_summary
+            .as_ref()
+            .map_or_else(|| tc.name.clone(), |summary| summary.title.clone())
+    };
     let arg_digest: String = edit_diff
         .as_ref()
         .and_then(|diff| {
@@ -893,7 +897,12 @@ pub(crate) fn render_tool_card(
                 v_flex()
                     .w_full()
                     .gap_0p5()
-                    .px_1()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.background)
                     .children(hub_lines.into_iter().map(|line| {
                         div()
                             .text_xs()

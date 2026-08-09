@@ -3562,7 +3562,7 @@ impl SessionView {
 
     /// Abort the active OMP bash job. `abort_bash` takes no id on the wire —
     /// only offer this from a running `bash` tool card (see
-    /// [`bash_abort_is_correlatable`]).
+    /// [`crate::bash_abort_is_correlatable`]).
     pub(crate) fn request_abort_bash(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;

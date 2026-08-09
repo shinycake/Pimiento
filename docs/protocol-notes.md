@@ -374,6 +374,5 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 ## Hub / task / bash tool polish — 2026-08-09
 
 - `hub` tool cards render a Jobs summary only from fields present on args/results (`op`, job id, status, command, or a `jobs[]` array). Unparseable payloads keep the generic card.
-- `task` cards show **Open agents** only when a `subagentId`/`agentId` (wire spellings) is present; the button opens the existing Agents inspector focus and does not invent linkage.
-- `eval` uses a short code/expression digest when those fields exist on args.
-- **Abort bash** appears only on a **running** `bash` tool card. `abort_bash` has no id on the wire; the running bash card is the only correlation we trust.
+- `task` cards show **Open agents** only when a named `subagentId`/`toolCallId` linkage field is present; the button opens the existing Agents inspector focus and does not invent linkage. `eval` titles/digests use only supplied title, language, and code.
+- `abort_bash` is targetless (`{type:"abort_bash"}`), while transcript bash rows are identified by `tool_execution_* .toolCallId`; no safe correlation exists, so no per-card Abort button renders.
