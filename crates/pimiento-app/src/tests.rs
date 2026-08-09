@@ -869,6 +869,20 @@ fn inspector_groups_known_tools_and_detects_mode_tags() {
 }
 
 #[test]
+fn tool_visual_classification_covers_semantic_families_and_fallback() {
+    assert_eq!(tool_visual_kind("bash"), ToolVisualKind::Terminal);
+    assert_eq!(tool_visual_kind("read"), ToolVisualKind::ReadFile);
+    assert_eq!(tool_visual_kind("ast_edit"), ToolVisualKind::WriteFile);
+    assert_eq!(tool_visual_kind("grep"), ToolVisualKind::Search);
+    assert_eq!(tool_visual_kind("task"), ToolVisualKind::Agent);
+    assert_eq!(tool_visual_kind("web_search"), ToolVisualKind::Web);
+    assert_eq!(tool_visual_kind("hub"), ToolVisualKind::Hub);
+    assert_eq!(tool_visual_kind("ask"), ToolVisualKind::Ask);
+    assert_eq!(tool_visual_kind("todo"), ToolVisualKind::Todo);
+    assert_eq!(tool_visual_kind("plugin_custom"), ToolVisualKind::Generic);
+}
+
+#[test]
 fn subagent_subscription_cycles_off_progress_events() {
     assert_eq!(
         next_subagent_subscription_level(&SubagentSubscriptionLevel::Off),

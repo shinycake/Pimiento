@@ -6,6 +6,61 @@ pub(crate) struct ToolGroupPosition {
     pub(crate) first: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolVisualKind {
+    Terminal,
+    ReadFile,
+    WriteFile,
+    Search,
+    Agent,
+    Web,
+    Hub,
+    Ask,
+    Todo,
+    Generic,
+}
+
+/// Classify only from the wire tool name; no tool state is inferred.
+pub(crate) fn tool_visual_kind(tool_name: &str) -> ToolVisualKind {
+    match tool_name.to_ascii_lowercase().as_str() {
+        "bash" | "shell" | "terminal" => ToolVisualKind::Terminal,
+        "read" | "read_file" => ToolVisualKind::ReadFile,
+        "write" | "edit" | "ast_edit" | "write_file" => ToolVisualKind::WriteFile,
+        "grep" | "glob" | "search" => ToolVisualKind::Search,
+        "task" | "agent" | "subagent" => ToolVisualKind::Agent,
+        "web" | "web_search" | "browser" => ToolVisualKind::Web,
+        "hub" | "network" => ToolVisualKind::Hub,
+        "ask" | "user" => ToolVisualKind::Ask,
+        "todo" | "checklist" => ToolVisualKind::Todo,
+        _ => ToolVisualKind::Generic,
+    }
+}
+
+fn tool_icon(kind: ToolVisualKind) -> IconName {
+    match kind {
+        ToolVisualKind::Terminal => IconName::SquareTerminal,
+        ToolVisualKind::ReadFile | ToolVisualKind::WriteFile => IconName::File,
+        ToolVisualKind::Search => IconName::Search,
+        ToolVisualKind::Agent => IconName::Bot,
+        ToolVisualKind::Web => IconName::Globe,
+        ToolVisualKind::Hub => IconName::Network,
+        ToolVisualKind::Ask => IconName::User,
+        ToolVisualKind::Todo => IconName::CircleCheck,
+        ToolVisualKind::Generic => IconName::Asterisk,
+    }
+}
+
+fn tool_icon_color(kind: ToolVisualKind, theme: &Theme) -> gpui::Hsla {
+    match kind {
+        ToolVisualKind::Terminal | ToolVisualKind::Web => theme.info,
+        ToolVisualKind::ReadFile | ToolVisualKind::Search | ToolVisualKind::Ask => theme.accent,
+        ToolVisualKind::WriteFile | ToolVisualKind::Hub => theme.warning,
+        ToolVisualKind::Agent => theme.primary,
+        ToolVisualKind::Todo => theme.success,
+        ToolVisualKind::Generic => theme.muted_foreground,
+    }
+}
+
 /// Derive action-group chrome without merging transcript entries.
 ///
 /// Keeping one rendered item per transcript entry preserves every `ListState`
@@ -63,7 +118,8 @@ pub(crate) fn render_entry(
                 )
                 .child(
                     Button::new(("copy-user", row_ix))
-                        .label("Copy")
+                        .icon(IconName::Copy)
+                        .tooltip("Copy message")
                         .small()
                         .ghost()
                         .invisible()
@@ -91,7 +147,8 @@ pub(crate) fn render_entry(
                         let code = code_block.code().to_string();
                         let lang = code_block.lang().map(|lang| lang.to_string());
                         Button::new(code_block_copy_id(row_ix, lang.as_deref(), &code))
-                            .label("Copy")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy code")
                             .small()
                             .ghost()
                             .on_click(move |_, _, cx| {
@@ -108,7 +165,8 @@ pub(crate) fn render_entry(
                 .child(div().flex_1().min_w_0().child(assistant_content))
                 .child(
                     Button::new(("copy-assistant", row_ix))
-                        .label("Copy")
+                        .icon(IconName::Copy)
+                        .tooltip("Copy response")
                         .small()
                         .ghost()
                         .invisible()
@@ -165,7 +223,8 @@ pub(crate) fn render_entry(
                 )
                 .child(
                     Button::new(("copy-thinking", row_ix))
-                        .label("Copy")
+                        .icon(IconName::Copy)
+                        .tooltip("Copy thinking")
                         .small()
                         .ghost()
                         .invisible()
@@ -192,7 +251,9 @@ pub(crate) fn render_entry(
                                 .gap_2()
                                 .child(
                                     Button::new(("thinking-collapse", row_ix))
-                                        .label("Thinking · collapse")
+                                        .icon(IconName::ChevronUp)
+                                        .label("Thinking")
+                                        .tooltip("Collapse thinking")
                                         .small()
                                         .ghost()
                                         .on_click(move |_, _, cx| {
@@ -203,7 +264,8 @@ pub(crate) fn render_entry(
                                 )
                                 .child(
                                     Button::new(("copy-thinking", row_ix))
-                                        .label("Copy")
+                                        .icon(IconName::Copy)
+                                        .tooltip("Copy thinking")
                                         .small()
                                         .ghost()
                                         .invisible()
@@ -266,7 +328,8 @@ pub(crate) fn render_entry(
                         )
                         .child(
                             Button::new(("copy-notice", row_ix))
-                                .label("Copy")
+                                .icon(IconName::Copy)
+                                .tooltip("Copy notice")
                                 .small()
                                 .ghost()
                                 .invisible()
@@ -307,7 +370,8 @@ pub(crate) fn render_entry(
                         )
                         .child(
                             Button::new(("copy-error", row_ix))
-                                .label("Copy")
+                                .icon(IconName::Copy)
+                                .tooltip("Copy error")
                                 .small()
                                 .ghost()
                                 .invisible()
@@ -347,7 +411,8 @@ pub(crate) fn render_entry(
                         )
                         .child(
                             Button::new(("copy-command-output", row_ix))
-                                .label("Copy")
+                                .icon(IconName::Copy)
+                                .tooltip("Copy command output")
                                 .small()
                                 .ghost()
                                 .invisible()
@@ -389,7 +454,8 @@ pub(crate) fn render_entry(
                                 .child(div().flex_1().min_w_0().child(label))
                                 .child(
                                     Button::new(("copy-compaction", row_ix))
-                                        .label("Copy")
+                                        .icon(IconName::Copy)
+                                        .tooltip("Copy compaction details")
                                         .small()
                                         .ghost()
                                         .invisible()
@@ -439,7 +505,8 @@ pub(crate) fn render_entry(
                                 )
                                 .child(
                                     Button::new(("copy-retry-info", row_ix))
-                                        .label("Copy")
+                                        .icon(IconName::Copy)
+                                        .tooltip("Copy retry details")
                                         .small()
                                         .ghost()
                                         .invisible()
@@ -482,7 +549,8 @@ pub(crate) fn render_entry(
                             )
                             .child(
                                 Button::new(("copy-file-mention", row_ix))
-                                    .label("Copy")
+                                    .icon(IconName::Copy)
+                                    .tooltip("Copy file mention")
                                     .small()
                                     .ghost()
                                     .invisible()
@@ -520,7 +588,8 @@ pub(crate) fn render_entry(
                         )
                         .child(
                             Button::new(("copy-unknown", row_ix))
-                                .label("Copy")
+                                .icon(IconName::Copy)
+                                .tooltip("Copy raw frame")
                                 .small()
                                 .ghost()
                                 .invisible()
@@ -775,6 +844,7 @@ pub(crate) fn render_tool_card(
         .unwrap_or_default();
     let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
     let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
+    let visual_kind = tool_visual_kind(&tc.name);
     let tool_title = if hub_summary.is_some() {
         "Jobs".to_owned()
     } else {
@@ -853,7 +923,13 @@ pub(crate) fn render_tool_card(
             h_flex()
                 .w_full()
                 .items_start()
-                .gap_1()
+                .gap_2()
+                .child(
+                    Icon::new(tool_icon(visual_kind))
+                        .small()
+                        .mt_0p5()
+                        .text_color(tool_icon_color(visual_kind, &theme)),
+                )
                 .child(
                     v_flex()
                         .flex_1()
@@ -905,7 +981,16 @@ pub(crate) fn render_tool_card(
                 })
                 .child(
                     Button::new(("toggle-tool", row_ix))
-                        .label(if expanded { "⌄" } else { "›" })
+                        .icon(if expanded {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .tooltip(if expanded {
+                            "Collapse tool"
+                        } else {
+                            "Expand tool"
+                        })
                         .small()
                         .ghost()
                         .flex_shrink_0()
@@ -956,7 +1041,8 @@ pub(crate) fn render_tool_card(
                             .child(div().flex_1().min_w_0().text_xs().child("Arguments"))
                             .child(
                                 Button::new(("copy-tool-args", row_ix))
-                                    .label("Copy")
+                                    .icon(IconName::Copy)
+                                    .tooltip("Copy arguments")
                                     .small()
                                     .ghost()
                                     .invisible()
@@ -1031,7 +1117,8 @@ pub(crate) fn render_tool_card(
                 .when(has_output, |controls| {
                     controls.child(
                         Button::new(("copy-tool-output", row_ix))
-                            .label("Copy")
+                            .icon(IconName::Copy)
+                            .tooltip("Copy output")
                             .small()
                             .ghost()
                             .invisible()
@@ -1049,7 +1136,8 @@ pub(crate) fn render_tool_card(
                 .when(task_subagent.is_some(), |controls| {
                     controls.child(
                         Button::new(("open-agents", row_ix))
-                            .label("Open agents")
+                            .icon(IconName::Bot)
+                            .tooltip("Open agents")
                             .small()
                             .ghost()
                             .on_click(move |_, _, cx| {
@@ -1148,7 +1236,8 @@ pub(crate) fn render_crash_card(
                         )
                         .child(
                             Button::new("crash-copy")
-                                .label("Copy")
+                                .icon(IconName::Copy)
+                                .tooltip("Copy crash details")
                                 .small()
                                 .ghost()
                                 .on_click(move |_, _window, cx| {

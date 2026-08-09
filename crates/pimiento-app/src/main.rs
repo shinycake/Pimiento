@@ -18,7 +18,7 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Disableable as _, Root, Sizable as _, Theme, ThemeMode, WindowExt,
+    ActiveTheme, Disableable as _, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState},

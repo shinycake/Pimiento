@@ -5125,6 +5125,13 @@ impl Render for SessionView {
                                             .gap_2()
                                             .child(
                                                 div()
+                                                    .size(px(10.))
+                                                    .mt_0p5()
+                                                    .rounded_sm()
+                                                    .bg(identity_paprika()),
+                                            )
+                                            .child(
+                                                div()
                                                     .w_full()
                                                     .max_h(px(96.))
                                                     .overflow_y_scrollbar()
@@ -5181,7 +5188,8 @@ impl Render for SessionView {
                                                 group
                                                     .child(
                                                         Button::new("todo-panel-toggle")
-                                                            .label("Checklist")
+                                                            .icon(IconName::CircleCheck)
+                                                            .tooltip("Open checklist")
                                                             .small()
                                                             .ghost()
                                                             .on_click(cx.listener(
@@ -5198,7 +5206,8 @@ impl Render for SessionView {
                                                     )
                                                     .child(
                                                         Button::new("subagent-drawer-toggle")
-                                                            .label("Agents")
+                                                            .icon(IconName::Bot)
+                                                            .tooltip("Open agents")
                                                             .small()
                                                             .ghost()
                                                             .disabled(!can_pick)
@@ -5223,8 +5232,21 @@ impl Render for SessionView {
                                                     )
                                             })
                                             .child(
+                                                Button::new("theme-actions")
+                                                    .icon(IconName::Palette)
+                                                    .tooltip("Choose theme")
+                                                    .small()
+                                                    .ghost()
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, _window, cx| {
+                                                            this.open_theme_picker(cx);
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
                                                 Button::new("more-actions")
-                                                    .label("More")
+                                                    .icon(IconName::Ellipsis)
+                                                    .tooltip("Command palette (⌘K)")
                                                     .small()
                                                     .ghost()
                                                     .on_click(cx.listener(
@@ -5938,7 +5960,8 @@ impl Render for SessionView {
                                                     )
                                                     .child(
                                                         Button::new(("remove-attachment", ix))
-                                                            .label("×")
+                                                            .icon(IconName::Close)
+                                                            .tooltip("Remove attachment")
                                                             .small()
                                                             .ghost()
                                                             .on_click(cx.listener(
@@ -6295,7 +6318,8 @@ impl Render for SessionView {
                                     )
                                     .child(
                                         Button::new("attach-files")
-                                            .label("Attach")
+                                            .icon(IconName::Plus)
+                                            .tooltip("Attach files")
                                             .small()
                                             .ghost()
                                             .disabled(!can_pick)
@@ -6427,10 +6451,19 @@ impl Render for SessionView {
                                                 .min_w_0()
                                                 .gap_1()
                                                 .child(
-                                                    Label::new("Subagent work")
-                                                        .text_lg()
-                                                        .font_weight(
-                                                            gpui::FontWeight::SEMIBOLD,
+                                                    h_flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            Icon::new(IconName::Bot)
+                                                                .text_color(theme.primary),
+                                                        )
+                                                        .child(
+                                                            Label::new("Subagent work")
+                                                                .text_lg()
+                                                                .font_weight(
+                                                                    gpui::FontWeight::SEMIBOLD,
+                                                                ),
                                                         ),
                                                 )
                                                 .child(
@@ -6452,7 +6485,8 @@ impl Render for SessionView {
                                         )
                                         .child(
                                             Button::new("subagent-modal-close")
-                                                .label("Close")
+                                                .icon(IconName::Close)
+                                                .tooltip("Close subagent work")
                                                 .small()
                                                 .ghost()
                                                 .on_click(cx.listener(
@@ -6539,9 +6573,19 @@ impl Render for SessionView {
                                         .gap_2()
                                         .justify_between()
                                         .child(
-                                            Label::new("Theme")
-                                                .text_sm()
-                                                .flex_shrink_0(),
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    Icon::new(IconName::Palette)
+                                                        .small()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child(
+                                                    Label::new("Theme")
+                                                        .text_sm()
+                                                        .flex_shrink_0(),
+                                                ),
                                         )
                                         .child(
                                             Label::new("↑↓ choose · Enter apply · Esc close")
@@ -6549,6 +6593,18 @@ impl Render for SessionView {
                                                 .flex_1()
                                                 .min_w_0()
                                                 .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            Button::new("theme-picker-close")
+                                                .icon(IconName::Close)
+                                                .tooltip("Close theme picker")
+                                                .small()
+                                                .ghost()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.close_theme_picker(cx);
+                                                    },
+                                                )),
                                         ),
                                 )
                                 .child(
@@ -6710,9 +6766,40 @@ impl Render for SessionView {
                                     cx.stop_propagation();
                                 }))
                                 .child(
-                                    Label::new("Command palette (Esc closes)")
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
+                                    h_flex()
+                                        .w_full()
+                                        .items_center()
+                                        .justify_between()
+                                        .gap_2()
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    Icon::new(IconName::Search)
+                                                        .small()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child(
+                                                    Label::new("Command palette")
+                                                        .text_sm()
+                                                        .font_weight(
+                                                            gpui::FontWeight::SEMIBOLD,
+                                                        ),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new("command-palette-close")
+                                                .icon(IconName::Close)
+                                                .tooltip("Close command palette (Esc)")
+                                                .small()
+                                                .ghost()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.close_palette(cx);
+                                                    },
+                                                )),
+                                        ),
                                 )
                                 .child(
                                     Input::new(&self.palette_search)
@@ -6799,9 +6886,18 @@ impl Render for SessionView {
                                     cx.stop_propagation();
                                 }))
                                 .child(
-                                    Label::new("About Pimiento")
-                                        .text_lg()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Icon::new(IconName::Asterisk)
+                                                .text_color(identity_paprika()),
+                                        )
+                                        .child(
+                                            Label::new("About Pimiento")
+                                                .text_lg()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                        ),
                                 )
                                 .child(
                                     Label::new(
@@ -6866,9 +6962,19 @@ impl Render for SessionView {
                                     cx.stop_propagation();
                                 }))
                                 .child(
-                                    Label::new("Compact context")
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Icon::new(IconName::ChevronsUpDown)
+                                                .small()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            Label::new("Compact context")
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                        ),
                                 )
                                 .child(
                                     Label::new(
@@ -6958,9 +7064,19 @@ impl Render for SessionView {
                                     cx.stop_propagation();
                                 }))
                                 .child(
-                                    Label::new("Handoff to TUI?")
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Icon::new(IconName::SquareTerminal)
+                                                .small()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .child(
+                                            Label::new("Handoff to TUI?")
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                                        ),
                                 )
                                 .child(
                                     Label::new(

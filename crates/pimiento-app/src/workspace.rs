@@ -797,9 +797,19 @@ pub(crate) fn render_inspector(
                 .items_center()
                 .gap_2()
                 .child(
-                    Label::new("Context")
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::Inspector)
+                                .small()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            Label::new("Context")
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                        ),
                 )
                 .child(
                     h_flex()
@@ -812,7 +822,8 @@ pub(crate) fn render_inspector(
                         )
                         .child(
                             Button::new("inspector-hide")
-                                .label("Hide")
+                                .icon(IconName::PanelRightClose)
+                                .tooltip("Hide context inspector (⌘J)")
                                 .small()
                                 .ghost()
                                 .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
@@ -903,6 +914,11 @@ pub(crate) fn render_inspector(
             v_flex()
                 .w_full()
                 .gap_2()
+                .p_2()
+                .rounded_sm()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
                 .child(
                     h_flex()
                         .w_full()
@@ -1148,17 +1164,27 @@ pub(crate) fn render_inspector(
                     .w_full()
                     .gap_2()
                     .when(focus == InspectorFocus::Checklist, |section| {
-                        section.border_l_2().border_color(theme.primary).pl_2()
+                        section.bg(theme.secondary).rounded_sm().p_2()
                     })
                     .child(
                         h_flex()
                             .w_full()
                             .justify_between()
                             .child(
-                                Label::new("Checklist")
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(theme.muted_foreground),
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        Icon::new(IconName::CircleCheck)
+                                            .xsmall()
+                                            .text_color(theme.muted_foreground),
+                                    )
+                                    .child(
+                                        Label::new("Checklist")
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::MEDIUM)
+                                            .text_color(theme.muted_foreground),
+                                    ),
                             )
                             .child(Tag::secondary().small().child(todo_count.to_string())),
                     )
@@ -1185,7 +1211,7 @@ pub(crate) fn render_inspector(
                 .w_full()
                 .gap_1()
                 .when(focus == InspectorFocus::Agents, |section| {
-                    section.border_l_2().border_color(theme.primary).pl_2()
+                    section.bg(theme.secondary).rounded_sm().p_2()
                 })
                 .child(
                     h_flex()
@@ -1194,10 +1220,20 @@ pub(crate) fn render_inspector(
                         .items_start()
                         .gap_2()
                         .child(
-                            Label::new("Agents")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(theme.muted_foreground),
+                            h_flex()
+                                .items_center()
+                                .gap_1()
+                                .child(
+                                    Icon::new(IconName::Bot)
+                                        .xsmall()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .child(
+                                    Label::new("Agents")
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(theme.muted_foreground),
+                                ),
                         )
                         .child(
                             h_flex()
@@ -1207,12 +1243,12 @@ pub(crate) fn render_inspector(
                                 .gap_1()
                                 .child(
                                     Button::new("inspector-agents-subscription")
+                                        .icon(IconName::Network)
                                         .small()
                                         .ghost()
                                         .max_w(gpui::relative(0.72))
-                                        .child(wrapped_button_text(format!(
-                                            "Subscription: {subagent_subscription}"
-                                        )))
+                                        .child(wrapped_button_text(subagent_subscription.clone()))
+                                        .tooltip("Cycle agent event subscription")
                                         .disabled(!connected)
                                         .on_click(window.listener_for(
                                             &subscription_session,
@@ -1223,7 +1259,8 @@ pub(crate) fn render_inspector(
                                 )
                                 .child(
                                     Button::new("inspector-agents-refresh")
-                                        .label("Refresh")
+                                        .icon(IconName::Redo2)
+                                        .tooltip("Refresh agents")
                                         .small()
                                         .ghost()
                                         .disabled(!connected)
@@ -1270,11 +1307,12 @@ pub(crate) fn render_inspector(
                     .gap_1()
                     .child(if tool_names.len() > 8 {
                         Button::new("inspector-tools-toggle")
-                            .label(format!(
-                                "{} Tools ({})",
-                                if tools_expanded { "▾" } else { "▸" },
-                                tool_names.len()
-                            ))
+                            .icon(if tools_expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .label(format!("Tools ({})", tool_names.len()))
                             .small()
                             .ghost()
                             .w_full()
@@ -1420,7 +1458,9 @@ impl Render for WorkspaceView {
                                 .gap_2()
                                 .child(
                                     Button::new("workspace-new-workspace")
+                                        .icon(IconName::FolderOpen)
                                         .label("Workspace…")
+                                        .tooltip("Open workspace")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(
@@ -1432,7 +1472,8 @@ impl Render for WorkspaceView {
                                 .child(div().flex_1())
                                 .child(
                                     Button::new("workspace-hide-rail")
-                                        .label("Hide")
+                                        .icon(IconName::PanelLeftClose)
+                                        .tooltip("Hide sessions (⌘B)")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
@@ -1501,7 +1542,8 @@ impl Render for WorkspaceView {
                                                             "workspace-add-session",
                                                             group_ix,
                                                         ))
-                                                        .label("+")
+                                                        .icon(IconName::Plus)
+                                                        .tooltip("Add session in this workspace")
                                                         .small()
                                                         .ghost()
                                                         .on_click(cx.listener(
@@ -1582,7 +1624,8 @@ impl Render for WorkspaceView {
                                                     )
                                                     .child(
                                                         Button::new(("workspace-close-session", ix))
-                                                            .label("×")
+                                                            .icon(IconName::Close)
+                                                            .tooltip("Close session")
                                                             .small()
                                                             .ghost()
                                                             .invisible()
@@ -1658,35 +1701,32 @@ impl Render for WorkspaceView {
                 parent.child(
                     v_flex()
                         .id("workspace-show-rail")
-                        .w(px(64.))
+                        .w(px(40.))
                         .h_full()
                         .items_center()
-                        .gap_0p5()
+                        .gap_1()
                         .pt_3()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
-                        .cursor_pointer()
-                        .hover(|rail| rail.bg(theme.secondary))
                         .child(
-                            Label::new("Show")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM),
-                        )
-                        .child(
-                            Label::new("Sessions")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM),
+                            Button::new("workspace-show-rail-button")
+                                .icon(IconName::PanelLeftOpen)
+                                .tooltip("Show sessions (⌘B)")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, _w, cx| {
+                                        this.toggle_rail(cx);
+                                    },
+                                )),
                         )
                         .child(
                             Label::new("⌘B")
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.toggle_rail(cx);
-                        })),
+                        ),
                 )
             })
             .child(div().flex_1().min_w(px(0.)).h_full().child(
@@ -1711,35 +1751,32 @@ impl Render for WorkspaceView {
                 parent.child(
                     v_flex()
                         .id("workspace-show-inspector")
-                        .w(px(64.))
+                        .w(px(40.))
                         .h_full()
                         .items_center()
-                        .gap_0p5()
+                        .gap_1()
                         .pt_3()
                         .border_l_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
-                        .cursor_pointer()
-                        .hover(|rail| rail.bg(theme.secondary))
                         .child(
-                            Label::new("Show")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM),
-                        )
-                        .child(
-                            Label::new("Context")
-                                .text_xs()
-                                .font_weight(gpui::FontWeight::MEDIUM),
+                            Button::new("workspace-show-inspector-button")
+                                .icon(IconName::PanelRightOpen)
+                                .tooltip("Show context inspector (⌘J)")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(
+                                    |this, _: &ClickEvent, _w, cx| {
+                                        this.toggle_inspector(cx);
+                                    },
+                                )),
                         )
                         .child(
                             Label::new("⌘J")
                                 .text_xs()
                                 .text_color(theme.muted_foreground),
-                        )
-                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
-                            this.toggle_inspector(cx);
-                        })),
+                        ),
                 )
             })
             .when(self.pending_quit_confirm, |parent| {
