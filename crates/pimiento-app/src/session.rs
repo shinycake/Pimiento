@@ -136,6 +136,11 @@ pub(crate) struct SessionView {
     /// Experimental OMP host-tool bridge. Disabled unless explicitly opted in.
     pub(crate) host_bridge: HostBridgeState,
     pub(crate) palette_open: bool,
+    pub(crate) theme_picker_open: bool,
+    pub(crate) theme_search: gpui::Entity<InputState>,
+    pub(crate) theme_picker_selected: usize,
+    pub(crate) clear_theme_search: bool,
+    pub(crate) refocus_theme_search: bool,
     pub(crate) about_open: bool,
     /// Mirrors workspace inspector visibility so the session toolbar can
     /// defer Checklist/Agents/ctx chrome while the Context pane is open.
@@ -210,6 +215,11 @@ impl SessionView {
                 .placeholder("Type to filter commands…")
                 .submit_on_enter(true)
         });
+        let theme_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Search themes…")
+                .submit_on_enter(true)
+        });
         let dialog_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
@@ -233,6 +243,7 @@ impl SessionView {
             cx.subscribe(&composer, Self::on_composer_event),
             cx.subscribe(&model_search, Self::on_model_search_event),
             cx.subscribe(&palette_search, Self::on_palette_search_event),
+            cx.subscribe(&theme_search, Self::on_theme_search_event),
             cx.subscribe(&dialog_input, Self::on_dialog_input_event),
             cx.subscribe(&rename_input, Self::on_rename_input_event),
             cx.subscribe(&compact_input, Self::on_compact_input_event),
@@ -306,6 +317,11 @@ impl SessionView {
             pending_revert: None,
             host_bridge: HostBridgeState::from_environment(),
             palette_open: false,
+            theme_picker_open: false,
+            theme_search,
+            theme_picker_selected: 0,
+            clear_theme_search: false,
+            refocus_theme_search: false,
             about_open: false,
             inspector_open: false,
             palette_selected: 0,
@@ -3152,6 +3168,7 @@ impl SessionView {
     pub(crate) fn toggle_palette(&mut self, cx: &mut Context<Self>) {
         self.palette_open = !self.palette_open;
         if self.palette_open {
+            self.theme_picker_open = false;
             self.about_open = false;
             self.rename_open = false;
             self.compact_open = false;
@@ -3180,6 +3197,51 @@ impl SessionView {
             self.refocus_composer = true;
             cx.notify();
         }
+    }
+
+    pub(crate) fn open_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        self.about_open = false;
+        self.rename_open = false;
+        self.compact_open = false;
+        self.handoff_confirm_open = false;
+        self.branch_picker = None;
+        self.login_picker = None;
+        self.model_picker_open = false;
+        self.thinking_picker_open = false;
+        self.theme_picker_open = true;
+        self.theme_picker_selected = 0;
+        self.clear_theme_search = true;
+        self.refocus_theme_search = true;
+        self.refocus_composer = false;
+        cx.notify();
+    }
+
+    pub(crate) fn close_theme_picker(&mut self, cx: &mut Context<Self>) {
+        if self.theme_picker_open {
+            self.theme_picker_open = false;
+            self.theme_picker_selected = 0;
+            self.clear_theme_search = true;
+            self.refocus_composer = true;
+            cx.notify();
+        }
+    }
+
+    fn choose_theme_picker_item(
+        &mut self,
+        item: &ThemePickerItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match item {
+            ThemePickerItem::Appearance(preference) => {
+                select_appearance(*preference, &self.persistence, window, cx);
+            }
+            ThemePickerItem::Theme { name, .. } => {
+                let _ = select_named_theme(name, &self.persistence, window, cx);
+            }
+        }
+        self.close_theme_picker(cx);
     }
 
     pub(crate) fn show_about(&mut self, cx: &mut Context<Self>) {
@@ -3291,7 +3353,7 @@ impl SessionView {
         match id {
             PaletteActionId::About => self.show_about(cx),
             PaletteActionId::ToggleTheme => {
-                cycle_theme_preference(&self.persistence, window, cx);
+                self.open_theme_picker(cx);
             }
             PaletteActionId::ToggleModels => self.toggle_model_picker(cx),
             PaletteActionId::ToggleThinking => self.toggle_thinking_picker(cx),
@@ -3974,6 +4036,65 @@ impl SessionView {
             }
         })
         .detach();
+    }
+
+    pub(crate) fn handle_theme_picker_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.theme_picker_open {
+            return false;
+        }
+        let query = self.theme_search.read(cx).value().to_string();
+        let themes = registered_theme_choices(cx);
+        let items = filter_theme_picker_items(&themes, &query);
+        if items.is_empty() {
+            self.theme_picker_selected = 0;
+        } else {
+            self.theme_picker_selected = self.theme_picker_selected.min(items.len() - 1);
+        }
+        match event.keystroke.key.to_ascii_lowercase().as_str() {
+            "escape" | "esc" => {
+                self.close_theme_picker(cx);
+                true
+            }
+            "up" | "arrowup" => {
+                if !items.is_empty() {
+                    self.theme_picker_selected =
+                        (self.theme_picker_selected + items.len() - 1) % items.len();
+                    cx.notify();
+                }
+                true
+            }
+            "down" | "arrowdown" => {
+                if !items.is_empty() {
+                    self.theme_picker_selected = (self.theme_picker_selected + 1) % items.len();
+                    cx.notify();
+                }
+                true
+            }
+            "enter" | "return" => {
+                if let Some(item) = items.get(self.theme_picker_selected) {
+                    self.choose_theme_picker_item(item, window, cx);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn on_theme_search_event(
+        &mut self,
+        _input: gpui::Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_picker_open && matches!(event, InputEvent::Change) {
+            self.theme_picker_selected = 0;
+            cx.notify();
+        }
     }
 
     pub(crate) fn handle_palette_key(
@@ -4766,6 +4887,12 @@ impl Render for SessionView {
                 input.set_value("", window, cx);
             });
         }
+        if self.clear_theme_search {
+            self.clear_theme_search = false;
+            self.theme_search.update(cx, |input, cx| {
+                input.set_value("", window, cx);
+            });
+        }
         if let Some((placeholder, value)) = self.pending_dialog_input_sync.take() {
             self.dialog_input.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx);
@@ -4787,6 +4914,12 @@ impl Render for SessionView {
         if self.refocus_palette_search {
             self.refocus_palette_search = false;
             self.palette_search.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
+        }
+        if self.refocus_theme_search {
+            self.refocus_theme_search = false;
+            self.theme_search.update(cx, |input, cx| {
                 input.focus(window, cx);
             });
         }
@@ -4905,6 +5038,17 @@ impl Render for SessionView {
             self.palette_selected = self.palette_selected.min(palette_matches.len() - 1);
         }
         let palette_selected = self.palette_selected;
+        let registered_themes = registered_theme_choices(cx);
+        let theme_query = self.theme_search.read(cx).value().to_string();
+        let theme_picker_items = filter_theme_picker_items(&registered_themes, &theme_query);
+        if theme_picker_items.is_empty() {
+            self.theme_picker_selected = 0;
+        } else {
+            self.theme_picker_selected =
+                self.theme_picker_selected.min(theme_picker_items.len() - 1);
+        }
+        let theme_picker_selected = self.theme_picker_selected;
+        let theme_selection = cx.global::<ThemeSelectionState>().0.clone();
         let pending_revert = self.pending_revert.clone();
         let transcript_empty = self.projection.transcript.is_empty();
         let subagent_modal_agent = self.selected_subagent_id.as_ref().and_then(|selected| {
@@ -4944,6 +5088,7 @@ impl Render for SessionView {
                     || this.handle_rename_key(event, cx)
                     || this.handle_branch_picker_key(event, cx)
                     || this.handle_login_picker_key(event, cx)
+                    || this.handle_theme_picker_key(event, window, cx)
                     || this.handle_palette_key(event, window, cx)
                     || this.handle_dialog_key(event, cx)
                     || this.handle_attachment_overlay_key(event, cx)
@@ -6298,6 +6443,169 @@ impl Render for SessionView {
                         ),
                 )
             })
+            .when(self.theme_picker_open, |parent| {
+                parent.child(
+                    div()
+                        .id("theme-picker-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_start()
+                        .justify_center()
+                        .pt_16()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_theme_picker(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("theme-picker-panel")
+                                .w(px(520.))
+                                .max_h(px(520.))
+                                .gap_2()
+                                .p_3()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .justify_between()
+                                        .child(Label::new("Theme").text_sm())
+                                        .child(
+                                            Label::new("↑↓ choose · Enter apply · Esc close")
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                                .child(
+                                    Input::new(&self.theme_search)
+                                        .appearance(true)
+                                        .focus_bordered(true),
+                                )
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .max_h(px(420.))
+                                        .overflow_y_scrollbar()
+                                        .gap_1()
+                                        .children(theme_picker_items.iter().enumerate().map(
+                                            |(ix, item)| {
+                                                let item = item.clone();
+                                                let selected = ix == theme_picker_selected;
+                                                let active = theme_picker_item_is_active(
+                                                    &item,
+                                                    &theme_selection,
+                                                );
+                                                let (section, label, swatches) = match &item {
+                                                    ThemePickerItem::Appearance(preference) => (
+                                                        "Appearance",
+                                                        preference.label().to_owned(),
+                                                        [None, None, None],
+                                                    ),
+                                                    ThemePickerItem::Theme { name, mode } => {
+                                                        let section = if mode.is_dark() {
+                                                            "Dark theme"
+                                                        } else {
+                                                            "Light theme"
+                                                        };
+                                                        let swatches = registered_themes
+                                                            .iter()
+                                                            .find(|theme| theme.name == *name)
+                                                            .map_or([None, None, None], |theme| {
+                                                                theme.swatches
+                                                            });
+                                                        (section, name.clone(), swatches)
+                                                    }
+                                                };
+                                                h_flex()
+                                                    .id(("theme-picker-entry", ix))
+                                                    .w_full()
+                                                    .min_h(px(44.))
+                                                    .gap_2()
+                                                    .px_3()
+                                                    .py_2()
+                                                    .rounded_sm()
+                                                    .cursor_pointer()
+                                                    .when(selected, |row| {
+                                                        row.bg(theme.secondary)
+                                                    })
+                                                    .hover(|row| row.bg(theme.secondary_hover))
+                                                    .child(
+                                                        div()
+                                                            .w(px(18.))
+                                                            .text_sm()
+                                                            .text_color(theme.primary)
+                                                            .child(if active { "✓" } else { "" }),
+                                                    )
+                                                    .child(
+                                                        v_flex()
+                                                            .flex_1()
+                                                            .min_w(px(0.))
+                                                            .gap_0p5()
+                                                            .child(
+                                                                Label::new(section)
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .w_full()
+                                                                    .text_sm()
+                                                                    .child(label),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        h_flex().gap_1().children(
+                                                            swatches
+                                                                .into_iter()
+                                                                .flatten()
+                                                                .enumerate()
+                                                                .map(|(swatch_ix, color)| {
+                                                                    div()
+                                                                        .id((
+                                                                            "theme-swatch",
+                                                                            ix * 3 + swatch_ix,
+                                                                        ))
+                                                                        .size(px(14.))
+                                                                        .rounded_full()
+                                                                        .border_1()
+                                                                        .border_color(theme.border)
+                                                                        .bg(color)
+                                                                }),
+                                                        ),
+                                                    )
+                                                    .on_click(cx.listener(
+                                                        move |this,
+                                                              _: &ClickEvent,
+                                                              window,
+                                                              cx| {
+                                                            this.choose_theme_picker_item(
+                                                                &item, window, cx,
+                                                            );
+                                                        },
+                                                    ))
+                                            },
+                                        ))
+                                        .when(theme_picker_items.is_empty(), |list| {
+                                            list.child(
+                                                Label::new("No matching themes")
+                                                    .text_sm()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        }),
+                                ),
+                        ),
+                )
+            })
             .when(self.palette_open, |parent| {
                 parent.child(
                     div()
@@ -6349,12 +6657,8 @@ impl Render for SessionView {
                                                 |(ix, entry)| {
                                                     let id = entry.id;
                                                     let selected = ix == palette_selected;
-                                                    let theme_pref =
-                                                        cx.global::<ThemePreferenceState>().0;
                                                     Button::new(("palette-entry", ix))
-                                                        .label(palette_entry_display_label(
-                                                            entry, theme_pref,
-                                                        ))
+                                                        .label(palette_entry_display_label(entry))
                                                         .small()
                                                         .w_full()
                                                         .when(selected, Button::primary)

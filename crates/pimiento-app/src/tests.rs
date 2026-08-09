@@ -712,17 +712,14 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
-fn palette_theme_entry_shows_current_preference() {
+fn palette_theme_entry_is_concise() {
     assert_eq!(
-        palette_entry_display_label(
-            &PaletteEntry {
-                id: PaletteActionId::ToggleTheme,
-                label: "Theme",
-                hint: "cycle",
-            },
-            ThemePreference::Light
-        ),
-        "Theme: Light · cycle system → light → dark"
+        palette_entry_display_label(&PaletteEntry {
+            id: PaletteActionId::ToggleTheme,
+            label: "Theme…",
+            hint: "appearance",
+        }),
+        "Theme… · appearance"
     );
 }
 
@@ -897,22 +894,6 @@ fn subagent_events_refresh_snapshots_only_for_unseen_agents() {
 }
 
 #[test]
-fn theme_preference_cycles_system_light_dark() {
-    assert_eq!(
-        next_theme_preference(ThemePreference::System),
-        ThemePreference::Light
-    );
-    assert_eq!(
-        next_theme_preference(ThemePreference::Light),
-        ThemePreference::Dark
-    );
-    assert_eq!(
-        next_theme_preference(ThemePreference::Dark),
-        ThemePreference::System
-    );
-}
-
-#[test]
 fn theme_preference_from_env_parses_known_values() {
     assert_eq!(
         theme_preference_from_env(Some("light")),
@@ -938,6 +919,8 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
     let parsed: PersistedUi =
         serde_json::from_str(r#"{"inspector_open":false,"theme":"dark"}"#).expect("parse ui");
     assert_eq!(parsed.theme, ThemePreference::Dark);
+    assert_eq!(parsed.light_theme, DEFAULT_LIGHT_THEME);
+    assert_eq!(parsed.dark_theme, DEFAULT_DARK_THEME);
     assert!(!parsed.rail_collapsed);
 
     let legacy: PersistedUi =
@@ -949,10 +932,121 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
         inspector_open: true,
         rail_collapsed: true,
         theme: ThemePreference::Light,
+        light_theme: "Pepperwood Light".into(),
+        dark_theme: "Pepperwood Dark".into(),
     })
     .expect("serialize ui");
     assert_eq!(value["theme"], "light");
     assert_eq!(value["rail_collapsed"], true);
+    assert_eq!(value["light_theme"], "Pepperwood Light");
+    assert_eq!(value["dark_theme"], "Pepperwood Dark");
+}
+
+#[test]
+fn theme_family_pairing_matches_modes_and_preserves_unknown_families() {
+    let themes = vec![
+        ("Quiet Pepper Light".into(), ThemeMode::Light),
+        ("Quiet Pepper Dark".into(), ThemeMode::Dark),
+        ("Unpaired Dark".into(), ThemeMode::Dark),
+    ];
+    assert_eq!(theme_family_name("Quiet Pepper Dark"), "Quiet Pepper");
+    assert_eq!(
+        paired_theme_name("Quiet Pepper Dark", ThemeMode::Light, &themes).as_deref(),
+        Some("Quiet Pepper Light")
+    );
+    assert_eq!(
+        paired_theme_name("Unpaired Dark", ThemeMode::Light, &themes),
+        None
+    );
+}
+
+#[test]
+fn bundled_theme_asset_contains_two_complete_light_dark_families() {
+    let set: gpui_component::ThemeSet =
+        serde_json::from_str(BUNDLED_THEMES).expect("bundled themes parse");
+    let names = set
+        .themes
+        .iter()
+        .map(|theme| theme.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(set.themes.len(), 4);
+    assert!(names.contains(&"Quiet Pepper Light"));
+    assert!(names.contains(&"Quiet Pepper Dark"));
+    assert!(names.contains(&"Pepperwood Light"));
+    assert!(names.contains(&"Pepperwood Dark"));
+    assert_eq!(
+        set.themes
+            .iter()
+            .filter(|theme| theme.mode == ThemeMode::Light)
+            .count(),
+        2
+    );
+    assert_eq!(
+        set.themes
+            .iter()
+            .filter(|theme| theme.mode == ThemeMode::Dark)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn theme_picker_search_and_selected_state_cover_appearance_and_names() {
+    let themes = vec![
+        RegisteredThemeChoice {
+            name: "Quiet Pepper Light".into(),
+            mode: ThemeMode::Light,
+            swatches: [None, None, None],
+        },
+        RegisteredThemeChoice {
+            name: "Pepperwood Dark".into(),
+            mode: ThemeMode::Dark,
+            swatches: [None, None, None],
+        },
+    ];
+    let dark = filter_theme_picker_items(&themes, "pepperwood");
+    assert_eq!(
+        dark,
+        vec![ThemePickerItem::Theme {
+            name: "Pepperwood Dark".into(),
+            mode: ThemeMode::Dark
+        }]
+    );
+    assert_eq!(
+        filter_theme_picker_items(&themes, "follow"),
+        vec![ThemePickerItem::Appearance(ThemePreference::System)]
+    );
+    let selection = ThemeSelection {
+        appearance: ThemePreference::System,
+        light: "Quiet Pepper Light".into(),
+        dark: "Pepperwood Dark".into(),
+    };
+    assert!(theme_picker_item_is_active(
+        &ThemePickerItem::Appearance(ThemePreference::System),
+        &selection
+    ));
+    assert!(theme_picker_item_is_active(&dark[0], &selection));
+}
+
+#[test]
+fn initial_theme_selection_overrides_only_appearance_from_environment() {
+    let root = std::env::temp_dir().join(format!(
+        "pimiento-theme-env-{}-{}",
+        std::process::id(),
+        current_unix_seconds()
+    ));
+    let persistence = SessionPersistence::from_root(root.clone());
+    persistence.save_theme_selection(&ThemeSelection {
+        appearance: ThemePreference::System,
+        light: "Pepperwood Light".into(),
+        dark: "Pepperwood Dark".into(),
+    });
+    let selected = initial_theme_selection(Some(OsStr::new("dark")), &persistence);
+    assert_eq!(selected.appearance, ThemePreference::Dark);
+    assert_eq!(selected.light, "Pepperwood Light");
+    assert_eq!(selected.dark, "Pepperwood Dark");
+    assert_eq!(themes_directory(&root), root.join("themes"));
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -1509,43 +1603,82 @@ fn ui_preferences_default_and_roundtrip_without_overwriting_each_other() {
     let persistence = SessionPersistence::from_root(root.clone());
     assert!(persistence.load_inspector_open());
     assert!(!persistence.load_rail_collapsed());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::System);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::System
+    );
 
     persistence.save_rail_collapsed(true);
     assert!(persistence.load_rail_collapsed());
     assert!(persistence.load_inspector_open());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::System);
-
-    persistence.save_theme_preference(ThemePreference::Dark);
     assert_eq!(
-        initial_theme_preference(None, &persistence),
+        persistence.load_theme_selection().appearance,
+        ThemePreference::System
+    );
+
+    let mut selection = persistence.load_theme_selection();
+    selection.appearance = ThemePreference::Dark;
+    persistence.save_theme_selection(&selection);
+    assert_eq!(
+        initial_theme_selection(None, &persistence).appearance,
         ThemePreference::Dark
     );
     assert_eq!(
-        initial_theme_preference(Some(OsStr::new("light")), &persistence),
+        initial_theme_selection(Some(OsStr::new("light")), &persistence).appearance,
         ThemePreference::Light
     );
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::Dark
+    );
 
     persistence.save_inspector_open(false);
     assert!(!persistence.load_inspector_open());
     assert!(persistence.load_rail_collapsed());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::Dark
+    );
 
     persistence.save_rail_collapsed(false);
     assert!(!persistence.load_inspector_open());
     assert!(!persistence.load_rail_collapsed());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::Dark);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::Dark
+    );
 
-    persistence.save_theme_preference(ThemePreference::Light);
+    let mut selection = persistence.load_theme_selection();
+    selection.appearance = ThemePreference::Light;
+    persistence.save_theme_selection(&selection);
     assert!(!persistence.load_inspector_open());
     assert!(!persistence.load_rail_collapsed());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::Light
+    );
+
+    persistence.save_theme_selection(&ThemeSelection {
+        appearance: ThemePreference::System,
+        light: "Pepperwood Light".into(),
+        dark: "Pepperwood Dark".into(),
+    });
+    assert_eq!(
+        persistence.load_theme_selection(),
+        ThemeSelection {
+            appearance: ThemePreference::System,
+            light: "Pepperwood Light".into(),
+            dark: "Pepperwood Dark".into(),
+        }
+    );
 
     persistence.save_inspector_open(true);
     assert!(persistence.load_inspector_open());
     assert!(!persistence.load_rail_collapsed());
-    assert_eq!(persistence.load_theme_preference(), ThemePreference::Light);
+    assert_eq!(
+        persistence.load_theme_selection().appearance,
+        ThemePreference::System
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -187,6 +187,12 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - OMP 17.2.11 publishes slash commands dynamically through both `available_commands_update.commands` and `get_available_commands.data.commands`. Entries may include `name`, `aliases`, `description`, `input.hint`, `source`, and nested `subcommands[] { name, description, usage? }`.
 - Pimiento treats this metadata as an open catalog rather than a fixed enum. Completion supports top-level aliases and a second subcommand stage while preserving unknown future `source` values. Selecting a suggestion only fills the composer; execution still requires an explicit send so destructive extension/custom commands are never triggered by menu navigation.
 
+## Named themes and live registry — 2026-08-09
+
+- The pinned Apache-2.0 `gpui-component` exposes `ThemeSet`, `ThemeConfig`, `ThemeRegistry::load_themes_from_str`, `ThemeRegistry::watch_dir`, and `Theme::apply_config`. Pimiento uses that public registry directly for bundled and user-authored JSON themes; no Zed GPL UI code is copied.
+- Theme persistence mirrors Zed's useful behavior at a smaller scope: one appearance mode (`system`, `light`, or `dark`) plus separately selected light/dark theme names. Existing `ui.json` files containing only the legacy `theme` field migrate through serde defaults.
+- Compatible custom theme files under `PIMIENTO_HOME/themes` (normally `~/.pimiento/themes`) reload without restarting. Invalid files are ignored by the registry and cannot replace the bundled Quiet Pepper fallback pair.
+
 ## Compaction and retry fallback UX — 2026-08-08
 
 - `retry_fallback_applied` carries `{ from, to, role }`; `retry_fallback_succeeded` carries `{ model, role }`. Pimiento reads these only from the retained raw event JSON, emits human-readable retry rows, and omits missing values without guessing.

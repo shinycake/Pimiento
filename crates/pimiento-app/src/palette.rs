@@ -1,7 +1,3 @@
-#[allow(clippy::wildcard_imports)]
-// Matches the crate-local module facade used by sibling modules.
-use crate::*;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteActionId {
     About,
@@ -53,8 +49,8 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
         },
         PaletteEntry {
             id: PaletteActionId::ToggleTheme,
-            label: "Theme",
-            hint: "cycle system light dark appearance",
+            label: "Theme…",
+            hint: "appearance light dark named themes",
         },
         PaletteEntry {
             id: PaletteActionId::ToggleTodos,
@@ -198,17 +194,8 @@ pub(crate) fn filter_palette_entries(query: &str) -> Vec<&'static PaletteEntry> 
         .collect()
 }
 
-pub(crate) fn palette_entry_display_label(entry: &PaletteEntry, theme: ThemePreference) -> String {
-    if entry.id == PaletteActionId::ToggleTheme {
-        let current = match theme {
-            ThemePreference::System => "System",
-            ThemePreference::Light => "Light",
-            ThemePreference::Dark => "Dark",
-        };
-        format!("Theme: {current} · cycle system → light → dark")
-    } else {
-        format!("{} · {}", entry.label, entry.hint)
-    }
+pub(crate) fn palette_entry_display_label(entry: &PaletteEntry) -> String {
+    format!("{} · {}", entry.label, entry.hint)
 }
 
 pub(crate) fn shell_single_quote(path: &str) -> String {

@@ -1,84 +1,5 @@
 use crate::*;
 
-// ── theme preference ──────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ThemePreference {
-    #[default]
-    System,
-    Light,
-    Dark,
-}
-
-pub(crate) struct ThemePreferenceState(pub(crate) ThemePreference);
-
-impl Global for ThemePreferenceState {}
-
-pub(crate) fn next_theme_preference(current: ThemePreference) -> ThemePreference {
-    match current {
-        ThemePreference::System => ThemePreference::Light,
-        ThemePreference::Light => ThemePreference::Dark,
-        ThemePreference::Dark => ThemePreference::System,
-    }
-}
-
-/// Parse `PIMIENTO_THEME` (`system` / `light` / `dark`). Unknown or empty → System.
-pub(crate) fn theme_preference_from_env(raw: Option<&str>) -> ThemePreference {
-    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("light") => ThemePreference::Light,
-        Some("dark") => ThemePreference::Dark,
-        _ => ThemePreference::System,
-    }
-}
-
-pub(crate) fn initial_theme_preference(
-    env: Option<&OsStr>,
-    persistence: &SessionPersistence,
-) -> ThemePreference {
-    env.map_or_else(
-        || persistence.load_theme_preference(),
-        |raw| theme_preference_from_env(raw.to_str()),
-    )
-}
-
-pub(crate) fn apply_theme_preference(
-    preference: ThemePreference,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    cx.set_global(ThemePreferenceState(preference));
-    // Keep native macOS titlebar/chrome aligned with the content theme.
-    // None resumes following the OS appearance (PLAN D4 light/dark follow).
-    match preference {
-        ThemePreference::System => {
-            cx.set_window_appearance(None);
-            Theme::sync_system_appearance(Some(window), cx);
-        }
-        ThemePreference::Light => {
-            cx.set_window_appearance(Some(WindowAppearance::Light));
-            Theme::change(ThemeMode::Light, Some(window), cx);
-        }
-        ThemePreference::Dark => {
-            cx.set_window_appearance(Some(WindowAppearance::Dark));
-            Theme::change(ThemeMode::Dark, Some(window), cx);
-        }
-    }
-    apply_pimiento_brand(cx);
-    // The label changes even when returning to System keeps the same concrete mode.
-    window.refresh();
-}
-
-pub(crate) fn cycle_theme_preference(
-    persistence: &SessionPersistence,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let next = next_theme_preference(cx.global::<ThemePreferenceState>().0);
-    persistence.save_theme_preference(next);
-    apply_theme_preference(next, window, cx);
-}
-
 // ── SessionView ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,7 +21,7 @@ pub(crate) struct PersistedWindowBounds {
     pub(crate) height: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PersistedUi {
     #[serde(default = "default_inspector_open")]
     pub(crate) inspector_open: bool,
@@ -108,6 +29,10 @@ pub(crate) struct PersistedUi {
     pub(crate) rail_collapsed: bool,
     #[serde(default)]
     pub(crate) theme: ThemePreference,
+    #[serde(default = "default_light_theme_name")]
+    pub(crate) light_theme: String,
+    #[serde(default = "default_dark_theme_name")]
+    pub(crate) dark_theme: String,
 }
 
 impl Default for PersistedUi {
@@ -116,8 +41,18 @@ impl Default for PersistedUi {
             inspector_open: default_inspector_open(),
             rail_collapsed: false,
             theme: ThemePreference::System,
+            light_theme: default_light_theme_name(),
+            dark_theme: default_dark_theme_name(),
         }
     }
+}
+
+fn default_light_theme_name() -> String {
+    DEFAULT_LIGHT_THEME.to_owned()
+}
+
+fn default_dark_theme_name() -> String {
+    DEFAULT_DARK_THEME.to_owned()
 }
 
 pub(crate) fn default_inspector_open() -> bool {
@@ -263,7 +198,7 @@ impl SessionPersistence {
     pub(crate) fn save_inspector_open(&self, inspector_open: bool) {
         let mut ui = self.load_ui();
         ui.inspector_open = inspector_open;
-        self.save_ui(ui);
+        self.save_ui(&ui);
     }
 
     pub(crate) fn load_rail_collapsed(&self) -> bool {
@@ -273,17 +208,24 @@ impl SessionPersistence {
     pub(crate) fn save_rail_collapsed(&self, rail_collapsed: bool) {
         let mut ui = self.load_ui();
         ui.rail_collapsed = rail_collapsed;
-        self.save_ui(ui);
+        self.save_ui(&ui);
     }
 
-    pub(crate) fn load_theme_preference(&self) -> ThemePreference {
-        self.load_ui().theme
+    pub(crate) fn load_theme_selection(&self) -> ThemeSelection {
+        let ui = self.load_ui();
+        ThemeSelection {
+            appearance: ui.theme,
+            light: ui.light_theme,
+            dark: ui.dark_theme,
+        }
     }
 
-    pub(crate) fn save_theme_preference(&self, theme: ThemePreference) {
+    pub(crate) fn save_theme_selection(&self, selection: &ThemeSelection) {
         let mut ui = self.load_ui();
-        ui.theme = theme;
-        self.save_ui(ui);
+        ui.theme = selection.appearance;
+        selection.light.clone_into(&mut ui.light_theme);
+        selection.dark.clone_into(&mut ui.dark_theme);
+        self.save_ui(&ui);
     }
 
     fn load_ui(&self) -> PersistedUi {
@@ -293,7 +235,7 @@ impl SessionPersistence {
         serde_json::from_str(&raw).unwrap_or_default()
     }
 
-    fn save_ui(&self, ui: PersistedUi) {
+    fn save_ui(&self, ui: &PersistedUi) {
         let Ok(contents) = serde_json::to_string_pretty(&ui) else {
             return;
         };

@@ -58,6 +58,7 @@ mod host_bridge;
 mod models;
 mod palette;
 mod session;
+mod theme;
 mod tokens;
 mod transcript_ui;
 mod workspace;
@@ -76,6 +77,8 @@ use models::*;
 use palette::*;
 #[allow(clippy::wildcard_imports)]
 use session::*;
+#[allow(clippy::wildcard_imports)]
+use theme::*;
 #[allow(clippy::wildcard_imports)]
 use tokens::*;
 #[allow(clippy::wildcard_imports)]
@@ -112,11 +115,11 @@ fn main() {
         .flatten();
 
     let theme_override = std::env::var_os("PIMIENTO_THEME");
-    let initial_theme = initial_theme_preference(theme_override.as_deref(), &persistence);
+    let initial_theme = initial_theme_selection(theme_override.as_deref(), &persistence);
 
     gpui_platform::application().run(move |cx| {
         gpui_component::init(cx);
-        cx.set_global(ThemePreferenceState(initial_theme));
+        initialize_theme_registry(&persistence, initial_theme.clone(), cx);
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 window_bounds: saved_window_bounds.map(WindowBounds::Windowed),
@@ -124,14 +127,14 @@ fn main() {
             };
             let window = cx
                 .open_window(window_options, |window, cx| {
-                    apply_theme_preference(initial_theme, window, cx);
+                    apply_theme_selection(&initial_theme, window, cx);
                     window
                         .observe_window_appearance(|window, cx| {
-                            let follows_system =
-                                cx.global::<ThemePreferenceState>().0 == ThemePreference::System;
+                            let follows_system = cx.global::<ThemeSelectionState>().0.appearance
+                                == ThemePreference::System;
                             if follows_system {
-                                Theme::sync_system_appearance(Some(window), cx);
-                                apply_pimiento_brand(cx);
+                                let selection = cx.global::<ThemeSelectionState>().0.clone();
+                                apply_theme_selection(&selection, window, cx);
                             }
                         })
                         .detach();
