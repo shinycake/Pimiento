@@ -1,10 +1,11 @@
 # Pimiento ↔ OMP Parity Plan
 
-**Status:** living plan (v1)  
+**Status:** living plan (v2 — adds T4-inspired visual/UX system)  
 **Pinned against:** OMP **17.2.11** (live binary + upstream `v17.2.11` RPC sources)  
+**UI reference:** [T4 Code](https://github.com/LycaonLLC/t4-code) `DESIGN.md` + lane-b screenshots (patterns only; **not** their brand pink / Electron stack)  
 **Pimiento tested baseline:** `omp ≥ 17.2.10` (version-gate banner for drift)  
 **Date:** 2026-08-09  
-**Companion docs:** `PLAN.md` (doctrine + original milestones), `docs/protocol-notes.md` (wire truth)
+**Companion docs:** `PLAN.md` (doctrine + original milestones), `docs/protocol-notes.md` (wire truth), `.cursor/skills/pimiento-ui-craft/SKILL.md`
 
 ---
 
@@ -12,9 +13,12 @@
 
 Pimiento has already cleared the original **Self-Host Gate feature surface** and most of **Tier 2–3** from `PLAN.md`: supervised `rpc-ui`, v2 chunking, projection with Unknown tolerance, streaming transcript, tool cards, dialogs, steer/abort/follow-up, multi-session, model/thinking/fast, slash completion, attachments, diffs/revert, subagent inspector, compaction/retry UX, export, login, palette.
 
-What remains for **true daily-driver parity with the OMP TUI** is not another “big rewrite.” It is a set of **honest control surfaces for wire capabilities that already exist**, plus **projection depth for events that currently fall through to Unknown/silent**, plus **operational QA that SH exit criteria still require on the record**.
+What remains has two equal tracks:
 
-This plan ranks remaining work by how much it reduces friction in the self-host loop (Doctrine §0 / PLAN Tier ranking), not by feature glitter.
+1. **Protocol / control parity** — honest UI for wire capabilities that already exist (queue modes, auto-compact/retry, rich ask, hub/jobs, host bridge, …) plus SH proof recordings.
+2. **Quiet-console visual parity** — take **heavy inspiration** from T4 Code’s layout, depth, status taxonomy, and composer UX, reinterpreted as a **GPUI-native** system with a **distinct Pimiento palette** (never clone Pi Pink / their Electron chrome).
+
+This plan ranks work by self-host-loop friction first, then by how much a calm control-room visual system reduces scan cost.
 
 ### Verdict in one line
 
@@ -23,8 +27,9 @@ This plan ranks remaining work by how much it reduces friction in the self-host 
 | Bedrock (RPC + projection + supervision) | **Done** |
 | Self-host critical UX (Tier 1) | **Done in code**; SH-1…SH-6 still need recorded proofs |
 | Daily-driver (Tier 2) + power (Tier 3) | **Mostly done** |
-| True TUI parity (queue modes, auto-compact/retry controls, session ops, host-tool bridge, rich ask, jobs/hub, goals/TTSR, packaging) | **Gaps — this plan** |
-| Explicit non-goals | ACP multi-harness, terminal emulator pane, settings mirror of `~/.omp`, bundling omp |
+| True TUI / RPC control parity | **Gaps — Waves A–E** |
+| Visual system (T4-inspired, GPUI-native) | **Gaps — Wave U** (below) |
+| Explicit non-goals | ACP multi-harness, terminal emulator pane, settings mirror of `~/.omp`, bundling omp, cloning T4 brand/colors/Electron |
 
 ---
 
@@ -35,6 +40,7 @@ Inventories were cross-checked from:
 1. **Live omp 17.2.11** — `omp --mode rpc-ui` probe of `ready`, `get_state`, `get_available_commands` (38 slash cmds), `dumpTools`, `get_available_models`, `get_login_providers`.
 2. **Upstream @ v17.2.11** — `docs/rpc.md`, `packages/coding-agent/src/modes/rpc/rpc-types.ts`, `agent-session-events.ts`, slash builtin registry, release notes.
 3. **Pimiento tree** — `crates/omp-rpc-client` (typed commands/events), `pimiento-core` (reducer), `pimiento-app` (UI send paths), `docs/protocol-notes.md`, `PLAN.md`.
+4. **T4 Code (UI reference only)** — `DESIGN.md` (“Quiet Control Room”), lane-b screenshots (`01-light-stream` … `09-light-tool-expanded`), `FEATURE_MATRIX.md` surface map. Steal **structure and discipline**, not brand pink, Electron, remoting, or dashboard theater.
 
 Doctrine constraints that bound every recommendation:
 
@@ -113,11 +119,171 @@ These exist in `omp-rpc-client::frames::RpcCommandBody` and/or live OMP, but **P
 
 ---
 
-## 3. Gap catalog (OMP feature → Pimiento)
+## 3. Visual & interaction system — T4-inspired, GPUI-native
+
+> **North star:** *Quiet Pepper Console* — a calm observability + control surface for a running OMP session. Dense when the work demands it; quiet when it does not. Transcript is the hero. Chrome reports state; it never decorates.
+
+T4 Code ([LycaonLLC/t4-code](https://github.com/LycaonLLC/t4-code)) is the shipped Electron OMP client and the best existing **interaction reference** (`DESIGN.md`, lane-b screenshots, `FEATURE_MATRIX.md`). Pimiento must feel as intentional, but remain:
+
+- **GPUI + gpui-component** (Apache-2.0 pins only — patterns from Zed GPL crates, never code)
+- **OMP-authoritative** (no invented session truth)
+- **Visually distinct** from T4 (different brand hue; no Pi Pink identity lockup)
+
+Canonical craft rules also live in `.cursor/skills/pimiento-ui-craft/SKILL.md`; this section is the product-level expansion for the parity program.
+
+### 3.1 Steal these T4 rules (behavior, not paint)
+
+| T4 rule | Pimiento adaptation |
+|---------|---------------------|
+| Zero-chroma neutral chassis; hue only with meaning | Same — map to gpui-component theme tokens + a small Pimiento token overlay |
+| Two-tier brand: identity vs AA-safe action | Same *structure*, **different hue family** (see §3.2) |
+| Brand accent never doubles as warning | Amber = warning; brand reserved for identity + primary actions |
+| Fixed status taxonomy (working / approval / input / plan / done / error) with **dot + label** | Map onto `RunPhase` + dialog pending + rail attention; never color-only |
+| Hairline depth at rest; real shadows only for floating tier | Docked = tone + 1px border (+ optional 1px bevel); floating = `popover` + `shadow_lg`/`xl` |
+| Right pane closed by default; earn open with badges | Keep inspector collapsed; badge on Checklist/Agents only when OMP data nonempty |
+| Composer owns model / thinking / fast / steer\|queue | Align with craft skill: composer band, not status-strip duplication |
+| 4px grid, soft radius ceiling (~10–16px), no decorative left stripes | 8pt grid already; **ban** `border_l_2` accent bars on selected rows |
+| Motion is vocabulary; reduced-motion path | Prefer gpui-component transitions; no continuous glow — at most **one** live status pulse |
+| Transcript measure capped (~48rem) | Constrain prose column; tool/code full width of transcript pane |
+| Reject AI-dashboard theater | Already doctrine — reinforce in Wave U QA |
+
+### 3.2 Pimiento color system (inspired *usage*, not T4 colors)
+
+Do **not** reuse T4’s `#e83174` Pi Pink or their raspberry action tier. Avoid purple/glow stacks and the common cream+terracotta AI landing-page look.
+
+**Chassis (zero chroma)**
+
+| Token role | Light | Dark | Usage |
+|------------|-------|------|-------|
+| Background | near-white `#FAFAFA` / white cards | near-black mixed slightly toward white | App, transcript |
+| Foreground | graphite ~oklch(0.27 0 0) | ~oklch(0.97 0 0) | Primary text |
+| Muted | ~oklch(0.55 0 0) | ~oklch(0.71 0 0) | Meta, timestamps |
+| Wash / secondary | black @ 4% | white @ 4% | Hover, selected rail wash, muted panels |
+| Hairline border | black @ 8% | white @ 6% | All docked dividers |
+| Field stroke | black @ 10% | white @ 8% | Inputs, outline buttons |
+
+**Brand (two-tier — paprika/ember family)**
+
+| Tier | Role | Allowed | Banned |
+|------|------|---------|--------|
+| **Identity paprika** ≈ `#C45C26` | Mark, selected ticks, non-text brand | Logo moments | Body copy in light; washes; warnings |
+| **Action ember** (darker AA-safe coral-ember) | Filled Send/Steer/Approve, focus ring | Primary CTAs | Status taxonomy; diffs; destructive |
+
+Implement via one module (`PimientoTokens` / theme extension) that owns raw colors; everywhere else consumes tokens (T4’s “One Token File” rule).
+
+**Semantic status (same jobs as T4, independent hex)**
+
+| Status | Maps from | Family |
+|--------|-----------|--------|
+| Working / Streaming / Connecting | `RunPhase::Streaming`, reconnecting | Sky / info |
+| Approval | blocking confirm/select | Amber |
+| Awaiting input | input/editor/ask | Indigo (not paprika) |
+| Plan ready | plan artifact if exposed | Violet **as status only** |
+| Done / idle-success | terminal success → idle | Emerald |
+| Error / Dead | errors, crash card | Crimson |
+
+**Diff:** added = success @ ~12% alpha; removed = destructive @ ~12%. **Mono:** one stack for tool output + fences.
+
+### 3.3 Layout anatomy (target)
+
+```
+┌─ topbar ~52px ─────────────────────────────────────────────────────────┐
+│ brand · workspace   │  phase pill · omp ver   │  palette · theme · pane │
+├──────────┬──────────────────────────────────┬──────────────────────────┤
+│ session  │  transcript (hero)               │  context inspector       │
+│ rail     │  prose measure ≤ ~48rem          │  closed by default       │
+│ 208–256  │  tools/code use full pane width  │  240–280 when open       │
+│          ├──────────────────────────────────┤                          │
+│          │  composer band (elevated island) │                          │
+│          │  model · think · fast · attach   │                          │
+│          │  ctx ring   [Queue]  [Steer/Send]│                          │
+└──────────┴──────────────────────────────────┴──────────────────────────┘
+```
+
+**Today → target**
+
+| Today (post-D4 screenshot) | Target |
+|----------------------------|--------|
+| Busy chrome duplicating model/think/ctx | Thin topbar; model/think/fast **only** on composer |
+| Flat composer, equal-weight chips | Elevated control island; primary Steer/Send in **action-ember** |
+| Weak phase tag | Status **pill = 6px dot + sentence-case label** |
+| Always-on full tool cards | **Action groups**: collapsed step rows + chevron |
+| Plain dialogs | Numbered options, recommended default, “Press 1–9”, free-text fallback |
+| Context % as text | Compact **ring meter** from `contextUsage.percent` |
+| Selected rail ambiguity | Wash + `rounded_sm` — **no** colored left stripe |
+
+### 3.4 Depth recipe (GPUI mapping)
+
+| Surface | Recipe |
+|---------|--------|
+| App / transcript | `background` |
+| Rail / inspector | `sidebar` + `sidebar_border`; **no shadow** |
+| Tool inset / action group | `secondary` + 1px `border` + optional top-edge 1px bevel wash |
+| Composer band | Docked for list stability, but elevated fill + top hairline + **`shadow_md`/`lg` only here** |
+| Palette / model picker / About | `overlay` + `popover` + `shadow_xl` + `rounded_lg` |
+| Primary button | Action-ember fill + light inset bevel if cheap; hover dims ~90% |
+| Status pill | Dot + label; ping **only** on Working |
+
+**Hard bans:** purple glow, neon rings, multi-layer shadows on docked chrome, glass monoculture, gradient text, grain, radius >16px, decorative `border_l` stripes, metric dashboards.
+
+### 3.5 Transcript, composer, rail (detail)
+
+**Transcript**
+
+- Keep semantic rows (PLAN §8).
+- Consecutive tools in one turn → rounded **action group**; expand in place with careful `ListState` splice.
+- Summary line: icon · tool · ≤80-char digest · status chip · duration.
+- Bash: command + exit + duration; ~24-line output viewport; BoundedText elision.
+- Unknown: collapsed raw JSON.
+- Streaming: muted ellipsis only — no fake skeleton copy.
+
+**Composer**
+
+- Streaming placeholder: “Steer the running turn, or queue a follow-up.”
+- Mid-stream: primary **Steer** (ember), outline **Queue**; idle **Send**.
+- Controls: model popover, filtered thinking, Fast switch, Attach, ctx ring, Abort (danger ghost when abortable).
+- Blocking dialog between transcript and composer; dims composer; keyboard-first.
+
+**Rail / inspector**
+
+- Group by cwd; row = title · muted model · relative time · status pill.
+- Roll up highest-priority child status to workspace header (error > approval > input > working > idle).
+- Inspector: Session · Checklist · Agents · Tools · Git · **Queue modes** (Wave A).
+- Auto-open inspector only for approval/plan attention — never every tool.
+
+### 3.6 Motion & a11y
+
+- Hover ≤120ms; expand/popover ≤190ms ease-out; dialog ≤240ms.
+- Suppress transitions on theme flip / rail drag.
+- Reduced motion: no ping, no animated smooth scroll.
+- Status never color-only; focus ring = action-ember ≥3:1 non-text.
+- Light + dark both first-class.
+
+### 3.7 Explicitly **not** taken from T4
+
+Multi-host / Tailnet / daemon · offline JSONL-as-truth · terminal/PTY pane · browser workspace pane · Electron titlebar · copying Pi/plugin mark geometry · fleet attention inbox. (Doctrine 10 + local-child model.)
+
+### 3.8 UI-specific gap table
+
+| Area | Severity | Wave |
+|------|----------|------|
+| Tokenized paprika/ember theme + status pills | High | **U1** |
+| Composer elevation + Steer/Queue hierarchy | High | **U2** |
+| Dedupe strip/composer/inspector labels | High | **U2** |
+| Context ring meter | Medium | **U2** |
+| Action-group tool collapsing | High | **U3** |
+| Rich ask/approval card chrome | High | **U3** (+ B1) |
+| Rail status pills + priority rollup | Medium | **U4** |
+| Transcript measure + denser 8pt rhythm | Medium | **U4** |
+| Motion / reduced-motion + L/D QA | Required | **U5** |
+
+---
+
+## 4. Gap catalog (OMP feature → Pimiento)
 
 Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N** = non-goal / out of scope
 
-### 3.1 Session & queue control (high leverage)
+### 4.1 Session & queue control (high leverage)
 
 | OMP surface | Live truth | Pimiento | Gap |
 |-------------|------------|----------|-----|
@@ -130,7 +296,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | `switch_session` multiplexing | Available | Deliberately **N** | Keep multi-process model |
 | Rename / move / fresh | Slash + `set_session_name` | Rename yes; `/move`/`/fresh` via slash | **P** — first-class “Fresh session” button |
 
-### 3.2 Compaction, retry, context
+### 4.2 Compaction, retry, context
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -140,7 +306,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | `contextUsage` | Shown | **P** — proactive “context high → compact” CTA |
 | `get_session_stats` / `/usage` `/stats` | Thin | **A** — stats sheet from RPC |
 
-### 3.3 Models, roles, thinking, fast, service tier
+### 4.3 Models, roles, thinking, fast, service tier
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -151,7 +317,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | `--service-tier` / provider tiers | Config keys exist | **A** — show/edit only if exposed on RPC state (else slash/`omp config`) |
 | Prewalk / plan-yolo | CLI flags + `/prewalk` | **P** — slash-only OK; optional status chip when active |
 
-### 3.4 Dialogs & approvals (parity depth)
+### 4.4 Dialogs & approvals (parity depth)
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -160,7 +326,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | Approval modes (`always-ask` / `write` / `yolo`) | Via omp config / CLI | **A** — surface current mode if discoverable; else document slash/`omp` only |
 | Dialog while tool-expanded / nested UI | Fragile in TUI historically | **P** — QA matrix (SH-2 style) |
 
-### 3.5 Tools, jobs, hub, computer, browser
+### 4.5 Tools, jobs, hub, computer, browser
 
 | OMP surface | Live dumpTools (sample) | Pimiento | Gap |
 |-------------|-------------------------|----------|-----|
@@ -171,7 +337,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | MCP / plugins / marketplace | Slash (`/mcp`, `/plugins`, …) | Slash completion only | **P** — inspector “Extensions” section listing mounted tools from `dumpTools` + notices |
 | LSP status | Not on rpc-ui state | Explicit “not published” copy | **N** until OMP publishes |
 
-### 3.6 Subagents & collaboration
+### 4.6 Subagents & collaboration
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -180,7 +346,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | Collab / share / join | `/share`, CLI `omp share` | Slash/CLI only | **P** — “Share session” palette → reveal URL/path |
 | IRC / collab messages | `irc_message` event | **U** → dedicated row |
 
-### 3.7 Todos, goals, memory, TTSR
+### 4.7 Todos, goals, memory, TTSR
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -190,7 +356,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | `ttsr_triggered` | **U** | **P** — quiet notice (TTSR is OMP-side) |
 | Memory / mnemopi / hindsight | Config + slash | Slash-only | **N** for v1 UI (document) |
 
-### 3.8 Auth & providers
+### 4.8 Auth & providers
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -198,7 +364,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | Auth-broker / gateway | CLI | **N** — power-user docs only |
 | Cursor OAuth / tokens | Works via omp | Document dogfood auth path | Doc |
 
-### 3.9 Attachments & media
+### 4.9 Attachments & media
 
 | OMP surface | Pimiento | Gap |
 |-------------|----------|-----|
@@ -206,7 +372,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | Vision / inspect_image | Tool + slash | **P** — ensure image tool results render usefully |
 | Audio / live / STT | TUI-native | **N** |
 
-### 3.10 Packaging, platforms, polish
+### 4.10 Packaging, platforms, polish
 
 | Item | Gap |
 |------|-----|
@@ -217,7 +383,7 @@ Legend: **A** = absent · **P** = partial · **U** = Unknown/silent only · **N*
 | Wayland popup QA | Manual QA remaining |
 | SH-1…SH-6 recorded proofs | **Operational debt** |
 
-### 3.11 Events still Unknown / silent (projection debt)
+### 4.11 Events still Unknown / silent (projection debt)
 
 Promote from Unknown (or silent) to first-class rows/state when they matter to humans:
 
@@ -233,7 +399,7 @@ Promote from Unknown (or silent) to first-class rows/state when they matter to h
 
 ---
 
-## 4. Prioritized delivery waves
+## 5. Prioritized delivery waves
 
 Waves are sized for dogfood-friendly branches. Each wave: fixture(s) + `protocol-notes` delta + `scripts/gate.sh` green + manual QA notes.
 
@@ -327,7 +493,27 @@ Waves are sized for dogfood-friendly branches. Each wave: fixture(s) + `protocol
 
 ---
 
-## 5. Explicit non-goals (remain Doctrine 10)
+### Wave U — Quiet Pepper Console (T4-inspired visual system)
+
+**Why parallel-early:** Control parity without scan hierarchy still feels like a raw RPC shell. T4’s calm density is the bar; Pimiento must hit it in GPUI without cloning Pi Pink.
+
+Ship **U1–U2 before or alongside Wave A** so new toggles land inside the elevated composer/inspector chrome rather than retrofitting twice.
+
+| # | Work item | Detail |
+|---|-----------|--------|
+| U1 | Token module + status pills | `PimientoTokens` (paprika identity / ember action / zero-chroma neutrals / semantic status). Map `RunPhase` + dialog pending → dot+label pills. Light+dark. |
+| U2 | Composer island + chrome dedupe | Elevate composer (hairline + limited shadow); Steer primary / Queue outline; ctx **ring**; strip only omp/phase; model·think·fast only on composer |
+| U3 | Action-group tools + ask chrome | Collapse consecutive tool steps; numbered ask/approval cards with recommended + 1–9 hint (pairs with B1) |
+| U4 | Rail densify | Status pills per row; priority rollup on workspace headers; 8pt rhythm; no left accent stripe |
+| U5 | Motion + visual QA | Duration tokens; reduced-motion; screenshot diff vs T4 *structure* (not colors) on light/dark streaming, ask, tool-expanded |
+
+**Exit:** Side-by-side with T4 lane-b shots: same information hierarchy and calm density; **obviously different** brand hue; gate + light/dark manual QA green.
+
+**Skill sync:** After U1–U2 land, update `.cursor/skills/pimiento-ui-craft/SKILL.md` to point at the shipped tokens (keep Adobe/GPUI hard rules).
+
+---
+
+## 6. Explicit non-goals (remain Doctrine 10)
 
 Do **not** schedule unless doctrine changes:
 
@@ -336,12 +522,13 @@ Do **not** schedule unless doctrine changes:
 3. Bundling / auto-installing omp.
 4. Terminal emulator pane / full PTY UI (rpc-ui forces `PI_NO_PTY=1`).
 5. ACP multi-harness hosting (keep `pimiento-core` clean for a future crate; build nothing speculative).
-6. Speech / live STT / fleet dashboards / remoting.
+6. Speech / live STT / fleet dashboards / remoting / Tailnet multi-host (T4 FEATURE_MATRIX Launch items we reject).
 7. Copying GPL Zed agent UI code.
+8. **Cloning T4’s Pi Pink brand, OMP mark geometry, Electron chrome, or cream/terracotta aesthetic.** Steal layout discipline only.
 
 ---
 
-## 6. Version & wire hygiene
+## 7. Version & wire hygiene
 
 | Practice | Detail |
 |----------|--------|
@@ -355,41 +542,46 @@ Live slash set (38) is **dynamic** — never hardcode; always prefer `available_
 
 ---
 
-## 7. Suggested sequencing vs original PLAN milestones
+## 8. Suggested sequencing vs original PLAN milestones
 
 ```
-Wave 0  →  close SH proofs + doc drift          (ops)
-Wave A  →  queue/compact/stats controls         (maps to “Tier 2 leftovers”)
-Wave B  →  ask/todos/tool render depth          (feel / self-host reliability)
-Wave D  →  subagents/share/extensions           (can parallelize after A)
-Wave C  →  host bridge                          (largest; after A+B stable)
-Wave E  →  packaging                            (D5 / PLAN packaging)
+Wave 0  →  close SH proofs + doc drift                 (ops)
+Wave U1–U2 →  tokens, status pills, composer island     (visual foundation)
+Wave A  →  queue/compact/stats controls                 (lands in new chrome)
+Wave U3 + B →  action groups + rich ask                 (feel / self-host)
+Wave U4 →  rail densify                                 (scan cost)
+Wave D  →  subagents/share/extensions                   (parallel after A)
+Wave C  →  host bridge                                  (largest; after A+B)
+Wave U5 →  motion + L/D QA                              (before calling “done”)
+Wave E  →  packaging
 ```
 
 Parallelism allowed by crate split:
 
 - `omp-rpc-client` + fixtures: new command send helpers / event kinds
 - `pimiento-core`: projection for reminders/goals/hub summaries
-- `pimiento-app`: inspector toggles / specialized cards
+- `pimiento-app`: tokens, composer/rail/transcript chrome, inspector toggles
 
 Integrate serially; gate with `scripts/gate.sh`.
 
 ---
 
-## 8. Acceptance criteria (plan-level)
+## 9. Acceptance criteria (plan-level)
 
 The parity program is “done enough” when:
 
 1. **Wave 0** SH proofs exist for macOS + Linux.
-2. **Wave A** users can change queue + auto-compact/retry without leaving Pimiento.
-3. **Wave B** multi-question `ask` never stalls a run; todo reminders are visible.
-4. Unknown rate for common sessions drops: `todo_reminder`, `goal_updated`, `ttsr_triggered`, `irc_message` no longer surprise humans as raw dumps (either projected or consciously quieted with a notice).
-5. Host bridge (**Wave C**) is either shipped behind a flag or explicitly deferred with rationale in this doc.
-6. Linux packaging (**Wave E1**) exists or is explicitly waived for personal dogfood.
+2. **Wave U1–U2** ship a recognizable Quiet Pepper Console: status pills, ember primary CTA, deduped chrome, ctx ring — **not** a T4 pink clone.
+3. **Wave A** users can change queue + auto-compact/retry without leaving Pimiento.
+4. **Wave B + U3** multi-question `ask` never stalls a run; tool action groups are scannable; todo reminders visible.
+5. Unknown rate for common sessions drops: `todo_reminder`, `goal_updated`, `ttsr_triggered`, `irc_message` projected or consciously quieted.
+6. Host bridge (**Wave C**) is either shipped behind a flag or explicitly deferred here.
+7. **Wave U5** light/dark visual QA recorded against the structural checklist in §3.
+8. Linux packaging (**Wave E1**) exists or is explicitly waived for personal dogfood.
 
 ---
 
-## 9. Risks
+## 10. Risks
 
 | Risk | Mitigation |
 |------|------------|
@@ -399,10 +591,13 @@ The parity program is “done enough” when:
 | Hub/jobs UI invents state | Parse tool results only; re-fetch via slash/`hub` ops when unsure |
 | Host tools security | Default deny; confirm cards; no yolo registration |
 | Scope explosion into TUI clone | Enforce non-goals; slash passthrough first |
+| Accidental T4 visual clone (pink/cream/glow) | Token review in U1; screenshot side-by-side must show distinct brand |
+| Composer float fighting GPUI list layout | Keep composer **docked**; fake float with elevation/shadow only |
+| Action-group reflow jank | Strict `ListState` splice/reset discipline; fixture + manual scroll QA |
 
 ---
 
-## 10. Appendix — live probe snapshot (2026-08-09)
+## 11. Appendix — live probe snapshot (2026-08-09)
 
 **ready:** `protocolVersion:1`, supports `[1,2]`, maxFrame 1 MiB, reassembly 64 MiB  
 
@@ -419,6 +614,10 @@ The parity program is “done enough” when:
 
 ---
 
-## 11. Next concrete action
+## 12. Next concrete action
 
-Start **Wave 0** (SH proof recording + PLAN/protocol-notes drift fix), then open the first implementation branch for **Wave A1–A3** (queue + auto toggles) — highest parity per line of code because the RPC and state fields already exist.
+1. **Wave 0** — SH proof recording + PLAN/protocol-notes drift fix.  
+2. **Wave U1** — land `PimientoTokens` + status pills (foundation for everything visual).  
+3. **Wave U2 + A1–A3** — composer island + queue/auto toggles together so new controls inherit the Quiet Pepper chrome.
+
+Reference while implementing: T4 `DESIGN.md` + lane-b screenshots for *structure*; this doc §3 for *Pimiento* color/depth; craft skill for GPUI hard rules.
