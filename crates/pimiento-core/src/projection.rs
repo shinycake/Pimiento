@@ -158,6 +158,10 @@ pub struct DisplayState {
 pub struct SessionProjection {
     /// Promoted runtime state.
     pub state: RuntimeState,
+    /// Current OMP-published goal text. `None` means OMP has cleared the goal
+    /// or no `goal_updated` event has supplied one yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
     /// Ordered visible transcript rows.
     pub transcript: Vec<TranscriptEntry>,
     /// Pending extension UI dialogs.
@@ -237,10 +241,17 @@ impl SessionProjection {
             }
             IncomingFrameKind::ModelChanged => self.apply_model_changed(&frame.raw),
             IncomingFrameKind::ThinkingLevelChanged(t) => self.apply_thinking_level(t),
+            IncomingFrameKind::TtsrTriggered => {
+                self.apply_quiet_event_notice("TTSR triggered", &frame.raw);
+            }
+            IncomingFrameKind::TodoReminder => {
+                self.apply_quiet_event_notice("Todo reminder", &frame.raw);
+            }
             IncomingFrameKind::TodoAutoClear => {
                 self.todos_raw = None;
             }
             IncomingFrameKind::Notice(n) => self.apply_notice(n),
+            IncomingFrameKind::GoalUpdated => self.apply_goal_updated(&frame.raw),
 
             IncomingFrameKind::PromptResult(pr) => self.apply_prompt_result(pr),
             IncomingFrameKind::AvailableCommandsUpdate => {
@@ -255,10 +266,7 @@ impl SessionProjection {
             | IncomingFrameKind::SubagentProgress(p)
             | IncomingFrameKind::SubagentEvent(p) => self.subagents_raw.push(p.payload.clone()),
 
-            IncomingFrameKind::TtsrTriggered
-            | IncomingFrameKind::TodoReminder
-            | IncomingFrameKind::IrcMessage
-            | IncomingFrameKind::GoalUpdated
+            IncomingFrameKind::IrcMessage
             | IncomingFrameKind::ConfigUpdate
             | IncomingFrameKind::HostToolCall(_)
             | IncomingFrameKind::HostToolCancel(_)
@@ -739,6 +747,32 @@ impl SessionProjection {
         }
     }
 
+    fn apply_quiet_event_notice(&mut self, label: &str, raw: &Value) {
+        let notice =
+            event_text(raw).map_or_else(|| label.to_owned(), |text| format!("{label}: {text}"));
+        self.transcript.push(TranscriptEntry::Notice(notice));
+    }
+
+    fn apply_goal_updated(&mut self, raw: &Value) {
+        if raw.get("goal").is_some_and(Value::is_null) {
+            self.goal = None;
+            self.transcript
+                .push(TranscriptEntry::Notice("Goal cleared".to_owned()));
+            return;
+        }
+
+        if let Some(goal) = event_text(raw) {
+            self.goal = Some(goal.clone());
+            self.transcript
+                .push(TranscriptEntry::Notice(format!("Goal updated: {goal}")));
+        } else {
+            // The event is recognized, but its payload is not. Keep the prior
+            // authoritative goal and leave a visible row rather than guessing.
+            self.transcript
+                .push(TranscriptEntry::Notice("Goal updated".to_owned()));
+        }
+    }
+
     fn apply_prompt_result(&mut self, pr: &PromptResultFrame) {
         if !pr.agent_invoked {
             // Local-only prompt: OMP handled it without invoking the agent
@@ -1030,6 +1064,25 @@ fn raw_string(raw: &Value, field: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn event_text(raw: &Value) -> Option<String> {
+    ["message", "text", "goal"]
+        .iter()
+        .find_map(|field| raw.get(*field).and_then(event_text_value))
+}
+
+fn event_text_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_owned())
+        }
+        Value::Object(object) => ["objective", "message", "text", "goal"]
+            .iter()
+            .find_map(|field| object.get(*field).and_then(event_text_value)),
+        _ => None,
+    }
 }
 
 fn raw_scalar(raw: &Value, field: &str) -> Option<String> {

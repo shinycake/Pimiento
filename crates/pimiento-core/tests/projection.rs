@@ -592,6 +592,113 @@ fn notice_error_becomes_error_entry() {
 }
 
 #[test]
+fn todo_reminder_projects_best_effort_text_as_notice() {
+    for (payload, expected) in [
+        (
+            json!({ "type": "todo_reminder", "message": "Finish the active task" }),
+            "Todo reminder: Finish the active task",
+        ),
+        (
+            json!({ "type": "todo_reminder", "text": "Run the tests" }),
+            "Todo reminder: Run the tests",
+        ),
+        (
+            json!({ "type": "todo_reminder", "goal": "Complete Wave B" }),
+            "Todo reminder: Complete Wave B",
+        ),
+        (
+            json!({
+                "type": "todo_reminder",
+                "todos": [{ "content": "canonical OMP todo payload" }],
+                "attempt": 1,
+                "maxAttempts": 3
+            }),
+            "Todo reminder",
+        ),
+    ] {
+        let mut p = SessionProjection::new();
+        apply(&mut p, payload);
+        assert_eq!(
+            p.transcript,
+            vec![TranscriptEntry::Notice(expected.to_owned())]
+        );
+    }
+}
+
+#[test]
+fn ttsr_triggered_projects_quiet_notice() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "ttsr_triggered", "message": "Matched safety rule" }),
+    );
+    apply(
+        &mut p,
+        json!({ "type": "ttsr_triggered", "rules": [{ "name": "canonical" }] }),
+    );
+
+    assert_eq!(
+        p.transcript,
+        vec![
+            TranscriptEntry::Notice("TTSR triggered: Matched safety rule".to_owned()),
+            TranscriptEntry::Notice("TTSR triggered".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn goal_updated_projects_objective_and_clear() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({
+            "type": "goal_updated",
+            "goal": {
+                "id": "goal-1",
+                "objective": "Ship projection foundations",
+                "status": "active"
+            }
+        }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("Ship projection foundations"));
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text))
+            if text == "Goal updated: Ship projection foundations"
+    ));
+
+    apply(&mut p, json!({ "type": "goal_updated", "goal": null }));
+    assert_eq!(p.goal, None);
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text)) if text == "Goal cleared"
+    ));
+}
+
+#[test]
+fn goal_updated_accepts_text_fallbacks_without_erasing_on_malformed_payload() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        json!({ "type": "goal_updated", "text": "First goal" }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("First goal"));
+
+    apply(
+        &mut p,
+        json!({ "type": "goal_updated", "message": "Second goal" }),
+    );
+    assert_eq!(p.goal.as_deref(), Some("Second goal"));
+
+    apply(&mut p, json!({ "type": "goal_updated", "goal": {} }));
+    assert_eq!(p.goal.as_deref(), Some("Second goal"));
+    assert!(matches!(
+        p.transcript.last(),
+        Some(TranscriptEntry::Notice(text)) if text == "Goal updated"
+    ));
+}
+
+#[test]
 fn extension_error_becomes_error_entry() {
     let mut p = SessionProjection::new();
     apply(
@@ -1233,13 +1340,7 @@ fn unknown_frame_type_is_visible() {
 #[test]
 fn unhandled_known_frames_stay_visible_as_unknown() {
     let mut p = SessionProjection::new();
-    for ty in [
-        "ttsr_triggered",
-        "todo_reminder",
-        "irc_message",
-        "goal_updated",
-        "config_update",
-    ] {
+    for ty in ["irc_message", "config_update"] {
         apply(&mut p, json!({ "type": ty }));
     }
     let unknowns = p
@@ -1247,7 +1348,7 @@ fn unhandled_known_frames_stay_visible_as_unknown() {
         .iter()
         .filter(|e| matches!(e, TranscriptEntry::Unknown { .. }))
         .count();
-    assert_eq!(unknowns, 5);
+    assert_eq!(unknowns, 2);
 }
 
 // ---------------------------------------------------------------------------
