@@ -3,7 +3,7 @@
 **Status:** living plan (v2 — adds T4-inspired visual/UX system)  
 **Pinned against:** OMP **17.2.11** (live binary + upstream `v17.2.11` RPC sources)  
 **UI reference:** [T4 Code](https://github.com/LycaonLLC/t4-code) `DESIGN.md` + lane-b screenshots (patterns only; **not** their brand pink / Electron stack)  
-**Pimiento tested baseline:** `omp ≥ 17.2.10` (version-gate banner for drift)  
+**Pimiento tested range:** `omp 17.2.10–17.2.11` (version-gate banner outside the range)
 **Date:** 2026-08-09  
 **Companion docs:** `PLAN.md` (doctrine + original milestones), `docs/protocol-notes.md` (wire truth), `.cursor/skills/pimiento-ui-craft/SKILL.md`
 
@@ -412,6 +412,10 @@ Waves are sized for dogfood-friendly branches. Each wave: fixture(s) + `protocol
 3. Bump / document tested omp range for **17.2.11** (plugins, share CLI, catalog fixes) in version-gate copy + protocol-notes.
 4. Run `docs/manual-qa-checklist.md` and file IME/Wayland results against the pin.
 
+**Current ops status:** proof slots exist in `docs/sh-proofs.md`, but no SH proof
+is complete yet. Linux is environment-ready pending live dogfood; macOS is
+pending the user's machine.
+
 **Exit:** Checked boxes for SH proofs + PLAN/protocol-notes drift resolved.
 
 ---
@@ -486,7 +490,7 @@ Waves are sized for dogfood-friendly branches. Each wave: fixture(s) + `protocol
 
 | # | Work item |
 |---|-----------|
-| E1 | Linux AppImage or `.deb` (pick one first) |
+| E1 | Minimal release tarball via `scripts/package_linux.sh` ships for personal dogfood; AppImage / `.deb` remain the distributable-package follow-up |
 | E2 | First-run omp detection polish (already partially present) |
 | E3 | Upstream ask: gpui-component `is_composing` API → IME guard |
 | E4 | Windows spike (optional; PLAN deferred) |
@@ -505,9 +509,9 @@ Ship **U1–U2 before or alongside Wave A** so new toggles land inside the eleva
 | U2 | Composer island + chrome dedupe | Elevate composer (hairline + limited shadow); Steer primary / Queue outline; ctx **ring**; strip only omp/phase; model·think·fast only on composer |
 | U3 | Action-group tools + ask chrome | Collapse consecutive tool steps; numbered ask/approval cards with recommended + 1–9 hint (pairs with B1) |
 | U4 | Rail densify | Status pills per row; priority rollup on workspace headers; 8pt rhythm; no left accent stripe |
-| U5 | Motion + visual QA | Duration tokens; reduced-motion; screenshot diff vs T4 *structure* (not colors) on light/dark streaming, ask, tool-expanded |
+| U5 | Motion + visual QA | Duration tokens; reduced-motion; screenshot diff vs T4 *structure* (not colors) on light/dark streaming, ask, tool-expanded. Checklist: [`docs/quiet-pepper-qa.md`](quiet-pepper-qa.md). |
 
-**Exit:** Side-by-side with T4 lane-b shots: same information hierarchy and calm density; **obviously different** brand hue; gate + light/dark manual QA green.
+**Exit:** Side-by-side with T4 lane-b shots: same information hierarchy and calm density; **obviously different** brand hue; gate + light/dark manual QA green. Record the review with [`docs/quiet-pepper-qa.md`](quiet-pepper-qa.md).
 
 **Skill sync:** After U1–U2 land, update `.cursor/skills/pimiento-ui-craft/SKILL.md` to point at the shipped tokens (keep Adobe/GPUI hard rules).
 
@@ -576,7 +580,7 @@ The parity program is “done enough” when:
 4. **Wave B + U3** multi-question `ask` never stalls a run; tool action groups are scannable; todo reminders visible.
 5. Unknown rate for common sessions drops: `todo_reminder`, `goal_updated`, `ttsr_triggered`, `irc_message` projected or consciously quieted.
 6. Host bridge (**Wave C**) is either shipped behind a flag or explicitly deferred here.
-7. **Wave U5** light/dark visual QA recorded against the structural checklist in §3.
+7. **Wave U5** light/dark visual QA recorded against the structural checklist in [`docs/quiet-pepper-qa.md`](quiet-pepper-qa.md), which operationalizes §3.
 8. Linux packaging (**Wave E1**) exists or is explicitly waived for personal dogfood.
 
 ---

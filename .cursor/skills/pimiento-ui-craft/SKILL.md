@@ -33,7 +33,7 @@ Apply when changing Pimiento visuals or chrome. Companion skills (install global
 No purple glow, neon rings, or shadows on docked chrome (composer band is the sole docked exception). Prefer gpui-component
 popover/dialog primitives when wiring is clean (placement + Wayland).
 
-**Brand / status:** see `docs/parity-plan.md` §3 — paprika identity + ember action (never T4 Pi Pink); status = dot+label taxonomy; one token module owns raw colors.
+**Brand / status:** see `docs/parity-plan.md` §3 — paprika identity + ember action (never T4 Pi Pink); status = dot+label taxonomy. Shipped raw color tokens live only in `crates/pimiento-app/src/tokens.rs`; consume those tokens instead of adding ad hoc colors elsewhere.
 
 ## Doctrine (do not violate)
 

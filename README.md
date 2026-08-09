@@ -51,9 +51,9 @@ scripts/gate.sh
 
 For the self-hosting workflow, follow the dogfood ritual in [PLAN.md §7](PLAN.md#7-the-dogfood-ritual-how-the-app-builds-itself). `scripts/dogfood.sh` starts and records a development session; `scripts/reveal_logs.sh` opens Pimiento's local logs.
 
-## macOS packaging
+## Packaging
 
-See [docs/packaging.md](docs/packaging.md) for the unsigned local `.app` bundle. Use `scripts/package_macos_app.sh` to build it, or `scripts/install_macos_app.sh` to install it for the current user (`~/Applications/Pimiento.app`). Linux AppImage/`.deb` packaging is deferred — run via `cargo build` / `scripts/run_app.sh` for now (same doc).
+See [docs/packaging.md](docs/packaging.md) for local dogfood packages. Use `scripts/package_macos_app.sh` for the unsigned macOS `.app`, `scripts/install_macos_app.sh` to install it for the current user (`~/Applications/Pimiento.app`), or `scripts/package_linux.sh` for the minimal Linux release tarball. Linux AppImage/`.deb` packaging remains deferred.
 
 ## Architecture and doctrine
 

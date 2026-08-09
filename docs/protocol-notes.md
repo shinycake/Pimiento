@@ -1,7 +1,7 @@
 [protocol-notes.md#E3A8]
 1:# Pimiento protocol notes
 2:
-3:Authoritative development target: locally installed `omp/17.2.10`.
+3:Wire extraction baseline: locally installed `omp/17.2.10`. Compatibility has also been exercised against **omp 17.2.11**; the documented tested range is **17.2.10–17.2.11**.
 4:
 5:Canonical sources inspected on 2026-08-06:
 6:
@@ -250,7 +250,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - Launcher and inline-dialog changes are presentation-only. Dialog responses, Esc cancellation, and `open_url` copy/open behavior retain their existing RPC shapes.
 - App sources were modularized for maintainability without changing protocol or runtime behavior.
 - Visual-hierarchy polish (rail affordance, transcript spacing, inspector emphasis, and empty-state copy) changes presentation only; all displayed session facts remain OMP-authoritative.
-- Versions below or newer than the tested `omp 17.2.10+` baseline proceed with a warning banner; the exact discovered semantic version comes from startup discovery.
+- Versions outside the documented tested range `omp 17.2.10–17.2.11` should proceed with a warning banner; the exact discovered semantic version comes from startup discovery.
 
 ## D4 light-theme transcript audit — 2026-08-08
 
@@ -339,3 +339,17 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - `input` / `editor` responses carry `value: string`. Pimiento renders a text field + Submit (and Cancel) for those methods; Cancel alone is not enough.
 - Non-dialog display methods (`setTitle` / `setStatus` / `setWidget` / `set_editor_text`) project into `DisplayState` and surface in the status strip / inspector only when present. OS window title follows `setTitle` only when `PI_RPC_EMIT_TITLE` is truthy (OMP's emit gate).
 - `image_end` projects to a visible `TranscriptEntry::Notice` with mime/type summary so image blocks are never dropped silently.
+
+## Wave E3 upstream IME API ask — 2026-08-09
+
+- **Blocked upstream:** Pimiento needs gpui-component `InputState::is_composing()` (or an equivalent composition flag on the submit event) so Enter can commit an active IME candidate without also sending the composer.
+- The pinned component keeps `ime_marked_range` private, so Pimiento cannot implement a reliable app-level guard without a fork. Do not infer composition state from key timing or text changes.
+- No upstream completion is claimed here. Until the public API lands and the pin is updated, CJK IME remains required manual QA on macOS, Linux X11, and Linux Wayland.
+
+## Quiet Pepper execute waves — 2026-08-09
+
+- Wave 0 documentation now reflects image attachments as shipped, records the **omp 17.2.10–17.2.11** tested range, and separates D1–D4 code completion from still-open dogfood and platform QA.
+- Wave E adds a minimal Linux personal-dogfood release tarball path. AppImage, `.deb`, signing, and Windows remain deferred; Pimiento still neither bundles nor installs `omp`.
+- Wave U5 has a dedicated motion and screenshot checklist in `docs/quiet-pepper-qa.md`; durations and reduced-motion behavior are recommendations until implemented and manually verified.
+- SH proof templates live in `docs/sh-proofs.md`. No SH proof is complete merely because its slot exists; Linux is environment-ready pending live dogfood, and macOS requires the user's machine.
+- This entry summarizes the Quiet Pepper execute integration change set; it does not assert a hosted PR or completed QA in this local-only repository.
