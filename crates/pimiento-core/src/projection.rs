@@ -80,6 +80,18 @@ pub struct RuntimeState {
     pub fast_mode_enabled: Option<bool>,
     /// Whether fast mode is currently active.
     pub fast_mode_active: Option<bool>,
+    /// How OMP applies steering messages to the active turn.
+    pub steering_mode: Option<String>,
+    /// How OMP dispatches queued follow-up messages.
+    pub follow_up_mode: Option<String>,
+    /// Whether queued messages interrupt immediately or wait.
+    pub interrupt_mode: Option<String>,
+    /// Whether OMP automatically compacts the session context.
+    pub auto_compaction_enabled: Option<bool>,
+    /// Whether OMP automatically retries recoverable failures.
+    pub auto_retry_enabled: Option<bool>,
+    /// Number of messages currently queued by OMP.
+    pub queued_message_count: Option<u64>,
     /// Token metrics blob — shape is provider-specific, kept lossless.
     pub tokens: Option<Value>,
     /// Context-window info blob.
@@ -934,6 +946,7 @@ impl SessionProjection {
 
         let str_field = |k: &str| state.get(k).and_then(Value::as_str).map(str::to_owned);
         let bool_field = |k: &str| state.get(k).and_then(Value::as_bool);
+        let u64_field = |k: &str| state.get(k).and_then(Value::as_u64);
         let val_field = |k: &str| state.get(k).cloned();
 
         // OMP reports `model` as a Model object `{provider,id,...}`; older
@@ -970,6 +983,24 @@ impl SessionProjection {
         }
         if let Some(b) = bool_field("fastModeActive") {
             self.state.fast_mode_active = Some(b);
+        }
+        if let Some(s) = str_field("steeringMode") {
+            self.state.steering_mode = Some(s);
+        }
+        if let Some(s) = str_field("followUpMode") {
+            self.state.follow_up_mode = Some(s);
+        }
+        if let Some(s) = str_field("interruptMode") {
+            self.state.interrupt_mode = Some(s);
+        }
+        if let Some(b) = bool_field("autoCompactionEnabled") {
+            self.state.auto_compaction_enabled = Some(b);
+        }
+        if let Some(b) = bool_field("autoRetryEnabled") {
+            self.state.auto_retry_enabled = Some(b);
+        }
+        if let Some(count) = u64_field("queuedMessageCount") {
+            self.state.queued_message_count = Some(count);
         }
         if let Some(t) = val_field("tokens").or_else(|| val_field("usage")) {
             self.state.tokens = Some(t);

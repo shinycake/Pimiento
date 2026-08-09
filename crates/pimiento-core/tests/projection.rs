@@ -832,6 +832,31 @@ fn hydrate_get_state_reads_top_level_fast_mode_booleans() {
 }
 
 #[test]
+fn hydrate_get_state_promotes_queue_and_auto_fields() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "state": {
+            "steeringMode": "all",
+            "followUpMode": "one-at-a-time",
+            "interruptMode": "wait",
+            "autoCompactionEnabled": true,
+            "autoRetryEnabled": false,
+            "queuedMessageCount": 3,
+        }
+    }));
+
+    assert_eq!(p.state.steering_mode.as_deref(), Some("all"));
+    assert_eq!(
+        p.state.follow_up_mode.as_deref(),
+        Some("one-at-a-time")
+    );
+    assert_eq!(p.state.interrupt_mode.as_deref(), Some("wait"));
+    assert_eq!(p.state.auto_compaction_enabled, Some(true));
+    assert_eq!(p.state.auto_retry_enabled, Some(false));
+    assert_eq!(p.state.queued_message_count, Some(3));
+}
+
+#[test]
 fn hydrate_available_commands_stores_raw() {
     let mut p = SessionProjection::new();
     p.hydrate_available_commands(&json!({ "commands": [ {"name":"/compact"} ] }));
