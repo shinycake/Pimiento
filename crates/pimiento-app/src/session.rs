@@ -3560,40 +3560,6 @@ impl SessionView {
         .detach();
     }
 
-    /// Abort the active OMP bash job. `abort_bash` takes no id on the wire —
-    /// only offer this from a running `bash` tool card (see
-    /// [`crate::bash_abort_is_correlatable`]).
-    pub(crate) fn request_abort_bash(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        cx.spawn(
-            async move |view, cx| match client.send(RpcCommandBody::AbortBash).await {
-                Ok(resp) if resp.success => {}
-                Ok(resp) => {
-                    let error = resp.error.unwrap_or_else(|| "abort_bash failed".into());
-                    let _ = view.update(cx, |this, cx| {
-                        this.projection.transcript.push(TranscriptEntry::Error {
-                            message: error,
-                            code: Some("abort_bash".into()),
-                        });
-                        cx.notify();
-                    });
-                }
-                Err(error) => {
-                    let _ = view.update(cx, |this, cx| {
-                        this.projection.transcript.push(TranscriptEntry::Error {
-                            message: format!("abort_bash: {error}"),
-                            code: Some("abort_bash".into()),
-                        });
-                        cx.notify();
-                    });
-                }
-            },
-        )
-        .detach();
-    }
-
     pub(crate) fn open_branch_picker(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
             return;

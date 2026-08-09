@@ -736,7 +736,6 @@ pub(crate) fn render_tool_card(
         .unwrap_or_default();
     let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
     let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
-    let show_abort_bash = bash_abort_is_correlatable(&tc.name, tc.status);
     let tool_title = if hub_summary.is_some() {
         "Jobs".to_owned()
     } else {
@@ -783,7 +782,6 @@ pub(crate) fn render_tool_card(
     let view = cx.entity().downgrade();
     let view_for_toggle = view.clone();
     let view_for_revert = view.clone();
-    let view_for_abort = view.clone();
     let view_for_agents = view.clone();
     let tc_id_for_toggle = tc_id.clone();
 
@@ -882,16 +880,13 @@ pub(crate) fn render_tool_card(
                         }),
                 ),
         )
-        .when(
-            tc.status == ToolStatus::Running && !show_abort_bash,
-            |card| {
-                card.child(
-                    Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
-                )
-            },
-        )
+        .when(tc.status == ToolStatus::Running, |card| {
+            card.child(
+                Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
+            )
+        })
         .when(!hub_lines.is_empty(), |card| {
             card.child(
                 v_flex()
@@ -1010,19 +1005,6 @@ pub(crate) fn render_tool_card(
                                         output_text.clone(),
                                     ));
                                 }
-                            }),
-                    )
-                })
-                .when(show_abort_bash, |controls| {
-                    controls.child(
-                        Button::new(("abort-bash", row_ix))
-                            .label("Abort bash")
-                            .small()
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                let _ = view_for_abort.update(cx, |this, cx| {
-                                    this.request_abort_bash(cx);
-                                });
                             }),
                     )
                 })
@@ -1781,12 +1763,6 @@ pub(crate) fn do_dialog_response(
             cx.notify();
         });
     }
-}
-
-/// `abort_bash` has no id on the wire. Only surface it when OMP itself is
-/// projecting a running `bash` tool card — that is the correlation we trust.
-pub(crate) fn bash_abort_is_correlatable(name: &str, status: ToolStatus) -> bool {
-    status == ToolStatus::Running && name.eq_ignore_ascii_case("bash")
 }
 
 pub(crate) fn hub_job_summary_display_lines(summary: &HubJobSummary) -> Vec<String> {
