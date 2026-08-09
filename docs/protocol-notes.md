@@ -146,10 +146,10 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - `edit` / `write` tool results prefer `details.diff` for visible output.
 - Expanded tool cards color add/remove/meta lines for quick review (read-only).
 
-## Export HTML + subagent strip — 2026-08-08
+## Export HTML + subagents — 2026-08-08
 
 - Status strip **Export** calls `export_html` with a timestamped path under the session cwd and posts a notice with the result path.
-- **Agents (n)** toggles a read-only drawer of recent `subagent_*` payloads already retained on the projection.
+- **Agents** opens the right Context inspector's authoritative `get_subagents` snapshot list.
 - Compacting / retrying phases show a warning banner above the transcript.
 
 ## Thinking collapse + session rename — 2026-08-08
@@ -174,10 +174,11 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - Cmd/Ctrl+K opens an in-app command palette (type to filter, Enter runs). Cmd/Ctrl+T/W/B = new/close/toggle rail.
 - Tool output JSON is parsed when present so `details.diff` coloring still works for structured results.
 
-## Subagent drawer tail + transcript paging — 2026-08-08
+## Subagent work modal + transcript paging — 2026-08-08
 
-- `get_subagents` returns `{ subagents: RpcSubagentSnapshot[] }`; the Agents drawer renders each snapshot tolerantly, preserving raw values rather than assuming every optional field exists.
-- `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back on refresh for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied.
+- `get_subagents` returns `{ subagents: RpcSubagentSnapshot[] }`; the Context inspector renders each authoritative snapshot tolerantly, preserving raw values rather than assuming every optional field exists.
+- Subagents have one workspace representation: summary rows in the inspector's **Agents** section. Clicking a row opens a centered work modal backed by `get_subagent_messages`; message tails are not duplicated inline in the narrow inspector or in a strip above the transcript.
+- `get_subagent_messages { subagentId?, sessionFile?, fromByte? }` returns `nextByte`, which is passed back when the same agent is opened again for incremental tailing. A `reset: true` response replaces the locally displayed tail before its page is applied. The modal remains visible while loading and is dismissed by backdrop click, **Close**, or Esc.
 - PageUp/PageDown/Home/End navigate the transcript `ListState`; PageUp/PageDown/Home leave tail-follow mode and End re-enables it at the transcript tail. Keys are ignored while the composer or model-search input is focused so Home/End still move the caret.
 
 ## Compaction and retry fallback UX — 2026-08-08
@@ -367,7 +368,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 ## Rail density + Wave D surfaces — 2026-08-09
 
 - Rail rows and workspace headers derive status pills only from each session's projected `RunPhase`; workspace rollup priority is dead/error, awaiting input, active/busy, then idle.
-- The Agents strip renders retained `get_subagents` snapshots first and falls back to retained `subagent_*` events. Its inspector control cycles the existing `set_subagent_subscription` wire levels `off → progress → events`.
+- The inspector Agents section renders retained `get_subagents` snapshots and cycles the existing `set_subagent_subscription` wire levels `off → progress → events`; subscription events do not create a second list or transcript strip.
 - Palette **Share session** sends a regular `prompt` carrying `/share`; Pimiento does not infer or persist a share URL and waits for OMP output.
 - Inspector tool grouping is display-only: a fixed known-builtin allowlist is labeled **Builtin**, and all unknown names remain visible under **Extensions / MCP**. Computer/browser/vision tags are best-effort presence indicators from `dumpTools` names or display-widget keys, not connection-health claims.
 

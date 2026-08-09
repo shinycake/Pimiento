@@ -639,10 +639,7 @@ pub(crate) fn render_inspector(
         queued_message_count,
         todo_phases,
         subagent_rows,
-        selected_subagent_id,
-        subagent_tail_lines,
         subagent_status,
-        fallback_subagent_events,
         subagent_subscription,
         tool_names,
         mode_tags,
@@ -719,17 +716,7 @@ pub(crate) fn render_inspector(
                         .map(|id| (id.to_owned(), subagent_snapshot_summary(snapshot)))
                 })
                 .collect::<Vec<_>>(),
-            session_view.selected_subagent_id.clone(),
-            session_view.subagent_tail_lines.clone(),
             session_view.subagent_drawer_status.clone(),
-            session_view
-                .projection
-                .subagents_raw
-                .iter()
-                .rev()
-                .take(12)
-                .map(subagent_payload_summary)
-                .collect::<Vec<_>>(),
             session_view.subagent_subscription.as_wire().to_owned(),
             tool_names,
             mode_tags,
@@ -1185,37 +1172,18 @@ pub(crate) fn render_inspector(
                 )
                 .children(subagent_rows.iter().enumerate().map(|(ix, (id, summary))| {
                     let id = id.clone();
-                    let selected = selected_subagent_id.as_deref() == Some(id.as_str());
                     Button::new(("inspector-agent", ix))
                         .label(summary.clone())
                         .small()
                         .w_full()
-                        .when(selected, Button::primary)
-                        .when(!selected, Button::ghost)
+                        .ghost()
                         .on_click(window.listener_for(
                             session,
                             move |this, _: &ClickEvent, _window, cx| {
-                                this.select_subagent(id.clone(), cx);
+                                this.open_subagent_modal(id.clone(), cx);
                             },
                         ))
-                }))
-                .children(subagent_tail_lines.iter().enumerate().map(|(ix, line)| {
-                    Label::new(format!("{ix}: {line}"))
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                }))
-                .when(
-                    subagent_rows.is_empty() && !fallback_subagent_events.is_empty(),
-                    |section| {
-                        section.children(fallback_subagent_events.iter().enumerate().map(
-                            |(ix, summary)| {
-                                Label::new(format!("#{ix} {summary}"))
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                            },
-                        ))
-                    },
-                ),
+                })),
         )
         .when(!tool_names.is_empty(), |parent| {
             let grouped = group_tool_names(&tool_names);

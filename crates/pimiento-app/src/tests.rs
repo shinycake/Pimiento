@@ -857,20 +857,22 @@ fn subagent_subscription_cycles_off_progress_events() {
 }
 
 #[test]
-fn subagent_strip_prefers_snapshots_and_falls_back_to_events() {
+fn subagent_snapshot_refresh_preserves_only_an_explicit_present_selection() {
     let snapshots = vec![serde_json::json!({
         "id": "worker-1",
         "agent": "task",
         "status": "working",
         "description": "Reviewing the UI"
     })];
-    let events = vec![serde_json::json!({
-        "type": "subagent_progress",
-        "subagentId": "worker-2",
-        "message": "Running checks"
-    })];
-    assert_eq!(subagent_strip_rows(&snapshots, &events)[0].0, "worker-1");
-    assert_eq!(subagent_strip_rows(&[], &events)[0].0, "worker-2");
+    assert_eq!(retained_subagent_selection(None, &snapshots), None);
+    assert_eq!(
+        retained_subagent_selection(Some("worker-1"), &snapshots).as_deref(),
+        Some("worker-1")
+    );
+    assert_eq!(
+        retained_subagent_selection(Some("worker-2"), &snapshots),
+        None
+    );
 }
 
 #[test]

@@ -104,6 +104,9 @@ pub(crate) struct SessionView {
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
     pub(crate) subagent_subscription: SubagentSubscriptionLevel,
     pub(crate) selected_subagent_id: Option<String>,
+    pub(crate) subagent_modal_open: bool,
+    pub(crate) subagent_modal_status: String,
+    pub(crate) subagent_modal_request_generation: u64,
     pub(crate) subagent_tail_next_byte: Option<u64>,
     pub(crate) subagent_tail_lines: Vec<String>,
     pub(crate) subagent_drawer_status: String,
@@ -271,6 +274,9 @@ impl SessionView {
             subagent_snapshots: Vec::new(),
             subagent_subscription: SubagentSubscriptionLevel::Events,
             selected_subagent_id: None,
+            subagent_modal_open: false,
+            subagent_modal_status: String::new(),
+            subagent_modal_request_generation: 0,
             subagent_tail_next_byte: None,
             subagent_tail_lines: Vec::new(),
             subagent_drawer_status: String::new(),
@@ -737,6 +743,10 @@ impl SessionView {
     pub(crate) fn clear_subagent_drawer_state(&mut self) {
         self.subagent_snapshots.clear();
         self.selected_subagent_id = None;
+        self.subagent_modal_open = false;
+        self.subagent_modal_status.clear();
+        self.subagent_modal_request_generation =
+            self.subagent_modal_request_generation.wrapping_add(1);
         self.subagent_tail_next_byte = None;
         self.subagent_tail_lines.clear();
         self.subagent_drawer_status.clear();
@@ -818,52 +828,64 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) {
         self.subagent_snapshots = snapshots;
-        let selection_is_present = self.selected_subagent_id.as_ref().is_some_and(|selected| {
-            self.subagent_snapshots
-                .iter()
-                .any(|snapshot| subagent_snapshot_id(snapshot) == Some(selected.as_str()))
-        });
-        if !selection_is_present {
-            self.selected_subagent_id = self
-                .subagent_snapshots
-                .iter()
-                .find_map(subagent_snapshot_id)
-                .map(str::to_owned);
+        let retained_selection = retained_subagent_selection(
+            self.selected_subagent_id.as_deref(),
+            &self.subagent_snapshots,
+        );
+        if self.selected_subagent_id.is_some() && retained_selection.is_none() {
+            self.subagent_modal_open = false;
+            self.subagent_modal_request_generation =
+                self.subagent_modal_request_generation.wrapping_add(1);
+            self.subagent_modal_status.clear();
             self.subagent_tail_next_byte = None;
             self.subagent_tail_lines.clear();
         }
+        self.selected_subagent_id = retained_selection;
 
-        if let Some(selected) = self.selected_subagent_id.clone() {
-            let from_byte = self.subagent_tail_next_byte;
-            self.fetch_subagent_messages(selected, from_byte, cx);
-        } else if self.projection.subagents_raw.is_empty() {
+        if self.subagent_snapshots.is_empty() {
             "No agents reported".clone_into(&mut self.subagent_drawer_status);
         } else {
-            "No snapshots; showing recent agent events"
-                .clone_into(&mut self.subagent_drawer_status);
+            self.subagent_drawer_status.clear();
         }
         cx.notify();
     }
 
-    pub(crate) fn select_subagent(&mut self, subagent_id: String, cx: &mut Context<Self>) {
-        if self.selected_subagent_id.as_deref() == Some(subagent_id.as_str()) {
-            return;
+    pub(crate) fn open_subagent_modal(&mut self, subagent_id: String, cx: &mut Context<Self>) {
+        let same_selection = self.selected_subagent_id.as_deref() == Some(subagent_id.as_str());
+        if !same_selection {
+            self.selected_subagent_id = Some(subagent_id.clone());
+            self.subagent_tail_next_byte = None;
+            self.subagent_tail_lines.clear();
         }
-        self.selected_subagent_id = Some(subagent_id.clone());
-        self.subagent_tail_next_byte = None;
-        self.subagent_tail_lines.clear();
-        self.fetch_subagent_messages(subagent_id, None, cx);
+        self.subagent_modal_open = true;
+        self.subagent_modal_request_generation =
+            self.subagent_modal_request_generation.wrapping_add(1);
+        let request_generation = self.subagent_modal_request_generation;
+        let from_byte = same_selection
+            .then_some(self.subagent_tail_next_byte)
+            .flatten();
+        self.fetch_subagent_messages(subagent_id, from_byte, request_generation, cx);
         cx.notify();
     }
 
-    pub(crate) fn fetch_subagent_messages(
+    pub(crate) fn close_subagent_modal(&mut self, cx: &mut Context<Self>) {
+        if self.subagent_modal_open {
+            self.subagent_modal_open = false;
+            self.subagent_modal_request_generation =
+                self.subagent_modal_request_generation.wrapping_add(1);
+            cx.notify();
+        }
+    }
+
+    fn fetch_subagent_messages(
         &mut self,
         subagent_id: String,
         from_byte: Option<u64>,
+        request_generation: u64,
         cx: &mut Context<Self>,
     ) {
         let Some(client) = self.client.clone() else {
-            "OMP is not connected".clone_into(&mut self.subagent_drawer_status);
+            "OMP is not connected".clone_into(&mut self.subagent_modal_status);
             return;
         };
         let session_file = self
@@ -872,7 +894,7 @@ impl SessionView {
             .find(|snapshot| subagent_snapshot_id(snapshot) == Some(subagent_id.as_str()))
             .and_then(subagent_snapshot_session_file)
             .map(str::to_owned);
-        self.subagent_drawer_status = if from_byte.is_some() {
+        self.subagent_modal_status = if from_byte.is_some() {
             "Refreshing messages…".to_owned()
         } else {
             "Loading messages…".to_owned()
@@ -886,20 +908,23 @@ impl SessionView {
                 })
                 .await;
             let _ = view.update(cx, |this, cx| {
-                if this.selected_subagent_id.as_deref() != Some(subagent_id.as_str()) {
+                if !this.subagent_modal_open
+                    || this.selected_subagent_id.as_deref() != Some(subagent_id.as_str())
+                    || this.subagent_modal_request_generation != request_generation
+                {
                     return;
                 }
                 match result {
                     Ok(response) if response.success => {
-                        this.apply_subagent_message_page(response.data.as_ref(), &subagent_id);
+                        this.apply_subagent_message_page(response.data.as_ref());
                     }
                     Ok(response) => {
-                        this.subagent_drawer_status = response
+                        this.subagent_modal_status = response
                             .error
                             .unwrap_or_else(|| "get_subagent_messages failed".to_owned());
                     }
                     Err(error) => {
-                        this.subagent_drawer_status = format!("get_subagent_messages: {error}");
+                        this.subagent_modal_status = format!("get_subagent_messages: {error}");
                     }
                 }
                 cx.notify();
@@ -908,13 +933,9 @@ impl SessionView {
         .detach();
     }
 
-    pub(crate) fn apply_subagent_message_page(
-        &mut self,
-        data: Option<&serde_json::Value>,
-        subagent_id: &str,
-    ) {
+    pub(crate) fn apply_subagent_message_page(&mut self, data: Option<&serde_json::Value>) {
         let Some(data) = data else {
-            "No message payload returned".clone_into(&mut self.subagent_drawer_status);
+            "No message payload returned".clone_into(&mut self.subagent_modal_status);
             return;
         };
         if data.get("reset").and_then(serde_json::Value::as_bool) == Some(true) {
@@ -939,9 +960,8 @@ impl SessionView {
                 self.subagent_tail_lines.drain(..excess);
             }
         }
-        self.subagent_drawer_status = format!(
-            "{} · {} line(s){}",
-            subagent_id,
+        self.subagent_modal_status = format!(
+            "{} message(s){}",
             self.subagent_tail_lines.len(),
             if data.get("reset").and_then(serde_json::Value::as_bool) == Some(true) {
                 " (reset)"
@@ -949,6 +969,22 @@ impl SessionView {
                 ""
             }
         );
+    }
+
+    pub(crate) fn handle_subagent_modal_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.subagent_modal_open {
+            return false;
+        }
+        if !event.keystroke.modifiers.modified()
+            && matches!(event.keystroke.key.as_str(), "escape" | "esc")
+        {
+            self.close_subagent_modal(cx);
+        }
+        true
     }
 
     pub(crate) fn export_html(&mut self, cx: &mut Context<Self>) {
@@ -4648,8 +4684,14 @@ impl Render for SessionView {
         let palette_selected = self.palette_selected;
         let pending_revert = self.pending_revert.clone();
         let transcript_empty = self.projection.transcript.is_empty();
-        let subagent_strip =
-            subagent_strip_rows(&self.subagent_snapshots, &self.projection.subagents_raw);
+        let subagent_modal_agent = self.selected_subagent_id.as_ref().and_then(|selected| {
+            self.subagent_snapshots
+                .iter()
+                .find(|snapshot| subagent_snapshot_id(snapshot) == Some(selected.as_str()))
+                .map(|snapshot| (selected.clone(), subagent_snapshot_summary(snapshot)))
+        });
+        let subagent_modal_status = self.subagent_modal_status.clone();
+        let subagent_modal_lines = self.subagent_tail_lines.clone();
         let display_statuses = display_status_lines(&self.projection.display);
         let display_widgets = self
             .projection
@@ -4672,7 +4714,8 @@ impl Render for SessionView {
             .size_full()
             .relative()
             .capture_key_down(cx.listener(|this, event, window, cx| {
-                let handled = this.handle_handoff_key(event, cx)
+                let handled = this.handle_subagent_modal_key(event, cx)
+                    || this.handle_handoff_key(event, cx)
                     || this.handle_compact_key(event, cx)
                     || this.handle_about_key(event, cx)
                     || this.handle_rename_key(event, cx)
@@ -4930,42 +4973,6 @@ impl Render for SessionView {
                                 } else {
                                     "Auto-retry in progress…".to_owned()
                                 }),
-                        )
-                    })
-                    .when(!subagent_strip.is_empty(), |parent| {
-                        parent.child(
-                            h_flex()
-                                .w_full()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_1()
-                                .px_3()
-                                .py_1()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .bg(theme.sidebar)
-                                .child(
-                                    Label::new("Agents")
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(theme.muted_foreground),
-                                )
-                                .children(subagent_strip.into_iter().enumerate().map(
-                                    |(ix, (_id, summary))| {
-                                        Button::new(("subagent-strip-agent", ix))
-                                            .label(truncate_subagent_text(&summary, 68))
-                                            .small()
-                                            .ghost()
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, _window, cx| {
-                                                    this.request_inspector_focus(
-                                                        PaletteActionId::ToggleAgents,
-                                                        cx,
-                                                    );
-                                                },
-                                            ))
-                                    },
-                                )),
                         )
                     })
                     .child({
@@ -5884,6 +5891,121 @@ impl Render for SessionView {
                             ),
                     ),
             )
+            .when(self.subagent_modal_open, |parent| {
+                let (agent_id, agent_summary) = subagent_modal_agent.unwrap_or_else(|| {
+                    (
+                        "Unavailable".to_owned(),
+                        "The selected agent is no longer present in OMP's snapshot.".to_owned(),
+                    )
+                });
+                parent.child(
+                    div()
+                        .id("subagent-modal-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(theme.overlay)
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                            this.close_subagent_modal(cx);
+                        }))
+                        .child(
+                            v_flex()
+                                .id("subagent-modal-panel")
+                                .w(px(720.))
+                                .max_w(gpui::relative(0.92))
+                                .max_h(gpui::relative(0.74))
+                                .gap_3()
+                                .p_4()
+                                .rounded_lg()
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.popover)
+                                .shadow_xl()
+                                .cursor_default()
+                                .on_click(cx.listener(|_this, _: &ClickEvent, _w, cx| {
+                                    cx.stop_propagation();
+                                }))
+                                .child(
+                                    h_flex()
+                                        .w_full()
+                                        .items_start()
+                                        .justify_between()
+                                        .gap_3()
+                                        .child(
+                                            v_flex()
+                                                .min_w_0()
+                                                .gap_1()
+                                                .child(
+                                                    Label::new("Subagent work")
+                                                        .text_lg()
+                                                        .font_weight(
+                                                            gpui::FontWeight::SEMIBOLD,
+                                                        ),
+                                                )
+                                                .child(
+                                                    Label::new(agent_summary)
+                                                        .text_sm()
+                                                        .text_color(theme.muted_foreground),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .font_family(
+                                                            theme.mono_font_family.clone(),
+                                                        )
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(agent_id),
+                                                ),
+                                        )
+                                        .child(
+                                            Button::new("subagent-modal-close")
+                                                .label("Close")
+                                                .small()
+                                                .ghost()
+                                                .on_click(cx.listener(
+                                                    |this, _: &ClickEvent, _w, cx| {
+                                                        this.close_subagent_modal(cx);
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(Separator::horizontal())
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .overflow_y_scrollbar()
+                                        .gap_2()
+                                        .child(
+                                            Label::new(subagent_modal_status)
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground),
+                                        )
+                                        .when(subagent_modal_lines.is_empty(), |body| {
+                                            body.child(
+                                                Label::new("No work messages to display yet.")
+                                                    .text_sm()
+                                                    .text_color(theme.muted_foreground),
+                                            )
+                                        })
+                                        .children(subagent_modal_lines.into_iter().map(|line| {
+                                            div()
+                                                .w_full()
+                                                .p_2()
+                                                .rounded_sm()
+                                                .bg(theme.secondary)
+                                                .text_xs()
+                                                .font_family(theme.mono_font_family.clone())
+                                                .child(line)
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .when(self.palette_open, |parent| {
                 parent.child(
                     div()
@@ -6430,86 +6552,19 @@ pub(crate) fn next_subagent_subscription_level(
     }
 }
 
-pub(crate) fn subagent_strip_rows(
+pub(crate) fn retained_subagent_selection(
+    selected: Option<&str>,
     snapshots: &[serde_json::Value],
-    raw_events: &[serde_json::Value],
-) -> Vec<(String, String)> {
-    if !snapshots.is_empty() {
-        return snapshots
-            .iter()
-            .enumerate()
-            .map(|(ix, snapshot)| {
-                let id = subagent_snapshot_id(snapshot)
-                    .map_or_else(|| format!("agent-{}", ix + 1), str::to_owned);
-                (
-                    id,
-                    truncate_subagent_text(&subagent_snapshot_summary(snapshot), 80),
-                )
-            })
-            .take(8)
-            .collect();
-    }
-
-    let mut seen = HashSet::new();
-    raw_events
-        .iter()
-        .rev()
-        .enumerate()
-        .filter_map(|(ix, event)| {
-            let id = subagent_payload_id(event)
-                .map_or_else(|| format!("agent-event-{}", ix + 1), str::to_owned);
-            seen.insert(id.clone()).then(|| {
-                (
-                    id,
-                    truncate_subagent_text(&subagent_payload_summary(event), 80),
-                )
-            })
-        })
-        .take(8)
-        .collect()
-}
-
-pub(crate) fn subagent_payload_id(payload: &serde_json::Value) -> Option<&str> {
-    payload
-        .get("subagentId")
-        .or_else(|| payload.get("agentId"))
-        .or_else(|| payload.get("id"))
-        .or_else(|| payload.get("name"))
-        .and_then(serde_json::Value::as_str)
-        .or_else(|| {
-            payload
-                .get("subagent")
-                .and_then(|subagent| subagent.get("id"))
-                .and_then(serde_json::Value::as_str)
-        })
-}
-
-#[allow(clippy::too_many_lines)] // GPUI render fns are declaratively dense; splitting hurts readability.
-pub(crate) fn subagent_payload_summary(payload: &serde_json::Value) -> String {
-    let kind = payload
-        .get("type")
-        .or_else(|| payload.get("event"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("subagent");
-    let name = payload
-        .get("name")
-        .or_else(|| payload.get("agent"))
-        .or_else(|| payload.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("?");
-    let detail = payload
-        .get("description")
-        .or_else(|| payload.get("status"))
-        .or_else(|| payload.get("message"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .chars()
-        .take(72)
-        .collect::<String>();
-    if detail.is_empty() {
-        format!("{kind} {name}")
-    } else {
-        format!("{kind} {name}: {detail}")
+) -> Option<String> {
+    match selected {
+        Some(selected)
+            if snapshots
+                .iter()
+                .any(|snapshot| subagent_snapshot_id(snapshot) == Some(selected)) =>
+        {
+            Some(selected.to_owned())
+        }
+        _ => None,
     }
 }
 
