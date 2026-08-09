@@ -450,6 +450,7 @@ Keymap (final, D4): Cmd/Ctrl+K palette · Cmd/Ctrl+B rail · Cmd/Ctrl+1..9 sessi
 
 ## 12. Appendix: sources
 
+- **Living parity gap plan (post-D4):** [`docs/parity-plan.md`](docs/parity-plan.md) — OMP 17.2.11 feature inventory vs Pimiento, remaining waves A–E. Prefer that doc for “what’s still missing”; this PLAN remains doctrine + original milestone canon.
 - **OMP** (MIT): https://github.com/can1357/oh-my-pi — `docs/rpc.md` (wire contract), `packages/coding-agent/src/modes/rpc/rpc-types.ts` (canonical types), `rpc-frame.ts` (chunk decoder), tests `packages/coding-agent/test/rpc-*.test.ts`; Python reference client `docs/python/omp-rpc/`. Install: https://omp.sh
 - **GPUI** (Apache-2.0): https://www.gpui.rs/ · https://docs.rs/gpui · `crates/gpui/src/elements/list.rs` (variable-height list) · `crates/gpui/examples/` (input, uniform_list, list, window). Zed's `ui`/`editor`/`terminal_view`/`agent_ui` are GPL-3.0-or-later: patterns only, never code.
 - **gpui-component** (Apache-2.0): https://github.com/longbridge/gpui-component · https://longbridge.github.io/gpui-component/docs/getting-started — 60+ controls incl. Markdown, virtualized list/table, dock, theming, Rope/Tree-sitter editor.
