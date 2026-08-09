@@ -846,10 +846,7 @@ fn hydrate_get_state_promotes_queue_and_auto_fields() {
     }));
 
     assert_eq!(p.state.steering_mode.as_deref(), Some("all"));
-    assert_eq!(
-        p.state.follow_up_mode.as_deref(),
-        Some("one-at-a-time")
-    );
+    assert_eq!(p.state.follow_up_mode.as_deref(), Some("one-at-a-time"));
     assert_eq!(p.state.interrupt_mode.as_deref(), Some("wait"));
     assert_eq!(p.state.auto_compaction_enabled, Some(true));
     assert_eq!(p.state.auto_retry_enabled, Some(false));
