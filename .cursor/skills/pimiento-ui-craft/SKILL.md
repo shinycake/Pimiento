@@ -24,13 +24,16 @@ Apply when changing Pimiento visuals or chrome. Companion skills (install global
 
 | Surface | Recipe |
 |---------|--------|
-| Docked (rail, composer band, inspector) | Tone (`sidebar` / `secondary`) + hairline `border` — **no shadow** |
+| Docked (rail, inspector) | Tone (`sidebar` / `secondary`) + hairline `border` — **no shadow** |
+| Composer band | Elevated island: `secondary`/`popover` fill + top hairline + **`shadow_md`/`lg` only on this band** (T4 float *feel*, still docked for list stability) |
 | Floating (model picker, palette, About, slash) | `popover` + `border` + `radius`/`rounded_lg` + **`shadow_lg` / `shadow_xl`** over `overlay` |
-| Selected rail row | `secondary` / `sidebar_accent` wash + `rounded_sm` — **no** primary accent bar |
-| Tool / inset rows | `secondary` (PLAN “elevated”; do not invent an elevated token) |
+| Selected rail row | `secondary` / `sidebar_accent` wash + `rounded_sm` — **no** primary accent bar / `border_l_2` |
+| Tool / inset / action-group rows | `secondary` (PLAN “elevated”) + hairline border |
 
-No purple glow, neon rings, or shadows on docked chrome. Prefer gpui-component
+No purple glow, neon rings, or shadows on docked chrome (composer band is the sole docked exception). Prefer gpui-component
 popover/dialog primitives when wiring is clean (placement + Wayland).
+
+**Brand / status:** see `docs/parity-plan.md` §3 — paprika identity + ember action (never T4 Pi Pink); status = dot+label taxonomy; one token module owns raw colors.
 
 ## Doctrine (do not violate)
 
