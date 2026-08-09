@@ -36,6 +36,95 @@ pub(crate) struct PaletteEntry {
     pub(crate) hint: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NativeSlashEntry {
+    pub(crate) name: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) action: PaletteActionId,
+}
+
+pub(crate) fn native_slash_catalog() -> &'static [NativeSlashEntry] {
+    &[
+        NativeSlashEntry {
+            name: "/fork",
+            description: "Branch from a prior turn in a new Pimiento tab",
+            action: PaletteActionId::BranchSession,
+        },
+        NativeSlashEntry {
+            name: "/branch",
+            description: "Branch from a prior turn in a new Pimiento tab",
+            action: PaletteActionId::BranchSession,
+        },
+        NativeSlashEntry {
+            name: "/new",
+            description: "Open a new session tab",
+            action: PaletteActionId::NewSession,
+        },
+        NativeSlashEntry {
+            name: "/resume",
+            description: "Open the sessions launcher",
+            action: PaletteActionId::SessionsLauncher,
+        },
+        NativeSlashEntry {
+            name: "/login",
+            description: "Open the OMP login-provider picker",
+            action: PaletteActionId::LoginProviders,
+        },
+        NativeSlashEntry {
+            name: "/setup",
+            description: "Open the OMP login-provider picker",
+            action: PaletteActionId::LoginProviders,
+        },
+        NativeSlashEntry {
+            name: "/switch",
+            description: "Open the model picker",
+            action: PaletteActionId::ToggleModels,
+        },
+        NativeSlashEntry {
+            name: "/agents",
+            description: "Open agents in the Context inspector",
+            action: PaletteActionId::ToggleAgents,
+        },
+        NativeSlashEntry {
+            name: "/hotkeys",
+            description: "Show Pimiento keyboard shortcuts",
+            action: PaletteActionId::About,
+        },
+        NativeSlashEntry {
+            name: "/help",
+            description: "Show Pimiento help and keyboard shortcuts",
+            action: PaletteActionId::About,
+        },
+        NativeSlashEntry {
+            name: "/handoff",
+            description: "Hand off the authoritative session to the OMP TUI",
+            action: PaletteActionId::Handoff,
+        },
+        NativeSlashEntry {
+            name: "/theme",
+            description: "Open the Pimiento theme picker",
+            action: PaletteActionId::ToggleTheme,
+        },
+    ]
+}
+
+pub(crate) fn filter_native_slash_entries(query: &str) -> Vec<&'static NativeSlashEntry> {
+    let query = query.trim().to_ascii_lowercase();
+    let query = query.strip_prefix('/').unwrap_or(&query);
+    native_slash_catalog()
+        .iter()
+        .filter(|entry| {
+            query.is_empty()
+                || entry
+                    .name
+                    .trim_start_matches('/')
+                    .to_ascii_lowercase()
+                    .contains(query)
+                || entry.description.to_ascii_lowercase().contains(query)
+        })
+        .collect()
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "static command catalog; splitting would obscure the action list"

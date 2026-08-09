@@ -52,6 +52,7 @@ pub(crate) struct SlashSuggestion {
 #[derive(Debug, Clone)]
 pub(crate) enum CommandPaletteEntry {
     Action(&'static PaletteEntry),
+    NativeSlash(&'static NativeSlashEntry),
     Slash {
         suggestion: SlashSuggestion,
         aliases: Vec<String>,
@@ -62,6 +63,7 @@ impl CommandPaletteEntry {
     pub(crate) fn title(&self) -> &str {
         match self {
             Self::Action(entry) => entry.label,
+            Self::NativeSlash(entry) => entry.name,
             Self::Slash { suggestion, .. } => &suggestion.title,
         }
     }
@@ -69,8 +71,53 @@ impl CommandPaletteEntry {
     pub(crate) fn description(&self) -> &str {
         match self {
             Self::Action(entry) => entry.hint,
+            Self::NativeSlash(entry) => entry.description,
             Self::Slash { suggestion, .. } => &suggestion.description,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommandPaletteRowData {
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) metadata: String,
+    pub(crate) usage: Option<String>,
+}
+
+pub(crate) fn command_palette_row_data(entry: &CommandPaletteEntry) -> CommandPaletteRowData {
+    let (metadata, usage) = match entry {
+        CommandPaletteEntry::Action(_) => ("Pimiento command".to_owned(), None),
+        CommandPaletteEntry::NativeSlash(_) => {
+            ("Pimiento action · runs immediately".to_owned(), None)
+        }
+        CommandPaletteEntry::Slash {
+            suggestion,
+            aliases,
+        } => {
+            let mut metadata = "OMP slash command · selection inserts; Enter sends".to_owned();
+            if let Some(source) = suggestion.source.as_deref() {
+                metadata.push_str(" · ");
+                metadata.push_str(source);
+            }
+            if !aliases.is_empty() {
+                metadata.push_str(" · aliases ");
+                metadata.push_str(&aliases.join(", "));
+            }
+            (
+                metadata,
+                suggestion
+                    .usage_hint
+                    .as_ref()
+                    .map(|hint| format!("Usage: {hint}")),
+            )
+        }
+    };
+    CommandPaletteRowData {
+        title: entry.title().to_owned(),
+        description: entry.description().to_owned(),
+        metadata,
+        usage,
     }
 }
 
@@ -3453,6 +3500,9 @@ impl SessionView {
             CommandPaletteEntry::Action(entry) => {
                 self.run_palette_action(entry.id, window, cx);
             }
+            CommandPaletteEntry::NativeSlash(entry) => {
+                self.run_palette_action(entry.action, window, cx);
+            }
             CommandPaletteEntry::Slash { suggestion, .. } => {
                 self.close_palette(cx);
                 self.accept_slash_command(&suggestion, cx);
@@ -4868,8 +4918,21 @@ pub(crate) fn filter_command_palette_entries(
         .into_iter()
         .map(CommandPaletteEntry::Action)
         .collect::<Vec<_>>();
+    let action_count = entries.len();
+    entries.extend(
+        filter_native_slash_entries(&query)
+            .into_iter()
+            .map(CommandPaletteEntry::NativeSlash),
+    );
+    let native_names = native_slash_catalog()
+        .iter()
+        .map(|entry| entry.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
 
     for command in commands {
+        if native_names.contains(&command.name.to_ascii_lowercase()) {
+            continue;
+        }
         let aliases = command.aliases.clone();
         let top_level_matches = query.is_empty()
             || palette_text_matches(
@@ -4913,6 +4976,13 @@ pub(crate) fn filter_command_palette_entries(
                 });
             }
         }
+    }
+
+    // With no query, lead with OMP commands so they are immediately
+    // discoverable instead of sitting below the full Pimiento action catalog.
+    // Once the user types, static exact matches retain first position.
+    if query.is_empty() {
+        entries.rotate_left(action_count);
     }
 
     entries
@@ -5329,7 +5399,10 @@ impl Render for SessionView {
                 self.theme_picker_selected.min(theme_picker_items.len() - 1);
         }
         let theme_picker_selected = self.theme_picker_selected;
-        let theme_selection = cx.global::<ThemeSelectionState>().0.clone();
+        let theme_selection = self
+            .theme_picker_opening_selection
+            .clone()
+            .unwrap_or_else(|| cx.global::<ThemeSelectionState>().0.clone());
         let pending_revert = self.pending_revert.clone();
         let transcript_empty = self.projection.transcript.is_empty();
         let subagent_modal_agent = self.selected_subagent_id.as_ref().and_then(|selected| {
@@ -5341,16 +5414,6 @@ impl Render for SessionView {
         let subagent_modal_status = self.subagent_modal_status.clone();
         let subagent_modal_lines = self.subagent_tail_lines.clone();
         let display_statuses = display_status_lines(&self.projection.display);
-        let display_widgets = self
-            .projection
-            .display
-            .widgets
-            .iter()
-            .map(|(key, raw)| {
-                let lines = display_widget_lines(raw);
-                (key.clone(), lines)
-            })
-            .collect::<Vec<_>>();
         let fast_supported = current_model.is_some_and(|choice| {
             model_supports_fast_mode(&choice.provider, choice.api.as_deref(), &choice.id)
         }) || self.projection.state.model.as_deref().is_some_and(|label| {
@@ -5514,19 +5577,6 @@ impl Render for SessionView {
                                                     )
                                             })
                                             .child(
-                                                Button::new("theme-actions")
-                                                    .icon(IconName::Palette)
-                                                    .label("Theme")
-                                                    .tooltip("Choose theme")
-                                                    .small()
-                                                    .ghost()
-                                                    .on_click(cx.listener(
-                                                        |this, _: &ClickEvent, _window, cx| {
-                                                            this.open_theme_picker(cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
                                                 Button::new("more-actions")
                                                     .icon(IconName::Ellipsis)
                                                     .tooltip("Command palette (⌘K)")
@@ -5555,40 +5605,6 @@ impl Render for SessionView {
                                                 )))
                                                     .text_xs()
                                                     .text_color(theme.muted_foreground)
-                                            },
-                                        )),
-                                )
-                            })
-                            .when(!display_widgets.is_empty(), |bar| {
-                                bar.child(
-                                    v_flex()
-                                        .w_full()
-                                        .px_3()
-                                        .pb_2()
-                                        .gap_1()
-                                        .children(display_widgets.into_iter().map(
-                                            |(key, lines)| {
-                                                v_flex()
-                                                    .w_full()
-                                                    .gap_0p5()
-                                                    .child(
-                                                        Label::new(soft_wrap_dynamic_text(&format!(
-                                                            "widget:{key}"
-                                                        )))
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground),
-                                                    )
-                                                    .when(lines.is_empty(), |slot| {
-                                                        slot.child(
-                                                            Label::new("(empty)")
-                                                                .text_xs()
-                                                                .text_color(theme.muted_foreground),
-                                                        )
-                                                    })
-                                                    .children(lines.into_iter().map(|line| {
-                                                        Label::new(soft_wrap_dynamic_text(&line))
-                                                            .text_xs()
-                                                    }))
                                             },
                                         )),
                                 )
@@ -6748,6 +6764,7 @@ impl Render for SessionView {
                                         .children(theme_picker_items.iter().enumerate().map(
                                             |(ix, item)| {
                                                 let item = item.clone();
+                                                let item_for_hover = item.clone();
                                                 let selected = ix == theme_picker_selected;
                                                 let active = theme_picker_item_is_active(
                                                     &item,
@@ -6778,6 +6795,7 @@ impl Render for SessionView {
                                                     .id(("theme-picker-entry", ix))
                                                     .w_full()
                                                     .min_h(px(44.))
+                                                    .flex_shrink_0()
                                                     .items_start()
                                                     .gap_2()
                                                     .px_3()
@@ -6787,7 +6805,19 @@ impl Render for SessionView {
                                                     .when(selected, |row| {
                                                         row.bg(theme.secondary)
                                                     })
-                                                    .hover(|row| row.bg(theme.secondary_hover))
+                                                    .on_hover(cx.listener(
+                                                        move |this, hovered, window, cx| {
+                                                            if *hovered {
+                                                                this.theme_picker_selected = ix;
+                                                                this.preview_theme_picker_item(
+                                                                    &item_for_hover,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                                cx.notify();
+                                                            }
+                                                        },
+                                                    ))
                                                     .child(
                                                         div()
                                                             .w(px(18.))
@@ -6880,8 +6910,10 @@ impl Render for SessionView {
                             v_flex()
                                 .id("command-palette-panel")
                                 .w_full()
-                                .max_w(px(480.))
-                                .max_h(px(420.))
+                                .max_w(px(720.))
+                                .h(gpui::relative(0.8))
+                                .max_h(px(680.))
+                                .min_h(px(0.))
                                 .gap_1()
                                 .p_3()
                                 .rounded_lg()
@@ -6936,7 +6968,8 @@ impl Render for SessionView {
                                 .child(
                                     v_flex()
                                         .w_full()
-                                        .max_h(px(340.))
+                                        .flex_1()
+                                        .min_h(px(0.))
                                         .overflow_y_scrollbar()
                                         .gap_1()
                                         .children(
@@ -6944,47 +6977,13 @@ impl Render for SessionView {
                                                 |(ix, entry)| {
                                                     let entry = entry.clone();
                                                     let selected = ix == palette_selected;
-                                                    let title = entry.title().to_owned();
-                                                    let description =
-                                                        entry.description().to_owned();
-                                                    let (metadata, usage) = match &entry {
-                                                        CommandPaletteEntry::Action(_) => (
-                                                            "Pimiento command".to_owned(),
-                                                            None,
-                                                        ),
-                                                        CommandPaletteEntry::Slash {
-                                                            suggestion,
-                                                            aliases,
-                                                        } => {
-                                                            let mut metadata =
-                                                                "Slash command".to_owned();
-                                                            if let Some(source) =
-                                                                suggestion.source.as_deref()
-                                                            {
-                                                                metadata.push_str(" · ");
-                                                                metadata.push_str(source);
-                                                            }
-                                                            if !aliases.is_empty() {
-                                                                metadata.push_str(" · aliases ");
-                                                                metadata.push_str(
-                                                                    &aliases.join(", "),
-                                                                );
-                                                            }
-                                                            (
-                                                                metadata,
-                                                                suggestion
-                                                                    .usage_hint
-                                                                    .as_ref()
-                                                                    .map(|hint| {
-                                                                        format!("Usage: {hint}")
-                                                                    }),
-                                                            )
-                                                        }
-                                                    };
+                                                    let row_data =
+                                                        command_palette_row_data(&entry);
                                                     v_flex()
                                                         .id(("palette-entry", ix))
                                                         .w_full()
                                                         .min_h(px(44.))
+                                                        .flex_shrink_0()
                                                         .gap_0p5()
                                                         .px_3()
                                                         .py_2()
@@ -6993,25 +6992,32 @@ impl Render for SessionView {
                                                         .when(selected, |row| {
                                                             row.bg(theme.secondary)
                                                         })
-                                                        .hover(|row| {
-                                                            row.bg(theme.secondary_hover)
-                                                        })
+                                                        .on_hover(cx.listener(
+                                                            move |this, hovered, _window, cx| {
+                                                                if *hovered {
+                                                                    this.palette_selected = ix;
+                                                                    cx.notify();
+                                                                }
+                                                            },
+                                                        ))
                                                         .child(
                                                             div()
                                                                 .w_full()
                                                                 .text_sm()
                                                                 .child(soft_wrap_dynamic_text(
-                                                                    &title,
+                                                                    &row_data.title,
                                                                 )),
                                                         )
                                                         .child(
-                                                            Label::new(metadata)
+                                                            Label::new(row_data.metadata)
                                                                 .text_xs()
                                                                 .text_color(
                                                                     theme.muted_foreground,
                                                                 ),
                                                         )
-                                                        .when(!description.is_empty(), |row| {
+                                                        .when(
+                                                            !row_data.description.is_empty(),
+                                                            |row| {
                                                             row.child(
                                                                 div()
                                                                     .w_full()
@@ -7021,12 +7027,13 @@ impl Render for SessionView {
                                                                     )
                                                                     .child(
                                                                         soft_wrap_dynamic_text(
-                                                                            &description,
+                                                                            &row_data.description,
                                                                         ),
                                                                     ),
                                                             )
-                                                        })
-                                                        .when_some(usage, |row, usage| {
+                                                        },
+                                                        )
+                                                        .when_some(row_data.usage, |row, usage| {
                                                             row.child(
                                                                 div()
                                                                     .w_full()

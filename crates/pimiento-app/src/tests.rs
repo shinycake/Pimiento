@@ -712,6 +712,47 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
+fn native_slash_catalog_maps_only_supported_gui_actions() {
+    let mappings = native_slash_catalog()
+        .iter()
+        .map(|entry| (entry.name, entry.action))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        mappings,
+        vec![
+            ("/fork", PaletteActionId::BranchSession),
+            ("/branch", PaletteActionId::BranchSession),
+            ("/new", PaletteActionId::NewSession),
+            ("/resume", PaletteActionId::SessionsLauncher),
+            ("/login", PaletteActionId::LoginProviders),
+            ("/setup", PaletteActionId::LoginProviders),
+            ("/switch", PaletteActionId::ToggleModels),
+            ("/agents", PaletteActionId::ToggleAgents),
+            ("/hotkeys", PaletteActionId::About),
+            ("/help", PaletteActionId::About),
+            ("/handoff", PaletteActionId::Handoff),
+            ("/theme", PaletteActionId::ToggleTheme),
+        ]
+    );
+}
+
+#[test]
+fn native_slash_filter_matches_slash_name_and_description() {
+    assert_eq!(filter_native_slash_entries("/fork")[0].name, "/fork");
+    assert!(
+        filter_native_slash_entries("prior turn")
+            .iter()
+            .any(|entry| entry.name == "/fork")
+    );
+    assert!(
+        filter_native_slash_entries("keyboard shortcuts")
+            .iter()
+            .any(|entry| entry.name == "/hotkeys")
+    );
+    assert!(filter_native_slash_entries("unsupported-tui-command").is_empty());
+}
+
+#[test]
 fn mount_notices_are_detected_without_inventing_content() {
     assert!(notice_looks_like_mount_event(
         "cli_8: mounted mcp_node_repl_js, mcp_node_repl_js.reset"
@@ -1460,6 +1501,10 @@ fn command_palette_combines_static_actions_with_every_top_level_slash_command() 
     ])));
     let entries = filter_command_palette_entries(&commands, "");
 
+    assert!(matches!(
+        entries.first(),
+        Some(CommandPaletteEntry::NativeSlash(entry)) if entry.name == "/fork"
+    ));
     assert!(entries.iter().any(|entry| matches!(
         entry,
         CommandPaletteEntry::Action(action)
@@ -1469,10 +1514,75 @@ fn command_palette_combines_static_actions_with_every_top_level_slash_command() 
         .iter()
         .filter_map(|entry| match entry {
             CommandPaletteEntry::Slash { suggestion, .. } => Some(suggestion.title.as_str()),
-            CommandPaletteEntry::Action(_) => None,
+            CommandPaletteEntry::Action(_) | CommandPaletteEntry::NativeSlash(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(slash_titles, vec!["/mcp", "/future-command"]);
+}
+
+#[test]
+fn command_palette_native_fork_deduplicates_dynamic_fork() {
+    let commands = parse_slash_commands(Some(&serde_json::json!([
+        {
+            "name": "fork",
+            "description": "TUI fork command exposed unexpectedly"
+        },
+        {
+            "name": "future-command",
+            "description": "Still dynamic"
+        }
+    ])));
+    let entries = filter_command_palette_entries(&commands, "/fork");
+    assert_eq!(entries.len(), 1);
+    assert!(matches!(
+        entries[0],
+        CommandPaletteEntry::NativeSlash(entry)
+            if entry.name == "/fork" && entry.action == PaletteActionId::BranchSession
+    ));
+    assert!(!entries.iter().any(|entry| {
+        matches!(
+            entry,
+            CommandPaletteEntry::Slash { suggestion, .. } if suggestion.title == "/fork"
+        )
+    }));
+}
+
+#[test]
+fn command_palette_row_data_distinguishes_native_execution_from_dynamic_insertion() {
+    let native = CommandPaletteEntry::NativeSlash(
+        native_slash_catalog()
+            .iter()
+            .find(|entry| entry.name == "/fork")
+            .expect("native fork"),
+    );
+    let native_row = command_palette_row_data(&native);
+    assert_eq!(native_row.title, "/fork");
+    assert_eq!(native_row.metadata, "Pimiento action · runs immediately");
+    assert_eq!(native_row.usage, None);
+
+    let dynamic = CommandPaletteEntry::Slash {
+        suggestion: SlashSuggestion {
+            completion_text: "/mcp reconnect ".into(),
+            title: "/mcp reconnect".into(),
+            description: "Reconnect a server".into(),
+            usage_hint: Some("<server>".into()),
+            source: Some("extension".into()),
+            expects_input: true,
+            is_subcommand: true,
+        },
+        aliases: vec!["/servers".into()],
+    };
+    let dynamic_row = command_palette_row_data(&dynamic);
+    assert_eq!(dynamic_row.title, "/mcp reconnect");
+    assert_eq!(dynamic_row.description, "Reconnect a server");
+    assert!(
+        dynamic_row
+            .metadata
+            .starts_with("OMP slash command · selection inserts; Enter sends")
+    );
+    assert!(dynamic_row.metadata.contains("extension"));
+    assert!(dynamic_row.metadata.contains("/servers"));
+    assert_eq!(dynamic_row.usage.as_deref(), Some("Usage: <server>"));
 }
 
 #[test]
