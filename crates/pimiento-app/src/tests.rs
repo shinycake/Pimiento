@@ -1036,6 +1036,55 @@ fn bundled_theme_asset_contains_two_complete_light_dark_families() {
 }
 
 #[test]
+fn bundled_custom_theme_catalog_contains_zed_defaults_catppuccin_and_dracula() {
+    let zed: gpui_component::ThemeSet =
+        serde_json::from_str(ZED_DEFAULT_THEMES).expect("Zed themes parse");
+    let community: gpui_component::ThemeSet =
+        serde_json::from_str(COMMUNITY_THEMES).expect("community themes parse");
+    let zed_names = zed
+        .themes
+        .iter()
+        .map(|theme| theme.name.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+    let community_names = community
+        .themes
+        .iter()
+        .map(|theme| theme.name.as_ref())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(zed.themes.len(), 11);
+    for name in [
+        "One Dark",
+        "One Light",
+        "Ayu Dark",
+        "Ayu Light",
+        "Ayu Mirage",
+        "Gruvbox Dark",
+        "Gruvbox Dark Hard",
+        "Gruvbox Dark Soft",
+        "Gruvbox Light",
+        "Gruvbox Light Hard",
+        "Gruvbox Light Soft",
+    ] {
+        assert!(zed_names.contains(name), "missing Zed theme {name}");
+    }
+
+    assert_eq!(community.themes.len(), 5);
+    for name in [
+        "Catppuccin Latte",
+        "Catppuccin Frappe",
+        "Catppuccin Macchiato",
+        "Catppuccin Mocha",
+        "Dracula",
+    ] {
+        assert!(
+            community_names.contains(name),
+            "missing community theme {name}"
+        );
+    }
+}
+
+#[test]
 fn theme_picker_search_and_selected_state_cover_appearance_and_names() {
     let themes = vec![
         RegisteredThemeChoice {

@@ -6,6 +6,14 @@ use std::rc::Rc;
 pub(crate) const DEFAULT_LIGHT_THEME: &str = "Quiet Pepper Light";
 pub(crate) const DEFAULT_DARK_THEME: &str = "Quiet Pepper Dark";
 pub(crate) const BUNDLED_THEMES: &str = include_str!("pimiento-themes.json");
+pub(crate) const ZED_DEFAULT_THEMES: &str = include_str!("zed-default-themes.json");
+pub(crate) const COMMUNITY_THEMES: &str = include_str!("community-themes.json");
+
+const BUNDLED_THEME_SETS: [(&str, &str); 3] = [
+    ("Pimiento", BUNDLED_THEMES),
+    ("Zed defaults", ZED_DEFAULT_THEMES),
+    ("community", COMMUNITY_THEMES),
+];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -100,8 +108,10 @@ pub(crate) fn themes_directory(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn register_bundled_themes(cx: &mut App) {
-    if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(BUNDLED_THEMES) {
-        eprintln!("Pimiento bundled themes could not be loaded: {error}");
+    for (catalog, themes) in BUNDLED_THEME_SETS {
+        if let Err(error) = ThemeRegistry::global_mut(cx).load_themes_from_str(themes) {
+            eprintln!("Pimiento {catalog} themes could not be loaded: {error}");
+        }
     }
 }
 
