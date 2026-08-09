@@ -272,9 +272,15 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 
 - The About overlay includes a compact keymap cheat-sheet (palette, sessions rail, inspector, new/close, send, abort). Presentation-only.
 
-## Window appearance sync — 2026-08-08
+## Quiet Pepper Console — 2026-08-09
 
-- Explicit Light/Dark theme preferences call GPUI `App::set_window_appearance` so macOS native titlebar chrome matches the content theme. System preference clears the override (`None`) and resumes OS follow.
+- Brand tokens live in `crates/pimiento-app/src/tokens.rs` (paprika identity / ember action). `apply_pimiento_brand` remaps gpui-component `primary`/`ring`/`accent` after every theme preference change.
+- Status pills use a fixed taxonomy (working / awaiting / busy / idle / error) via `Tag::custom`, not brand paprika.
+- Composer band uses `shadow_lg` as the sole docked elevation exception (parity-plan Wave U2).
+- Inspector **Queue** section writes `set_steering_mode` / `set_follow_up_mode` / `set_interrupt_mode` / `set_auto_compaction` / `set_auto_retry`. Promoted `RuntimeState` fields hydrate from `get_state` camelCase keys; optimistic UI reverts on RPC failure.
+- `queuedMessageCount` surfaces as a composer `queue:N` chip when > 0 and in inspector extras.
+
+
 
 ## Rail persistence + streaming polish — 2026-08-08
 
