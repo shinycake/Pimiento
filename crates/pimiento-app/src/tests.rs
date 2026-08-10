@@ -929,6 +929,30 @@ fn rail_cwd_label_uses_tilde_and_end_truncates() {
 }
 
 #[test]
+fn sidebar_width_clamps_respect_window_and_bounds() {
+    assert!((clamp_rail_width(100.0, 1200.0) - RAIL_WIDTH_MIN).abs() < f32::EPSILON);
+    assert!((clamp_rail_width(500.0, 1200.0) - RAIL_WIDTH_MAX).abs() < f32::EPSILON);
+    assert!((clamp_rail_width(220.0, 1200.0) - 220.0).abs() < f32::EPSILON);
+    assert!((clamp_inspector_width(100.0, 1200.0) - INSPECTOR_WIDTH_MIN).abs() < f32::EPSILON);
+    assert!((clamp_inspector_width(500.0, 1200.0) - INSPECTOR_WIDTH_MAX).abs() < f32::EPSILON);
+    let narrow = clamp_rail_width(300.0, 500.0);
+    assert!(narrow <= 500.0 - SIDEBAR_CONTENT_MIN + 0.1);
+}
+
+#[test]
+fn subagent_snapshot_title_and_meta_split_wire_fields() {
+    let snapshot = serde_json::json!({
+        "id": "CoreSrcScout",
+        "agent": "scout",
+        "status": "running",
+        "description": "scan core sources"
+    });
+    assert_eq!(subagent_snapshot_title(&snapshot), "CoreSrcScout");
+    assert_eq!(subagent_snapshot_meta(&snapshot), "scout · running");
+    assert!(subagent_snapshot_summary(&snapshot).contains("CoreSrcScout"));
+}
+
+#[test]
 fn workspace_status_rollup_uses_child_phase_priority() {
     let entry = |ix, phase| RailEntry {
         ix,
@@ -1075,15 +1099,21 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
     assert_eq!(parsed.light_theme, DEFAULT_LIGHT_THEME);
     assert_eq!(parsed.dark_theme, DEFAULT_DARK_THEME);
     assert!(!parsed.rail_collapsed);
+    assert!((parsed.rail_width - default_rail_width()).abs() < f32::EPSILON);
+    assert!((parsed.inspector_width - default_inspector_width()).abs() < f32::EPSILON);
 
     let legacy: PersistedUi =
         serde_json::from_str(r#"{"inspector_open":true}"#).expect("parse legacy ui");
     assert_eq!(legacy.theme, ThemePreference::System);
     assert!(!legacy.rail_collapsed);
+    assert!((legacy.rail_width - default_rail_width()).abs() < f32::EPSILON);
+    assert!((legacy.inspector_width - default_inspector_width()).abs() < f32::EPSILON);
 
     let value = serde_json::to_value(PersistedUi {
         inspector_open: true,
         rail_collapsed: true,
+        rail_width: default_rail_width(),
+        inspector_width: default_inspector_width(),
         theme: ThemePreference::Light,
         light_theme: "Pepperwood Light".into(),
         dark_theme: "Pepperwood Dark".into(),
@@ -1093,6 +1123,13 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
     assert_eq!(value["rail_collapsed"], true);
     assert_eq!(value["light_theme"], "Pepperwood Light");
     assert_eq!(value["dark_theme"], "Pepperwood Dark");
+    assert!((value["rail_width"].as_f64().unwrap_or_default() - f64::from(default_rail_width())).abs() < 0.001);
+    assert!(
+        (value["inspector_width"].as_f64().unwrap_or_default()
+            - f64::from(default_inspector_width()))
+        .abs()
+            < 0.001
+    );
 }
 
 #[test]

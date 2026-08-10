@@ -127,6 +127,12 @@ pub(crate) enum InspectorFocus {
     Agents,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidebarResizeTarget {
+    Rail,
+    Inspector,
+}
+
 // Layout visibility and quit confirmation are independent UI concerns.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct WorkspaceView {
@@ -139,6 +145,9 @@ pub(crate) struct WorkspaceView {
     pub(crate) inspector_open: bool,
     pub(crate) inspector_focus: InspectorFocus,
     pub(crate) tools_expanded: bool,
+    pub(crate) rail_width: f32,
+    pub(crate) inspector_width: f32,
+    pub(crate) sidebar_resize: Option<SidebarResizeTarget>,
     pub(crate) pending_quit_confirm: bool,
     pub(crate) quit_in_progress: bool,
     pub(crate) last_window_title: String,
@@ -164,6 +173,9 @@ impl WorkspaceView {
             active: 0,
             inspector_open,
             rail_collapsed: persistence.load_rail_collapsed(),
+            rail_width: persistence.load_rail_width(),
+            inspector_width: persistence.load_inspector_width(),
+            sidebar_resize: None,
             persistence,
             initial_cwd,
             inspector_focus: InspectorFocus::Session,
@@ -171,6 +183,51 @@ impl WorkspaceView {
             pending_quit_confirm: false,
             quit_in_progress: false,
             last_window_title: String::new(),
+        }
+    }
+
+    pub(crate) fn persist_sidebar_widths(&self) {
+        self.persistence
+            .save_sidebar_widths(self.rail_width, self.inspector_width);
+    }
+
+    pub(crate) fn end_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        if self.sidebar_resize.take().is_some() {
+            self.persist_sidebar_widths();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn handle_sidebar_resize_move(
+        &mut self,
+        event: &gpui::MouseMoveEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.sidebar_resize else {
+            return;
+        };
+        if !event.dragging() {
+            self.end_sidebar_resize(cx);
+            return;
+        }
+        let window_width = f32::from(window.viewport_size().width);
+        match target {
+            SidebarResizeTarget::Rail => {
+                let next = clamp_rail_width(f32::from(event.position.x), window_width);
+                if (next - self.rail_width).abs() > 0.5 {
+                    self.rail_width = next;
+                    cx.notify();
+                }
+            }
+            SidebarResizeTarget::Inspector => {
+                let next =
+                    clamp_inspector_width(window_width - f32::from(event.position.x), window_width);
+                if (next - self.inspector_width).abs() > 0.5 {
+                    self.inspector_width = next;
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -654,15 +711,11 @@ pub(crate) fn render_inspector(
     session: &gpui::Entity<SessionView>,
     focus: InspectorFocus,
     tools_expanded: bool,
+    inspector_width: Pixels,
     window: &mut Window,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let inspector_width = if window.viewport_size().width < px(900.) {
-        px(200.)
-    } else {
-        px(248.)
-    };
     let (
         cwd,
         model,
@@ -752,8 +805,13 @@ pub(crate) fn render_inspector(
                 .subagent_snapshots
                 .iter()
                 .filter_map(|snapshot| {
-                    subagent_snapshot_id(snapshot)
-                        .map(|id| (id.to_owned(), subagent_snapshot_summary(snapshot)))
+                    subagent_snapshot_id(snapshot).map(|id| {
+                        (
+                            id.to_owned(),
+                            subagent_snapshot_title(snapshot),
+                            subagent_snapshot_meta(snapshot),
+                        )
+                    })
                 })
                 .collect::<Vec<_>>(),
             session_view.subagent_drawer_status.clone(),
@@ -789,8 +847,6 @@ pub(crate) fn render_inspector(
         .overflow_y_scrollbar()
         .gap_4()
         .p_3()
-        .border_l_1()
-        .border_color(theme.sidebar_border)
         .bg(theme.sidebar)
         .text_color(theme.sidebar_foreground)
         .child(
@@ -1212,20 +1268,21 @@ pub(crate) fn render_inspector(
         .child(
             v_flex()
                 .w_full()
-                .gap_1()
+                .gap_2()
                 .when(focus == InspectorFocus::Agents, |section| {
                     section.bg(theme.secondary).rounded_sm().p_2()
                 })
                 .child(
                     h_flex()
                         .w_full()
-                        .justify_between()
-                        .items_start()
+                        .items_center()
                         .gap_2()
                         .child(
                             h_flex()
                                 .items_center()
                                 .gap_1()
+                                .flex_1()
+                                .min_w_0()
                                 .child(
                                     Icon::new(IconName::Bot)
                                         .xsmall()
@@ -1239,41 +1296,39 @@ pub(crate) fn render_inspector(
                                 ),
                         )
                         .child(
-                            h_flex()
-                                .items_start()
-                                .flex_wrap()
-                                .justify_end()
-                                .gap_1()
-                                .child(
-                                    Button::new("inspector-agents-subscription")
-                                        .icon(IconName::Network)
-                                        .small()
-                                        .ghost()
-                                        .max_w(gpui::relative(0.72))
-                                        .child(wrapped_button_text(subagent_subscription.clone()))
-                                        .tooltip("Cycle agent event subscription")
-                                        .disabled(!connected)
-                                        .on_click(window.listener_for(
-                                            &subscription_session,
-                                            |this, _: &ClickEvent, _window, cx| {
-                                                this.cycle_subagent_subscription(cx);
-                                            },
-                                        )),
-                                )
-                                .child(
-                                    Button::new("inspector-agents-refresh")
-                                        .icon(IconName::Redo2)
-                                        .tooltip("Refresh agents")
-                                        .small()
-                                        .ghost()
-                                        .disabled(!connected)
-                                        .on_click(window.listener_for(
-                                            &refresh_session,
-                                            |this, _: &ClickEvent, _window, cx| {
-                                                this.refresh_subagents(cx);
-                                            },
-                                        )),
-                                ),
+                            Tag::secondary()
+                                .small()
+                                .child(subagent_subscription.clone()),
+                        )
+                        .child(
+                            Button::new("inspector-agents-subscription")
+                                .icon(IconName::Network)
+                                .tooltip(format!(
+                                    "Cycle subscription (now {subagent_subscription})"
+                                ))
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(window.listener_for(
+                                    &subscription_session,
+                                    |this, _: &ClickEvent, _window, cx| {
+                                        this.cycle_subagent_subscription(cx);
+                                    },
+                                )),
+                        )
+                        .child(
+                            Button::new("inspector-agents-refresh")
+                                .icon(IconName::Redo2)
+                                .tooltip("Refresh agents")
+                                .small()
+                                .ghost()
+                                .disabled(!connected)
+                                .on_click(window.listener_for(
+                                    &refresh_session,
+                                    |this, _: &ClickEvent, _window, cx| {
+                                        this.refresh_subagents(cx);
+                                    },
+                                )),
                         ),
                 )
                 .when(
@@ -1287,20 +1342,63 @@ pub(crate) fn render_inspector(
                         )
                     },
                 )
-                .children(subagent_rows.iter().enumerate().map(|(ix, (id, summary))| {
-                    let id = id.clone();
-                    Button::new(("inspector-agent", ix))
-                        .small()
-                        .w_full()
-                        .ghost()
-                        .child(wrapped_button_text(summary.clone()))
-                        .on_click(window.listener_for(
-                            session,
-                            move |this, _: &ClickEvent, _window, cx| {
-                                this.open_subagent_modal(id.clone(), cx);
-                            },
-                        ))
-                })),
+                .when(
+                    subagent_rows.is_empty() && subagent_status.is_empty(),
+                    |section| {
+                        section.child(
+                            Label::new("No agents yet")
+                                .text_xs()
+                                .text_color(theme.muted_foreground),
+                        )
+                    },
+                )
+                .children(
+                    subagent_rows
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ix, (id, title, meta))| {
+                            let open_id = id.clone();
+                            h_flex()
+                                .id(("inspector-agent", ix))
+                                .w_full()
+                                .items_center()
+                                .gap_2()
+                                .px_2()
+                                .py_1()
+                                .rounded_sm()
+                                .cursor_pointer()
+                                .hover(|row| row.bg(theme.secondary))
+                                .child(
+                                    v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .gap_0()
+                                        .child(
+                                            Label::new(soft_wrap_dynamic_text(&title))
+                                                .text_sm()
+                                                .font_weight(gpui::FontWeight::MEDIUM)
+                                                .w_full(),
+                                        )
+                                        .child(
+                                            Label::new(soft_wrap_dynamic_text(&meta))
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .w_full(),
+                                        ),
+                                )
+                                .child(
+                                    Icon::new(IconName::ExternalLink)
+                                        .xsmall()
+                                        .text_color(theme.muted_foreground),
+                                )
+                                .on_click(window.listener_for(
+                                    session,
+                                    move |this, _: &ClickEvent, _window, cx| {
+                                        this.open_subagent_modal(open_id.clone(), cx);
+                                    },
+                                ))
+                        }),
+                ),
         )
         .when(!tool_names.is_empty(), |parent| {
             let grouped = group_tool_names(&tool_names);
@@ -1393,11 +1491,11 @@ impl Render for WorkspaceView {
     #[allow(clippy::too_many_lines)]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clamp_active();
-        let rail_width = if window.viewport_size().width < px(900.) {
-            px(184.)
-        } else {
-            px(240.)
-        };
+        let window_width = f32::from(window.viewport_size().width);
+        self.rail_width = clamp_rail_width(self.rail_width, window_width);
+        self.inspector_width = clamp_inspector_width(self.inspector_width, window_width);
+        let rail_width = px(self.rail_width);
+        let inspector_width = px(self.inspector_width);
         if let Some(session) = self.sessions.get(self.active).cloned() {
             let pending =
                 session.update(cx, |session, _cx| session.take_pending_workspace_palette());
@@ -1448,6 +1546,15 @@ impl Render for WorkspaceView {
                     cx.stop_propagation();
                 }
             }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.handle_sidebar_resize_move(event, window, cx);
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, _window, cx| {
+                    this.end_sidebar_resize(cx);
+                }),
+            )
             .on_action(cx.listener(Self::handle_about_menu))
             .on_action(cx.listener(Self::handle_open_workspace_menu))
             .on_action(cx.listener(Self::handle_new_session_menu))
@@ -1466,12 +1573,11 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_fullscreen_menu))
             .when(!self.rail_collapsed, |parent| {
                 let home = home_dir();
-                parent.child(
+                parent
+                    .child(
                     v_flex()
                         .w(rail_width)
                         .h_full()
-                        .border_r_1()
-                        .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
                         // Top chrome — workspace actions, separated from session list.
@@ -1827,6 +1933,23 @@ impl Render for WorkspaceView {
                                 )),
                         ),
                 )
+                    .child(
+                        div()
+                            .id("rail-resize-handle")
+                            .w(px(3.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .bg(theme.sidebar_border)
+                            .hover(|handle| handle.bg(theme.border))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                                    this.sidebar_resize = Some(SidebarResizeTarget::Rail);
+                                    cx.notify();
+                                }),
+                            ),
+                    )
             })
             .when(self.rail_collapsed, |parent| {
                 parent.child(
@@ -1862,13 +1985,32 @@ impl Render for WorkspaceView {
             .when_some(
                 inspector_open.then_some(active_session).flatten(),
                 |parent, session| {
-                    parent.child(render_inspector(
-                        &session,
-                        inspector_focus,
-                        self.tools_expanded,
-                        window,
-                        cx,
-                    ))
+                    parent
+                        .child(
+                            div()
+                                .id("inspector-resize-handle")
+                                .w(px(3.))
+                                .h_full()
+                                .flex_shrink_0()
+                                .cursor(CursorStyle::ResizeLeftRight)
+                                .bg(theme.sidebar_border)
+                                .hover(|handle| handle.bg(theme.border))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseDownEvent, _window, cx| {
+                                        this.sidebar_resize = Some(SidebarResizeTarget::Inspector);
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                        .child(render_inspector(
+                            &session,
+                            inspector_focus,
+                            self.tools_expanded,
+                            inspector_width,
+                            window,
+                            cx,
+                        ))
                 },
             )
             .when(!inspector_open, |parent| {
@@ -1878,8 +2020,8 @@ impl Render for WorkspaceView {
                         .w(px(40.))
                         .h_full()
                         .items_center()
-                        .gap_1()
-                        .pt_3()
+                        .gap_2()
+                        .pt_2()
                         .border_l_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
@@ -1890,16 +2032,9 @@ impl Render for WorkspaceView {
                                 .tooltip("Show context inspector (⌘J)")
                                 .small()
                                 .ghost()
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, _w, cx| {
-                                        this.toggle_inspector(cx);
-                                    },
-                                )),
-                        )
-                        .child(
-                            Label::new("⌘J")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.toggle_inspector(cx);
+                                })),
                         ),
                 )
             })

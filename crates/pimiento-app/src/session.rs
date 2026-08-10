@@ -7635,6 +7635,27 @@ pub(crate) fn subagent_snapshot_session_file(snapshot: &serde_json::Value) -> Op
 
 pub(crate) fn subagent_snapshot_summary(snapshot: &serde_json::Value) -> String {
     let id = subagent_snapshot_id(snapshot).unwrap_or("unknown");
+    let meta = subagent_snapshot_meta(snapshot);
+    let description = snapshot
+        .get("description")
+        .or_else(|| snapshot.get("task"))
+        .or_else(|| snapshot.get("assignment"))
+        .map(compact_subagent_value)
+        .unwrap_or_default();
+    if description.is_empty() {
+        format!("{meta} · {id}")
+    } else {
+        format!("{meta} · {id}: {description}")
+    }
+}
+
+/// Primary label for an inspector agent row (id when present).
+pub(crate) fn subagent_snapshot_title(snapshot: &serde_json::Value) -> String {
+    subagent_snapshot_id(snapshot).map_or_else(|| "unknown".to_owned(), str::to_owned)
+}
+
+/// Secondary meta line: `agent · status` from wire fields only.
+pub(crate) fn subagent_snapshot_meta(snapshot: &serde_json::Value) -> String {
     let agent = snapshot
         .get("agent")
         .and_then(serde_json::Value::as_str)
@@ -7643,17 +7664,7 @@ pub(crate) fn subagent_snapshot_summary(snapshot: &serde_json::Value) -> String 
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
-    let description = snapshot
-        .get("description")
-        .or_else(|| snapshot.get("task"))
-        .or_else(|| snapshot.get("assignment"))
-        .map(compact_subagent_value)
-        .unwrap_or_default();
-    if description.is_empty() {
-        format!("{agent} · {status} · {id}")
-    } else {
-        format!("{agent} · {status} · {id}: {description}")
-    }
+    format!("{agent} · {status}")
 }
 
 pub(crate) fn subagent_message_digest(message: &serde_json::Value) -> String {

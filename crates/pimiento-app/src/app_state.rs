@@ -21,12 +21,16 @@ pub(crate) struct PersistedWindowBounds {
     pub(crate) height: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PersistedUi {
     #[serde(default = "default_inspector_open")]
     pub(crate) inspector_open: bool,
     #[serde(default)]
     pub(crate) rail_collapsed: bool,
+    #[serde(default = "default_rail_width")]
+    pub(crate) rail_width: f32,
+    #[serde(default = "default_inspector_width")]
+    pub(crate) inspector_width: f32,
     #[serde(default)]
     pub(crate) theme: ThemePreference,
     #[serde(default = "default_light_theme_name")]
@@ -40,6 +44,8 @@ impl Default for PersistedUi {
         Self {
             inspector_open: default_inspector_open(),
             rail_collapsed: false,
+            rail_width: default_rail_width(),
+            inspector_width: default_inspector_width(),
             theme: ThemePreference::System,
             light_theme: default_light_theme_name(),
             dark_theme: default_dark_theme_name(),
@@ -57,6 +63,31 @@ fn default_dark_theme_name() -> String {
 
 pub(crate) fn default_inspector_open() -> bool {
     true
+}
+
+pub(crate) fn default_rail_width() -> f32 {
+    240.0
+}
+
+pub(crate) fn default_inspector_width() -> f32 {
+    260.0
+}
+
+pub(crate) const RAIL_WIDTH_MIN: f32 = 168.0;
+pub(crate) const RAIL_WIDTH_MAX: f32 = 360.0;
+pub(crate) const INSPECTOR_WIDTH_MIN: f32 = 200.0;
+pub(crate) const INSPECTOR_WIDTH_MAX: f32 = 420.0;
+pub(crate) const SIDEBAR_CONTENT_MIN: f32 = 320.0;
+
+pub(crate) fn clamp_rail_width(width: f32, window_width: f32) -> f32 {
+    let max = RAIL_WIDTH_MAX.min((window_width - SIDEBAR_CONTENT_MIN).max(RAIL_WIDTH_MIN));
+    width.clamp(RAIL_WIDTH_MIN, max)
+}
+
+pub(crate) fn clamp_inspector_width(width: f32, window_width: f32) -> f32 {
+    let max =
+        INSPECTOR_WIDTH_MAX.min((window_width - SIDEBAR_CONTENT_MIN).max(INSPECTOR_WIDTH_MIN));
+    width.clamp(INSPECTOR_WIDTH_MIN, max)
 }
 
 impl PersistedWindowBounds {
@@ -208,6 +239,21 @@ impl SessionPersistence {
     pub(crate) fn save_rail_collapsed(&self, rail_collapsed: bool) {
         let mut ui = self.load_ui();
         ui.rail_collapsed = rail_collapsed;
+        self.save_ui(&ui);
+    }
+
+    pub(crate) fn load_rail_width(&self) -> f32 {
+        clamp_rail_width(self.load_ui().rail_width, 1600.0)
+    }
+
+    pub(crate) fn load_inspector_width(&self) -> f32 {
+        clamp_inspector_width(self.load_ui().inspector_width, 1600.0)
+    }
+
+    pub(crate) fn save_sidebar_widths(&self, rail_width: f32, inspector_width: f32) {
+        let mut ui = self.load_ui();
+        ui.rail_width = clamp_rail_width(rail_width, 1600.0);
+        ui.inspector_width = clamp_inspector_width(inspector_width, 1600.0);
         self.save_ui(&ui);
     }
 
