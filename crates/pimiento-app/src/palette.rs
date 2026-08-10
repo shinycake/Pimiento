@@ -1,6 +1,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PaletteActionId {
     About,
+    UpdateOmp,
     ToggleTheme,
     ToggleTodos,
     ToggleAgents,
@@ -135,6 +136,11 @@ pub(crate) fn palette_catalog() -> &'static [PaletteEntry] {
             id: PaletteActionId::About,
             label: "About Pimiento",
             hint: "version app information",
+        },
+        PaletteEntry {
+            id: PaletteActionId::UpdateOmp,
+            label: "Update OMP",
+            hint: "install the available OMP update",
         },
         PaletteEntry {
             id: PaletteActionId::ToggleTheme,

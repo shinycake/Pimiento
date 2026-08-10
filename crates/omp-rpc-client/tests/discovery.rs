@@ -47,11 +47,17 @@ impl CommandRunner for FakeRunner {
         })
     }
 
-    fn run_version(
+    fn run_omp(
         &self,
         program: &Path,
+        args: &[&str],
         _env: &BTreeMap<OsString, OsString>,
     ) -> Result<CapturedOutput, RpcError> {
+        if args != ["--version"] {
+            return Err(RpcError::Discovery {
+                detail: format!("test: unexpected omp arguments {args:?}"),
+            });
+        }
         self.calls
             .borrow_mut()
             .push(format!("version:{}", program.display()));

@@ -712,6 +712,30 @@ fn filter_palette_entries_matches_label_and_hint() {
 }
 
 #[test]
+fn command_palette_only_offers_update_omp_when_available() {
+    let unavailable = filter_command_palette_entries(&[], "update omp", false);
+    assert!(!unavailable.iter().any(|entry| matches!(
+        entry,
+        CommandPaletteEntry::Action(action) if action.id == PaletteActionId::UpdateOmp
+    )));
+
+    let available = filter_command_palette_entries(&[], "update omp", true);
+    assert!(available.iter().any(|entry| matches!(
+        entry,
+        CommandPaletteEntry::Action(action)
+            if action.id == PaletteActionId::UpdateOmp && action.label == "Update OMP"
+    )));
+}
+
+#[test]
+fn omp_update_available_copy_formats_version_transition() {
+    assert_eq!(
+        omp_update_available_label("17.2.11", "17.3.0"),
+        "OMP 17.2.11 → 17.3.0 is available"
+    );
+}
+
+#[test]
 fn native_menu_spec_has_product_labels_and_action_mapping() {
     let menus = app_menus();
     assert_eq!(
@@ -1557,7 +1581,7 @@ fn command_palette_combines_static_actions_with_every_top_level_slash_command() 
             "source": "remote-registry-v2"
         }
     ])));
-    let entries = filter_command_palette_entries(&commands, "");
+    let entries = filter_command_palette_entries(&commands, "", false);
 
     assert!(matches!(
         entries.first(),
@@ -1590,7 +1614,7 @@ fn command_palette_native_fork_deduplicates_dynamic_fork() {
             "description": "Still dynamic"
         }
     ])));
-    let entries = filter_command_palette_entries(&commands, "/fork");
+    let entries = filter_command_palette_entries(&commands, "/fork", false);
     assert_eq!(entries.len(), 1);
     assert!(matches!(
         entries[0],
@@ -1668,7 +1692,7 @@ fn command_palette_searches_slash_metadata_aliases_and_nested_subcommands() {
         "future-extension-source",
     ] {
         assert!(
-            filter_command_palette_entries(&commands, query)
+            filter_command_palette_entries(&commands, query, false)
                 .iter()
                 .any(|entry| entry.title() == "/mcp"),
             "top-level metadata did not match {query}"
@@ -1683,7 +1707,7 @@ fn command_palette_searches_slash_metadata_aliases_and_nested_subcommands() {
         "servers",
     ] {
         assert!(
-            filter_command_palette_entries(&commands, query)
+            filter_command_palette_entries(&commands, query, false)
                 .iter()
                 .any(|entry| entry.title() == "/mcp reconnect"),
             "nested metadata did not match {query}"
@@ -1702,7 +1726,7 @@ fn command_palette_slash_entries_reuse_safe_completion_text_without_execution_da
         ]
     }])));
 
-    let parent = filter_command_palette_entries(&commands, "servers")
+    let parent = filter_command_palette_entries(&commands, "servers", false)
         .into_iter()
         .find_map(|entry| match entry {
             CommandPaletteEntry::Slash { suggestion, .. } if suggestion.title == "/mcp" => {
@@ -1715,7 +1739,7 @@ fn command_palette_slash_entries_reuse_safe_completion_text_without_execution_da
     assert_eq!(parent.completion_text, "/mcp ");
     assert!(parent.expects_input);
 
-    let nested = filter_command_palette_entries(&commands, "reconnect")
+    let nested = filter_command_palette_entries(&commands, "reconnect", false)
         .into_iter()
         .find_map(|entry| match entry {
             CommandPaletteEntry::Slash { suggestion, .. }

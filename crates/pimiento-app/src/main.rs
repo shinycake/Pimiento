@@ -4,7 +4,7 @@
 //! Pimiento — first live OMP session workspace.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,7 @@ use gpui_component::{
     v_flex,
 };
 use omp_rpc_client::{
+    OmpUpdateCheck, OmpUpdateInstall, check_omp_update,
     client::{ClientConfig, ClientEvent, RpcClient},
     discovery::{
         DiscoveryInputs, MAX_SUPPORTED, MIN_SUPPORTED, OmpVersion, SystemRunner, VersionSupport,
@@ -41,6 +42,7 @@ use omp_rpc_client::{
     frames::{
         InterruptMode, QueueMode, RpcCommandBody, StreamingBehavior, SubagentSubscriptionLevel,
     },
+    install_omp_update,
 };
 use pimiento_core::{
     diff::{DiffLineKind, parse_edit_diff, parse_unified_diff_lines},

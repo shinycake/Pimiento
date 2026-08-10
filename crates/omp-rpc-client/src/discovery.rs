@@ -199,6 +199,20 @@ pub trait CommandRunner {
     /// so callers can attribute the failure to discovery.
     fn run_login_shell(&self, shell: &OsStr, script: &str) -> Result<CapturedOutput, RpcError>;
 
+    /// Run `<program> <args...>` with the given environment and no
+    /// inherited process environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError::Discovery`] wrapping any spawn or I/O failure
+    /// so callers can attribute the failure to discovery.
+    fn run_omp(
+        &self,
+        program: &Path,
+        args: &[&str],
+        env: &BTreeMap<OsString, OsString>,
+    ) -> Result<CapturedOutput, RpcError>;
+
     /// Run `<program> --version` with the given environment (no
     /// inherited process env).
     ///
@@ -210,7 +224,9 @@ pub trait CommandRunner {
         &self,
         program: &Path,
         env: &BTreeMap<OsString, OsString>,
-    ) -> Result<CapturedOutput, RpcError>;
+    ) -> Result<CapturedOutput, RpcError> {
+        self.run_omp(program, &["--version"], env)
+    }
 }
 
 /// Real-process implementation of [`CommandRunner`].
@@ -234,18 +250,22 @@ impl CommandRunner for SystemRunner {
         })
     }
 
-    fn run_version(
+    fn run_omp(
         &self,
         program: &Path,
+        args: &[&str],
         env: &BTreeMap<OsString, OsString>,
     ) -> Result<CapturedOutput, RpcError> {
         let mut cmd = Command::new(program);
-        cmd.arg("--version").env_clear();
+        cmd.args(args).env_clear();
         for (k, v) in env {
             cmd.env(k, v);
         }
         let output = cmd.output().map_err(|e| RpcError::Discovery {
-            detail: format!("failed to run `{} --version`: {e}", program.display()),
+            detail: format!(
+                "failed to run `{}` with arguments {args:?}: {e}",
+                program.display()
+            ),
         })?;
         Ok(CapturedOutput {
             status_success: output.status.success(),
