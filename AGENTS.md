@@ -69,3 +69,11 @@ Every enum on the wire has an `Unknown` fallback; unknown frames become visible 
 ## Dogfood ritual — pointer
 
 From SH onward, Pimiento development happens **inside Pimiento** via the worktree split, session-continuity net (`scripts/dogfood.sh` writing `~/.pimiento/dogfood.json`), self-QA convention, and terminal-TUI escalation rule. See **`PLAN.md` §7** for the full ritual; do not paraphrase it here — always follow the plan verbatim.
+
+## Cursor Cloud Agent environment
+
+Cloud Agents run on headless Linux (Ubuntu 24.04, x86_64). `scripts/cloud-agent-setup.sh` is the idempotent bootstrap (GPUI/Zed system libs, stable + nightly toolchains, `cargo-nextest`, `cargo fetch`); it is the environment `install` command and is safe to re-run.
+
+- **GUI renders headlessly.** GPUI draws via Vulkan; `mesa-vulkan-drivers` provides the **lavapipe** software ICD, so the window renders on the host-provided X server (`DISPLAY=:1`) with no GPU. The `libEGL … DRI3` warnings are expected and harmless.
+- **QA the GUI without a real `omp`.** The user's proprietary `omp` is not present in the cloud VM. Point discovery at the in-repo fake peer to exercise the full connect pipeline: build it with `cargo build -p omp-rpc-client --bin fake_omp`, then launch with `PIMIENTO_OMP_BIN=<abs path to a shim that prints `omp/17.2.10` for `--version` and execs fake_omp> PIMIENTO_AUTO_CONNECT=1 DISPLAY=:1 target/debug/pimiento-app`. `fake_omp`'s own `--version` prints `omp 17.2.10` (space, not slash), which the discovery parser rejects by design — hence the shim.
+- **Capture screenshots** of the running window with `ffmpeg -f x11grab -video_size <WxH> -i :1 -frames:v 1 shot.png` (get `<WxH>` from `xdpyinfo`).
