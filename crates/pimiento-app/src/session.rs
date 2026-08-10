@@ -10,16 +10,26 @@ pub(crate) const ABORT_ARM_STATUS: &str = "Press Esc again to abort";
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 480.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 320.0;
 pub(crate) static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-pub(crate) type ConnectionResult = Result<
-    (
-        RpcClient,
-        SessionProjection,
-        String,
-        Vec<ModelChoice>,
-        Option<String>,
-    ),
-    String,
->;
+pub(crate) type ConnectionResult = Result<ConnectedSession, String>;
+
+pub(crate) struct ConnectedSession {
+    pub(crate) client: RpcClient,
+    pub(crate) projection: SessionProjection,
+    pub(crate) status: String,
+    pub(crate) models: Vec<ModelChoice>,
+    pub(crate) version_gate_notice: Option<String>,
+    pub(crate) omp_bin: PathBuf,
+    pub(crate) omp_env: BTreeMap<OsString, OsString>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OmpUpdateUi {
+    Idle,
+    Checking,
+    Available { current: String, latest: String },
+    Updating { current: String, latest: String },
+    Failed { detail: String },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlashCommand {
@@ -225,6 +235,11 @@ pub(crate) struct SessionView {
     pub(crate) status_message: String,
     pub(crate) omp_version: Option<String>,
     pub(crate) version_gate_notice: Option<String>,
+    pub(crate) omp_update_ui: OmpUpdateUi,
+    pub(crate) omp_bin: Option<PathBuf>,
+    pub(crate) omp_env: BTreeMap<OsString, OsString>,
+    pub(crate) omp_update_generation: u64,
+    pub(crate) pending_omp_update_failure: Option<String>,
     pub(crate) abort_arm: Option<AbortArm>,
     pub(crate) abort_arm_generation: u64,
     pub(crate) available_models: Vec<ModelChoice>,
@@ -405,6 +420,11 @@ impl SessionView {
             status_message: status,
             omp_version,
             version_gate_notice: None,
+            omp_update_ui: OmpUpdateUi::Idle,
+            omp_bin: None,
+            omp_env: BTreeMap::new(),
+            omp_update_generation: 0,
+            pending_omp_update_failure: None,
             abort_arm: None,
             abort_arm_generation: 0,
             available_models,
@@ -481,6 +501,7 @@ impl SessionView {
                                 .error_msg
                                 .clone()
                                 .unwrap_or_else(|| format!("exit code {:?}", info.exit_code));
+                            this.invalidate_omp_update();
                             this.projection.mark_dead(reason);
                             this.client = None;
                             this.host_bridge.reset();
@@ -510,6 +531,7 @@ impl SessionView {
         if self.launcher_phase == LauncherPhase::Connecting {
             return;
         }
+        self.invalidate_omp_update();
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
@@ -576,12 +598,22 @@ impl SessionView {
             LauncherPhase::Hidden
         };
         match result {
-            Ok((client, projection, status, models, version_gate_notice)) => {
+            Ok(ConnectedSession {
+                client,
+                projection,
+                status,
+                models,
+                version_gate_notice,
+                omp_bin,
+                omp_env,
+            }) => {
                 self.available_models = models;
                 self.projection = projection;
                 self.subagent_subscription = SubagentSubscriptionLevel::Events;
                 self.omp_version = Some(status.clone());
                 self.version_gate_notice = version_gate_notice;
+                self.omp_bin = Some(omp_bin);
+                self.omp_env = omp_env;
                 self.status_message = status;
                 self.client = Some(client.clone());
                 self.session_cwd = Some(cwd);
@@ -596,8 +628,16 @@ impl SessionView {
                 self.last_session = self.persistence.load_last_session();
                 self.recent_sessions = self.persistence.load_recent_sessions();
                 self.start_catalog_load(cx);
+                if let Some(detail) = self.pending_omp_update_failure.take() {
+                    self.omp_update_ui = OmpUpdateUi::Failed { detail };
+                } else {
+                    self.start_omp_update_check(cx);
+                }
             }
             Err(error) => {
+                if let Some(detail) = self.pending_omp_update_failure.take() {
+                    self.omp_update_ui = OmpUpdateUi::Failed { detail };
+                }
                 if launcher_mode {
                     self.launcher_phase = LauncherPhase::Visible;
                     self.launcher_error = Some(error.clone());
@@ -610,6 +650,41 @@ impl SessionView {
             }
         }
         cx.notify();
+    }
+
+    pub(crate) fn invalidate_omp_update(&mut self) {
+        self.omp_update_generation = self.omp_update_generation.wrapping_add(1);
+        self.omp_update_ui = OmpUpdateUi::Idle;
+        self.pending_omp_update_failure = None;
+    }
+
+    pub(crate) fn start_omp_update_check(&mut self, cx: &mut Context<Self>) {
+        let (Some(program), env) = (self.omp_bin.clone(), self.omp_env.clone()) else {
+            self.omp_update_ui = OmpUpdateUi::Idle;
+            return;
+        };
+        let generation = self.omp_update_generation;
+        self.omp_update_ui = OmpUpdateUi::Checking;
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_spawn(async move { check_omp_update(&program, &env, &SystemRunner) })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                if this.omp_update_generation != generation {
+                    return;
+                }
+                this.omp_update_ui = match result {
+                    OmpUpdateCheck::Available { current, latest } => {
+                        OmpUpdateUi::Available { current, latest }
+                    }
+                    OmpUpdateCheck::UpToDate { .. } | OmpUpdateCheck::Failed { .. } => {
+                        OmpUpdateUi::Idle
+                    }
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn choose_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -658,6 +733,9 @@ impl SessionView {
     }
 
     pub(crate) fn return_to_launcher(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_omp_update();
+        self.omp_bin = None;
+        self.omp_env.clear();
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
@@ -2549,6 +2627,88 @@ impl SessionView {
         self.begin_connection(window, cwd, resume, false, cx);
     }
 
+    /// Palette/About visibility: offer Update whenever a check found a newer
+    /// build. Install itself shuts the child down first, so mid-run is OK.
+    pub(crate) fn omp_update_is_offered(&self) -> bool {
+        matches!(self.omp_update_ui, OmpUpdateUi::Available { .. })
+    }
+
+    pub(crate) fn omp_update_disabled_reason(&self) -> Option<&'static str> {
+        if !self.omp_update_is_offered() {
+            return Some("No OMP update is available");
+        }
+        if self.omp_bin.is_none() {
+            return Some("The discovered OMP binary is no longer available");
+        }
+        None
+    }
+
+    pub(crate) fn can_start_omp_update(&self) -> bool {
+        self.omp_update_disabled_reason().is_none()
+    }
+
+    pub(crate) fn start_omp_update(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.can_start_omp_update() {
+            return;
+        }
+        let OmpUpdateUi::Available { current, latest } = self.omp_update_ui.clone() else {
+            return;
+        };
+        let (Some(program), env) = (self.omp_bin.clone(), self.omp_env.clone()) else {
+            self.omp_update_ui = OmpUpdateUi::Failed {
+                detail: "The discovered OMP binary is no longer available.".to_owned(),
+            };
+            cx.notify();
+            return;
+        };
+        let resume = self.restart_resume_path();
+        let cwd = self.restart_cwd(resume.as_deref());
+        let client = self.client.take();
+
+        self.omp_update_generation = self.omp_update_generation.wrapping_add(1);
+        let generation = self.omp_update_generation;
+        self.omp_update_ui = OmpUpdateUi::Updating { current, latest };
+        self.pending_omp_update_failure = None;
+        self.clear_abort_arm();
+        self.pump.take();
+        self.host_bridge.reset();
+        self.running_tool_started.clear();
+        self.running_tool_timer.take();
+        self.dialog_timeout_gens.clear();
+        self.dialog_input_bound_id = None;
+        self.palette_open = false;
+        self.about_open = false;
+        self.projection.mark_restarting();
+        "Updating OMP…".clone_into(&mut self.status_message);
+        cx.notify();
+
+        cx.spawn_in(window, async move |view, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    if let Some(client) = client {
+                        gracefully_close_rpc_client(client).await;
+                    }
+                    install_omp_update(&program, &env, &SystemRunner)
+                })
+                .await;
+            let _ = view.update_in(cx, |this, window, cx| {
+                if this.omp_update_generation != generation {
+                    return;
+                }
+                match result {
+                    OmpUpdateInstall::Updated { .. } => {
+                        this.begin_connection(window, cwd, resume, false, cx);
+                    }
+                    OmpUpdateInstall::Failed { detail, .. } => {
+                        this.begin_connection(window, cwd, resume, false, cx);
+                        this.pending_omp_update_failure = Some(detail);
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn can_abort(&self) -> bool {
         self.client.is_some() && phase_allows_abort(&self.projection.run_phase)
     }
@@ -3451,6 +3611,7 @@ impl SessionView {
         self.close_palette(cx);
         match id {
             PaletteActionId::About => self.show_about(cx),
+            PaletteActionId::UpdateOmp => self.start_omp_update(window, cx),
             PaletteActionId::ToggleTheme => {
                 self.open_theme_picker(cx);
             }
@@ -4238,7 +4399,8 @@ impl SessionView {
         let key = key.as_str();
         let query = self.palette_search.read(cx).value().to_string();
         let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
-        let matches = filter_command_palette_entries(&commands, &query);
+        let matches =
+            filter_command_palette_entries(&commands, &query, self.omp_update_is_offered());
         if matches.is_empty() {
             self.palette_selected = 0;
         } else {
@@ -4518,6 +4680,7 @@ impl SessionView {
     }
 
     pub(crate) fn shutdown_session(&mut self, cx: &mut Context<Self>) {
+        self.invalidate_omp_update();
         self.clear_abort_arm();
         self.client.take();
         self.pump.take();
@@ -4527,6 +4690,158 @@ impl SessionView {
         self.dialog_timeout_gens.clear();
         self.dialog_input_bound_id = None;
         cx.notify();
+    }
+}
+
+async fn gracefully_close_rpc_client(client: RpcClient) {
+    client.close_stdin().await;
+    let waiting = client.clone();
+    let killing = client;
+    let _ = smol::future::or(async move { waiting.wait().await }, async move {
+        smol::Timer::after(Duration::from_secs(10)).await;
+        let _ = killing.kill().await;
+        killing.wait().await
+    })
+    .await;
+}
+
+pub(crate) fn omp_update_available_label(current: &str, latest: &str) -> String {
+    format!("OMP {current} → {latest} is available")
+}
+
+fn render_omp_update_banner(
+    update: &OmpUpdateUi,
+    disabled_reason: Option<&'static str>,
+    cx: &mut Context<SessionView>,
+) -> gpui::AnyElement {
+    let theme = cx.theme().clone();
+    match update {
+        OmpUpdateUi::Available { current, latest } => h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .items_start()
+            .gap_2()
+            .bg(theme.secondary)
+            .border_b_1()
+            .border_color(theme.border)
+            .text_xs()
+            .child(div().flex_1().min_w_0().text_color(theme.warning).child(
+                soft_wrap_dynamic_text(&omp_update_available_label(current, latest)),
+            ))
+            .child(
+                Button::new("update-omp-banner")
+                    .label("Update OMP")
+                    .small()
+                    .primary()
+                    .tooltip(
+                        disabled_reason.unwrap_or("Install the update and resume this session"),
+                    )
+                    .disabled(disabled_reason.is_some())
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.start_omp_update(window, cx);
+                    })),
+            )
+            .into_any_element(),
+        OmpUpdateUi::Updating { .. } => div()
+            .w_full()
+            .px_3()
+            .py_1()
+            .bg(theme.secondary)
+            .border_b_1()
+            .border_color(theme.border)
+            .text_color(theme.warning)
+            .text_xs()
+            .child("Updating OMP…")
+            .into_any_element(),
+        OmpUpdateUi::Failed { detail } => h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .items_start()
+            .gap_2()
+            .bg(theme.danger)
+            .text_color(theme.danger_foreground)
+            .text_xs()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(soft_wrap_dynamic_text(&format!(
+                        "OMP update failed: {detail}"
+                    ))),
+            )
+            .child(
+                Button::new("dismiss-omp-update-failure")
+                    .label("Dismiss")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _: &ClickEvent, _window, cx| {
+                        this.omp_update_ui = OmpUpdateUi::Idle;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element(),
+        OmpUpdateUi::Idle | OmpUpdateUi::Checking => div().into_any_element(),
+    }
+}
+
+fn render_omp_update_about(
+    update: &OmpUpdateUi,
+    disabled_reason: Option<&'static str>,
+    cx: &mut Context<SessionView>,
+) -> Option<gpui::AnyElement> {
+    let theme = cx.theme().clone();
+    match update {
+        OmpUpdateUi::Available { current, latest } => Some(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(theme.warning)
+                        .child(soft_wrap_dynamic_text(&omp_update_available_label(
+                            current, latest,
+                        ))),
+                )
+                .child(
+                    Button::new("update-omp-about")
+                        .label("Update OMP")
+                        .small()
+                        .primary()
+                        .tooltip(
+                            disabled_reason.unwrap_or("Install the update and resume this session"),
+                        )
+                        .disabled(disabled_reason.is_some())
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.start_omp_update(window, cx);
+                        })),
+                )
+                .into_any_element(),
+        ),
+        OmpUpdateUi::Updating { .. } => Some(
+            div()
+                .w_full()
+                .p_3()
+                .rounded_md()
+                .bg(theme.secondary)
+                .border_1()
+                .border_color(theme.border)
+                .text_xs()
+                .text_color(theme.warning)
+                .child("Updating OMP…")
+                .into_any_element(),
+        ),
+        OmpUpdateUi::Idle | OmpUpdateUi::Checking | OmpUpdateUi::Failed { .. } => None,
     }
 }
 
@@ -4911,11 +5226,13 @@ fn palette_text_matches(query: &str, values: impl IntoIterator<Item = impl AsRef
 pub(crate) fn filter_command_palette_entries(
     commands: &[SlashCommand],
     query: &str,
+    show_update_omp: bool,
 ) -> Vec<CommandPaletteEntry> {
     let query = query.trim().to_ascii_lowercase();
     let slash_query = query.strip_prefix('/').unwrap_or(&query);
     let mut entries = filter_palette_entries(&query)
         .into_iter()
+        .filter(|entry| show_update_omp || entry.id != PaletteActionId::UpdateOmp)
         .map(CommandPaletteEntry::Action)
         .collect::<Vec<_>>();
     let action_count = entries.len();
@@ -5278,7 +5595,8 @@ impl Render for SessionView {
             self.pending_palette_enter = false;
             let query = self.palette_search.read(cx).value().to_string();
             let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
-            let matches = filter_command_palette_entries(&commands, &query);
+            let matches =
+                filter_command_palette_entries(&commands, &query, self.omp_update_is_offered());
             if let Some(entry) = matches.get(self.palette_selected) {
                 let entry = entry.clone();
                 self.run_command_palette_entry(entry, window, cx);
@@ -5336,6 +5654,8 @@ impl Render for SessionView {
         let fallback_banner = self.projection.fallback_banner.clone();
         let show_activity_banner = compacting || retrying || fallback_banner.is_some();
         let version_gate_notice = self.version_gate_notice.clone();
+        let omp_update_ui = self.omp_update_ui.clone();
+        let omp_update_disabled_reason = self.omp_update_disabled_reason();
         let can_pick = self.client.is_some();
         let query = self.model_search.read(cx).value().to_string();
         let filtered = filter_models(&self.available_models, &query);
@@ -5382,7 +5702,11 @@ impl Render for SessionView {
             .at_mention_selected
             .min(at_mention_items.len().saturating_sub(1));
         let palette_query = self.palette_search.read(cx).value().to_string();
-        let palette_matches = filter_command_palette_entries(&slash_commands, &palette_query);
+        let palette_matches = filter_command_palette_entries(
+            &slash_commands,
+            &palette_query,
+            self.omp_update_is_offered(),
+        );
         if palette_matches.is_empty() {
             self.palette_selected = 0;
         } else {
@@ -5641,6 +5965,19 @@ impl Render for SessionView {
                                 ),
                         )
                     })
+                    .when(
+                        !matches!(
+                            &omp_update_ui,
+                            OmpUpdateUi::Idle | OmpUpdateUi::Checking
+                        ),
+                        |parent| {
+                            parent.child(render_omp_update_banner(
+                                &omp_update_ui,
+                                omp_update_disabled_reason,
+                                cx,
+                            ))
+                        },
+                    )
                     .when(show_context_high, |parent| {
                         parent.child(
                             h_flex()
@@ -7132,6 +7469,14 @@ impl Render for SessionView {
                                     .text_color(theme.muted_foreground),
                                 )
                                 .child(Label::new(version).text_sm())
+                                .when_some(
+                                    render_omp_update_about(
+                                        &omp_update_ui,
+                                        omp_update_disabled_reason,
+                                        cx,
+                                    ),
+                                    gpui::ParentElement::child,
+                                )
                                 .child(
                                     Label::new(
                                         "⌘/Ctrl+Shift+P palette · ⌘/Ctrl+K palette · ⌘/Ctrl+B sessions · ⌘/Ctrl+J inspector · ⌘/Ctrl+1–9 switch · ⌘/Ctrl+T/W new/close · Enter send · Esc×2 abort · PageUp/Down Home/End transcript · right-click session: Rename",
@@ -7845,6 +8190,8 @@ pub(crate) fn try_connect_omp(
 
     let discovered = smol::block_on(async { discover(&inputs, &SystemRunner) })
         .map_err(|e| format!("OMP not found: {e}"))?;
+    let omp_bin = discovered.path.clone();
+    let omp_env = discovered.env.clone();
 
     let cwd = cwd
         .filter(|path| path.is_absolute())
@@ -7923,7 +8270,15 @@ pub(crate) fn try_connect_omp(
         (None, None) => None,
     };
 
-    Ok((client, proj, status, models, version_gate_notice))
+    Ok(ConnectedSession {
+        client,
+        projection: proj,
+        status,
+        models,
+        version_gate_notice,
+        omp_bin,
+        omp_env,
+    })
 }
 
 pub(crate) fn format_version_gate_notice(version: OmpVersion) -> Option<String> {

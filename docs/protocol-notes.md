@@ -412,3 +412,11 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - Menu actions enter the same GPUI action dispatch tree as key bindings. Workspace/session commands are handled on the `WorkspaceView` root and reuse `run_workspace_palette_action` or `prompt_new_workspace`; focused Edit commands use `gpui_component::input::{Undo, Redo, Cut, Copy, Paste, SelectAll}` so the focused input remains authoritative.
 - `Application::on_reopen` is available at this pin. Pimiento's callback activates the application and raises an existing window; it does not create or infer a session. The hook is harmless on platforms that do not emit reopen events.
 - Native window commands use pinned `Window::{minimize_window, zoom_window, toggle_fullscreen, activate_window}`. App lifecycle commands use `App::{quit, hide, hide_other_apps, unhide_other_apps, activate}`.
+
+## Explicit OMP updates — 2026-08-10
+
+User-initiated `omp update` is an explicit exception to Doctrine §0.2. Pimiento invokes only the discovered official OMP CLI with the captured login-shell environment: `omp update --check` after a successful connection, and `omp update` only after the user chooses **Update OMP**. It never invokes the curl installer and never writes `~/.omp` itself.
+
+The check parser recognizes OMP's `Current version:`, `Already up to date`, and `New version available:` output markers after stripping ANSI color sequences. Unknown output and failed checks stay silent in the workspace and never expose an install action.
+
+When an update is available, the workspace shows a quiet banner (and an About / palette affordance) with **Update OMP**. Clicking it gracefully closes the RPC child, runs `omp update`, then resumes the prior session on the replaced binary. Install failures reconnect when possible and surface a dismissible error banner.

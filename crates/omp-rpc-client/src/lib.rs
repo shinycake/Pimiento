@@ -9,5 +9,10 @@ pub mod discovery;
 pub mod error;
 pub mod frames;
 pub mod supervisor;
+pub mod update;
 
 pub use error::RpcError;
+pub use update::{
+    OmpUpdateCheck, OmpUpdateInstall, check_omp_update, install_omp_update,
+    parse_update_check_output,
+};
