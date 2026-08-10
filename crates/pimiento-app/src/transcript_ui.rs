@@ -61,6 +61,11 @@ fn tool_icon_color(kind: ToolVisualKind, theme: &Theme) -> gpui::Hsla {
     }
 }
 
+/// Readable prose measure for user/assistant rows (~48rem). Tools stay full-width.
+pub(crate) fn transcript_prose_max() -> Pixels {
+    px(768.)
+}
+
 /// Derive action-group chrome without merging transcript entries.
 ///
 /// Keeping one rendered item per transcript entry preserves every `ListState`
@@ -104,16 +109,19 @@ pub(crate) fn render_entry(
                 .w_full()
                 .items_start()
                 .gap_2()
-                .py_2()
+                .py_3()
+                .group("transcript-row")
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
+                        .max_w(transcript_prose_max())
                         .border_l_2()
                         .border_color(theme.accent)
                         .pl_4()
-                        .pr_3()
-                        .py_1p5()
+                        .pr_2()
+                        .py_1()
+                        .text_sm()
                         .child(soft_wrap_dynamic_text(text)),
                 )
                 .child(
@@ -161,8 +169,16 @@ pub(crate) fn render_entry(
                 .w_full()
                 .items_start()
                 .gap_2()
-                .py_2()
-                .child(div().flex_1().min_w_0().child(assistant_content))
+                .py_3()
+                .group("transcript-row")
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(transcript_prose_max())
+                        .text_sm()
+                        .child(assistant_content),
+                )
                 .child(
                     Button::new(("copy-assistant", row_ix))
                         .icon(IconName::Copy)
@@ -899,8 +915,8 @@ pub(crate) fn render_tool_card(
         .when(!group.grouped || group.first, gpui::Styled::pt_2)
         .when(!group.grouped, gpui::Styled::pb_2)
         .when(group.grouped, gpui::Styled::pb_1)
-        .px_2()
-        .gap_0p5()
+        .px_3()
+        .gap_1()
         .rounded_md()
         .border_1()
         .border_color(theme.border)

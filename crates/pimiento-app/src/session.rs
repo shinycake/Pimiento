@@ -5458,29 +5458,29 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
+                                    .px_4()
                                     .py_2()
-                                    .items_start()
-                                    .gap_2()
+                                    .items_center()
+                                    .gap_3()
                                     .child(
                                         h_flex()
                                             .flex_1()
                                             .min_w_0()
-                                            .items_start()
+                                            .items_center()
                                             .gap_2()
                                             .child(
                                                 div()
-                                                    .size(px(10.))
-                                                    .mt_0p5()
+                                                    .size(px(8.))
                                                     .rounded_sm()
                                                     .bg(identity_paprika()),
                                             )
                                             .child(
                                                 div()
                                                     .w_full()
-                                                    .max_h(px(96.))
-                                                    .overflow_y_scrollbar()
+                                                    .max_h(px(40.))
+                                                    .overflow_hidden()
                                                     .text_xs()
+                                                    .text_color(theme.muted_foreground)
                                                     .flex_1()
                                                     .min_w_0()
                                                     .child(soft_wrap_dynamic_text(
@@ -5594,7 +5594,7 @@ impl Render for SessionView {
                                 bar.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .gap_2()
                                         .flex_wrap()
@@ -5724,8 +5724,8 @@ impl Render for SessionView {
                                     .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .size_full()
-                                .px_3()
-                                .py_2(),
+                                .px_4()
+                                .py_3(),
                             )
                             .when(transcript_empty, |parent| {
                                 parent.child(
@@ -5735,20 +5735,24 @@ impl Render for SessionView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
+                                        .px_4()
                                         .child(
                                             v_flex()
                                                 .items_center()
-                                                .gap_1()
+                                                .gap_2()
+                                                .max_w(px(360.))
                                                 .child(
-                                                    Label::new("Pimiento is ready.")
+                                                    Label::new("Pimiento is ready")
                                                         .text_sm()
                                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                                        .text_color(theme.muted_foreground),
+                                                        .text_color(theme.foreground),
                                                 )
                                                 .child(
-                                                    Label::new("Type a message below to begin.")
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground),
+                                                    Label::new(
+                                                        "Send a message below to start this session.",
+                                                    )
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
                                                 ),
                                         ),
                                 )
@@ -5917,11 +5921,11 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
-                                    .pt_2()
-                                    .pb_1()
+                                    .px_4()
+                                    .pt_3()
+                                    .pb_2()
                                     .gap_2()
-                                    .items_start()
+                                    .items_center()
                                     .flex_wrap()
                                     .child(
                                         Button::new("composer-model-picker")
@@ -5963,10 +5967,21 @@ impl Render for SessionView {
                                                 )),
                                         )
                                     })
-                                    .child(div().flex_1())
+                                    .child(div().flex_1().min_w(px(8.)))
+                                    .when(queued_message_count > 0, |row| {
+                                        row.child(
+                                            Tag::secondary()
+                                                .small()
+                                                .child(format!("queue:{queued_message_count}")),
+                                        )
+                                    })
                                     .child(
                                         Switch::new("composer-fast-mode")
-                                            .label("Fast")
+                                            .label(if fast_supported {
+                                                "Fast"
+                                            } else {
+                                                "Fast · n/a"
+                                            })
                                             .small()
                                             .checked(
                                                 self.projection
@@ -5980,27 +5995,13 @@ impl Render for SessionView {
                                                     this.toggle_fast_mode(cx);
                                                 },
                                             )),
-                                    )
-                                    .when(queued_message_count > 0, |row| {
-                                        row.child(
-                                            Tag::secondary()
-                                                .small()
-                                                .child(format!("queue:{queued_message_count}")),
-                                        )
-                                    })
-                                    .when(!fast_supported, |row| {
-                                        row.child(
-                                            Label::new("n/a · no service tier")
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                    }),
+                                    ),
                             )
                             .when(self.model_picker_open, |band| {
                                 band.child(
                                     v_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .child(
                                             v_flex()
@@ -6206,7 +6207,7 @@ impl Render for SessionView {
                                 band.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .gap_1()
                                         .flex_wrap()
@@ -6231,9 +6232,9 @@ impl Render for SessionView {
                                 band.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
-                                        .pb_1()
-                                        .gap_1()
+                                        .px_4()
+                                        .pb_2()
+                                        .gap_2()
                                         .flex_wrap()
                                         .children(self.pending_attachments.iter().enumerate().map(
                                             |(ix, attachment)| {
@@ -6245,10 +6246,10 @@ impl Render for SessionView {
                                                 let label =
                                                     format!("{kind} {}", attachment.chip_label());
                                                 h_flex()
-                                                                    .flex_wrap()
                                                     .gap_1()
+                                                    .items_center()
                                                     .px_2()
-                                                    .py_0p5()
+                                                    .py_1()
                                                     .rounded_md()
                                                     .bg(theme.background)
                                                     .border_1()
@@ -6281,22 +6282,35 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
-                                    .py_2()
+                                    .px_4()
+                                    .pb_3()
+                                    .pt_1()
                                     .items_end()
-                                    .flex_wrap()
                                     .gap_2()
                                     .child(
-                                        div()
+                                        h_flex()
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
+                                            .items_end()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .bg(theme.background)
                                             .child(
-                                                Input::new(&self.composer)
-                                                    .appearance(false)
-                                                    .focus_bordered(false),
-                                            )
-                                            .when_some(large_paste_lines, |parent, lines| {
+                                                div()
+                                                    .relative()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .child(
+                                                        Input::new(&self.composer)
+                                                            .appearance(false)
+                                                            .focus_bordered(false),
+                                                    )
+                                                    .when_some(large_paste_lines, |parent, lines| {
                                                 parent.child(
                                                     v_flex()
                                                         .absolute()
@@ -6449,28 +6463,20 @@ impl Render for SessionView {
                                                         ),
                                                 )
                                             }),
-                                    )
-                                    .child(
-                                        Button::new("attach-files")
-                                            .icon(IconName::Plus)
-                                            .tooltip("Attach files")
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, window, cx| {
-                                                    this.prompt_attach_files(window, cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Label::new(if cfg!(target_os = "macos") {
-                                            "⌘↩"
-                                        } else {
-                                            "Ctrl+Enter"
-                                        })
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
+                                            )
+                                            .child(
+                                                Button::new("attach-files")
+                                                    .icon(IconName::Plus)
+                                                    .tooltip("Attach files")
+                                                    .small()
+                                                    .ghost()
+                                                    .disabled(!can_pick)
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, window, cx| {
+                                                            this.prompt_attach_files(window, cx);
+                                                        },
+                                                    )),
+                                            ),
                                     )
                                     .child(
                                         Button::new("send")
@@ -6481,6 +6487,19 @@ impl Render for SessionView {
                                                 "Steer"
                                             } else {
                                                 "Send"
+                                            })
+                                            .tooltip(if composer_uses_steer(
+                                                &self.projection.run_phase,
+                                            ) {
+                                                if cfg!(target_os = "macos") {
+                                                    "Steer running turn (⌘↩)"
+                                                } else {
+                                                    "Steer running turn (Ctrl+Enter)"
+                                                }
+                                            } else if cfg!(target_os = "macos") {
+                                                "Send (⌘↩)"
+                                            } else {
+                                                "Send (Ctrl+Enter)"
                                             })
                                             .disabled(!self.can_send())
                                             .on_click(cx.listener(
