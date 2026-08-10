@@ -5782,29 +5782,29 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
+                                    .px_4()
                                     .py_2()
-                                    .items_start()
-                                    .gap_2()
+                                    .items_center()
+                                    .gap_3()
                                     .child(
                                         h_flex()
                                             .flex_1()
                                             .min_w_0()
-                                            .items_start()
+                                            .items_center()
                                             .gap_2()
                                             .child(
                                                 div()
-                                                    .size(px(10.))
-                                                    .mt_0p5()
+                                                    .size(px(8.))
                                                     .rounded_sm()
                                                     .bg(identity_paprika()),
                                             )
                                             .child(
                                                 div()
                                                     .w_full()
-                                                    .max_h(px(96.))
-                                                    .overflow_y_scrollbar()
+                                                    .max_h(px(40.))
+                                                    .overflow_hidden()
                                                     .text_xs()
+                                                    .text_color(theme.muted_foreground)
                                                     .flex_1()
                                                     .min_w_0()
                                                     .child(soft_wrap_dynamic_text(
@@ -5918,7 +5918,7 @@ impl Render for SessionView {
                                 bar.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .gap_2()
                                         .flex_wrap()
@@ -6047,10 +6047,15 @@ impl Render for SessionView {
                                                     &this.projection.transcript,
                                                     ix,
                                                 );
+                                                let turn_start = entry_starts_user_turn(
+                                                    &this.projection.transcript,
+                                                    ix,
+                                                );
                                                 render_entry(
                                                     ix,
                                                     e,
                                                     tool_group,
+                                                    turn_start,
                                                     &this.expanded_tools,
                                                     &this.running_tool_started,
                                                     cx,
@@ -6061,8 +6066,8 @@ impl Render for SessionView {
                                     .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .size_full()
-                                .px_3()
-                                .py_2(),
+                                .px_6()
+                                .py_4(),
                             )
                             .when(transcript_empty, |parent| {
                                 parent.child(
@@ -6072,20 +6077,24 @@ impl Render for SessionView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
+                                        .px_4()
                                         .child(
                                             v_flex()
                                                 .items_center()
-                                                .gap_1()
+                                                .gap_2()
+                                                .max_w(px(360.))
                                                 .child(
-                                                    Label::new("Pimiento is ready.")
+                                                    Label::new("Pimiento is ready")
                                                         .text_sm()
                                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                                        .text_color(theme.muted_foreground),
+                                                        .text_color(theme.foreground),
                                                 )
                                                 .child(
-                                                    Label::new("Type a message below to begin.")
-                                                        .text_xs()
-                                                        .text_color(theme.muted_foreground),
+                                                    Label::new(
+                                                        "Send a message below to start this session.",
+                                                    )
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground),
                                                 ),
                                         ),
                                 )
@@ -6254,11 +6263,11 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
-                                    .pt_2()
-                                    .pb_1()
+                                    .px_4()
+                                    .pt_3()
+                                    .pb_2()
                                     .gap_2()
-                                    .items_start()
+                                    .items_center()
                                     .flex_wrap()
                                     .child(
                                         Button::new("composer-model-picker")
@@ -6300,10 +6309,21 @@ impl Render for SessionView {
                                                 )),
                                         )
                                     })
-                                    .child(div().flex_1())
+                                    .child(div().flex_1().min_w(px(8.)))
+                                    .when(queued_message_count > 0, |row| {
+                                        row.child(
+                                            Tag::secondary()
+                                                .small()
+                                                .child(format!("queue:{queued_message_count}")),
+                                        )
+                                    })
                                     .child(
                                         Switch::new("composer-fast-mode")
-                                            .label("Fast")
+                                            .label(if fast_supported {
+                                                "Fast"
+                                            } else {
+                                                "Fast · n/a"
+                                            })
                                             .small()
                                             .checked(
                                                 self.projection
@@ -6317,27 +6337,13 @@ impl Render for SessionView {
                                                     this.toggle_fast_mode(cx);
                                                 },
                                             )),
-                                    )
-                                    .when(queued_message_count > 0, |row| {
-                                        row.child(
-                                            Tag::secondary()
-                                                .small()
-                                                .child(format!("queue:{queued_message_count}")),
-                                        )
-                                    })
-                                    .when(!fast_supported, |row| {
-                                        row.child(
-                                            Label::new("n/a · no service tier")
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground),
-                                        )
-                                    }),
+                                    ),
                             )
                             .when(self.model_picker_open, |band| {
                                 band.child(
                                     v_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .child(
                                             v_flex()
@@ -6543,7 +6549,7 @@ impl Render for SessionView {
                                 band.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
+                                        .px_4()
                                         .pb_2()
                                         .gap_1()
                                         .flex_wrap()
@@ -6568,9 +6574,9 @@ impl Render for SessionView {
                                 band.child(
                                     h_flex()
                                         .w_full()
-                                        .px_3()
-                                        .pb_1()
-                                        .gap_1()
+                                        .px_4()
+                                        .pb_2()
+                                        .gap_2()
                                         .flex_wrap()
                                         .children(self.pending_attachments.iter().enumerate().map(
                                             |(ix, attachment)| {
@@ -6582,10 +6588,10 @@ impl Render for SessionView {
                                                 let label =
                                                     format!("{kind} {}", attachment.chip_label());
                                                 h_flex()
-                                                                    .flex_wrap()
                                                     .gap_1()
+                                                    .items_center()
                                                     .px_2()
-                                                    .py_0p5()
+                                                    .py_1()
                                                     .rounded_md()
                                                     .bg(theme.background)
                                                     .border_1()
@@ -6618,218 +6624,303 @@ impl Render for SessionView {
                             .child(
                                 h_flex()
                                     .w_full()
-                                    .px_3()
-                                    .py_2()
-                                    .items_end()
-                                    .flex_wrap()
+                                    .px_4()
+                                    .pb_3()
+                                    .pt_1()
+                                    .items_center()
                                     .gap_2()
                                     .child(
-                                        div()
+                                        // One bordered chrome owns height: input + attach + Send
+                                        // share the same top/bottom edges (no optical border mismatch).
+                                        h_flex()
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
+                                            .h(composer_control_height())
+                                            .items_center()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .bg(theme.background)
+                                            .overflow_hidden()
                                             .child(
-                                                Input::new(&self.composer)
-                                                    .appearance(false)
-                                                    .focus_bordered(false),
-                                            )
-                                            .when_some(large_paste_lines, |parent, lines| {
-                                                parent.child(
-                                                    v_flex()
-                                                        .absolute()
-                                                        .bottom_full()
-                                                        .left_0()
-                                                        .right_0()
-                                                        .gap_1()
-                                                        .p_2()
-                                                        .mb_1()
-                                                        .bg(theme.popover)
-                                                        .border_1()
-                                                        .border_color(theme.border)
-                                                        .shadow_lg()
-                                                        .rounded_md()
-                                                        .child(
-                                                            Label::new(format!(
-                                                                "Pasted {lines} lines"
-                                                            ))
-                                                            .text_sm()
-                                                            .font_weight(gpui::FontWeight::SEMIBOLD),
-                                                        )
-                                                        .child(
-                                                            Label::new(
-                                                                "Wrap in <attachment>, save local://paste, or paste inline",
+                                                h_flex()
+                                                    .relative()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .h_full()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .pl_3()
+                                                    .pr_1()
+                                                    .child(
+                                                        div()
+                                                            .relative()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .child(
+                                                                Input::new(&self.composer)
+                                                                    .appearance(false)
+                                                                    .focus_bordered(false),
                                                             )
-                                                            .text_xs()
-                                                            .text_color(theme.muted_foreground),
-                                                        )
-                                                        .child(
-                                                            h_flex()
-                                                                .flex_wrap()
-                                                                .gap_1()
-                                                                .child(
-                                                                    Button::new("large-paste-wrap")
-                                                                        .label("Wrap")
-                                                                        .small()
-                                                                        .primary()
-                                                                        .on_click(cx.listener(
-                                                                            |this,
-                                                                             _: &ClickEvent,
-                                                                             _w,
-                                                                             cx| {
-                                                                                this.apply_large_paste_choice(
-                                                                                    LargePasteChoice::Wrap,
-                                                                                    cx,
-                                                                                );
-                                                                            },
-                                                                        )),
-                                                                )
-                                                                .child(
-                                                                    Button::new("large-paste-save")
-                                                                        .label("Save local://")
-                                                                        .small()
-                                                                        .ghost()
-                                                                        .on_click(cx.listener(
-                                                                            |this,
-                                                                             _: &ClickEvent,
-                                                                             _w,
-                                                                             cx| {
-                                                                                this.apply_large_paste_choice(
-                                                                                    LargePasteChoice::SaveLocal,
-                                                                                    cx,
-                                                                                );
-                                                                            },
-                                                                        )),
-                                                                )
-                                                                .child(
-                                                                    Button::new(
-                                                                        "large-paste-inline",
-                                                                    )
-                                                                    .label("Inline")
-                                                                    .small()
-                                                                    .ghost()
-                                                                    .on_click(cx.listener(
-                                                                        |this,
-                                                                         _: &ClickEvent,
-                                                                         _w,
-                                                                         cx| {
-                                                                            this.apply_large_paste_choice(
-                                                                                LargePasteChoice::Inline,
-                                                                                cx,
-                                                                            );
-                                                                        },
-                                                                    )),
-                                                                ),
-                                                        ),
-                                                )
-                                            })
-                                            .when(!at_mention_items.is_empty(), |parent| {
-                                                parent.child(
-                                                    v_flex()
-                                                        .absolute()
-                                                        .bottom_full()
-                                                        .left_0()
-                                                        .right_0()
-                                                        .max_h(px(240.))
-                                                        .overflow_y_scrollbar()
-                                                        .gap_0()
-                                                        .p_1()
-                                                        .mb_1()
-                                                        .bg(theme.popover)
-                                                        .border_1()
-                                                        .border_color(theme.border)
-                                                        .shadow_lg()
-                                                        .rounded_md()
-                                                        .children(
-                                                            at_mention_items
-                                                                .iter()
-                                                                .enumerate()
-                                                                .map(|(ix, path)| {
-                                                                    let path_for_click =
-                                                                        path.clone();
-                                                                    let label =
-                                                                        path_mention_display(
-                                                                            path,
-                                                                            Some(
-                                                                                at_mention_cwd
-                                                                                    .as_path(),
-                                                                            ),
-                                                                        );
-                                                                    Button::new((
-                                                                        "at-mention",
-                                                                        ix,
-                                                                    ))
-                                                                    .ghost()
-                                                                    .small()
-                                                                    .w_full()
-                                                                    .child(wrapped_button_text(label))
-                                                                    .when(
-                                                                        ix == at_mention_selected,
-                                                                        |button| {
-                                                                            button.bg(
-                                                                                theme.secondary,
+                                                            .when_some(
+                                                                large_paste_lines,
+                                                                |parent, lines| {
+                                                                    parent.child(
+                                                                        v_flex()
+                                                                            .absolute()
+                                                                            .bottom_full()
+                                                                            .left_0()
+                                                                            .right_0()
+                                                                            .gap_1()
+                                                                            .p_2()
+                                                                            .mb_1()
+                                                                            .bg(theme.popover)
+                                                                            .border_1()
+                                                                            .border_color(
+                                                                                theme.border,
                                                                             )
-                                                                        },
+                                                                            .shadow_lg()
+                                                                            .rounded_md()
+                                                                            .child(
+                                                                                Label::new(
+                                                                                    format!(
+                                                                                        "Pasted {lines} lines"
+                                                                                    ),
+                                                                                )
+                                                                                .text_sm()
+                                                                                .font_weight(
+                                                                                    gpui::FontWeight::SEMIBOLD,
+                                                                                ),
+                                                                            )
+                                                                            .child(
+                                                                                Label::new(
+                                                                                    "Wrap in <attachment>, save local://paste, or paste inline",
+                                                                                )
+                                                                                .text_xs()
+                                                                                .text_color(
+                                                                                    theme.muted_foreground,
+                                                                                ),
+                                                                            )
+                                                                            .child(
+                                                                                h_flex()
+                                                                                    .flex_wrap()
+                                                                                    .gap_1()
+                                                                                    .child(
+                                                                                        Button::new(
+                                                                                            "large-paste-wrap",
+                                                                                        )
+                                                                                        .label(
+                                                                                            "Wrap",
+                                                                                        )
+                                                                                        .small()
+                                                                                        .primary()
+                                                                                        .on_click(
+                                                                                            cx.listener(
+                                                                                                |this,
+                                                                                                 _: &ClickEvent,
+                                                                                                 _w,
+                                                                                                 cx| {
+                                                                                                    this.apply_large_paste_choice(
+                                                                                                        LargePasteChoice::Wrap,
+                                                                                                        cx,
+                                                                                                    );
+                                                                                                },
+                                                                                            ),
+                                                                                        ),
+                                                                                    )
+                                                                                    .child(
+                                                                                        Button::new(
+                                                                                            "large-paste-save",
+                                                                                        )
+                                                                                        .label(
+                                                                                            "Save local://",
+                                                                                        )
+                                                                                        .small()
+                                                                                        .ghost()
+                                                                                        .on_click(
+                                                                                            cx.listener(
+                                                                                                |this,
+                                                                                                 _: &ClickEvent,
+                                                                                                 _w,
+                                                                                                 cx| {
+                                                                                                    this.apply_large_paste_choice(
+                                                                                                        LargePasteChoice::SaveLocal,
+                                                                                                        cx,
+                                                                                                    );
+                                                                                                },
+                                                                                            ),
+                                                                                        ),
+                                                                                    )
+                                                                                    .child(
+                                                                                        Button::new(
+                                                                                            "large-paste-inline",
+                                                                                        )
+                                                                                        .label(
+                                                                                            "Inline",
+                                                                                        )
+                                                                                        .small()
+                                                                                        .ghost()
+                                                                                        .on_click(
+                                                                                            cx.listener(
+                                                                                                |this,
+                                                                                                 _: &ClickEvent,
+                                                                                                 _w,
+                                                                                                 cx| {
+                                                                                                    this.apply_large_paste_choice(
+                                                                                                        LargePasteChoice::Inline,
+                                                                                                        cx,
+                                                                                                    );
+                                                                                                },
+                                                                                            ),
+                                                                                        ),
+                                                                                    ),
+                                                                            ),
                                                                     )
-                                                                    .on_click(window.listener_for(
-                                                                        &view,
-                                                                        move |this,
-                                                                              _,
-                                                                              _window,
-                                                                              cx| {
-                                                                            this.accept_at_mention(
-                                                                                &path_for_click,
-                                                                                cx,
-                                                                            );
-                                                                        },
-                                                                    ))
-                                                                }),
-                                                        ),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        Button::new("attach-files")
-                                            .icon(IconName::Plus)
-                                            .tooltip("Attach files")
-                                            .small()
-                                            .ghost()
-                                            .disabled(!can_pick)
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, window, cx| {
-                                                    this.prompt_attach_files(window, cx);
-                                                },
-                                            )),
-                                    )
-                                    .child(
-                                        Label::new(if cfg!(target_os = "macos") {
-                                            "⌘↩"
-                                        } else {
-                                            "Ctrl+Enter"
-                                        })
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
-                                    )
-                                    .child(
-                                        Button::new("send")
-                                            .primary()
-                                            .label(if composer_uses_steer(
-                                                &self.projection.run_phase,
-                                            ) {
-                                                "Steer"
-                                            } else {
-                                                "Send"
-                                            })
-                                            .disabled(!self.can_send())
-                                            .on_click(cx.listener(
-                                                |this, _: &ClickEvent, window, cx| {
-                                                    this.send_composer_message(cx);
-                                                    this.clear_composer = false;
-                                                    this.pending_composer_value = None;
-                                                    this.composer.update(cx, |input, cx| {
-                                                        input.set_value("", window, cx);
-                                                    });
-                                                },
-                                            )),
+                                                                },
+                                                            )
+                                                            .when(
+                                                                !at_mention_items.is_empty(),
+                                                                |parent| {
+                                                                    parent.child(
+                                                                        v_flex()
+                                                                            .absolute()
+                                                                            .bottom_full()
+                                                                            .left_0()
+                                                                            .right_0()
+                                                                            .max_h(px(240.))
+                                                                            .overflow_y_scrollbar()
+                                                                            .gap_0()
+                                                                            .p_1()
+                                                                            .mb_1()
+                                                                            .bg(theme.popover)
+                                                                            .border_1()
+                                                                            .border_color(
+                                                                                theme.border,
+                                                                            )
+                                                                            .shadow_lg()
+                                                                            .rounded_md()
+                                                                            .children(
+                                                                                at_mention_items
+                                                                                    .iter()
+                                                                                    .enumerate()
+                                                                                    .map(|(ix, path)| {
+                                                                                        let path_for_click =
+                                                                                            path.clone();
+                                                                                        let label =
+                                                                                            path_mention_display(
+                                                                                                path,
+                                                                                                Some(
+                                                                                                    at_mention_cwd
+                                                                                                        .as_path(),
+                                                                                                ),
+                                                                                            );
+                                                                                        Button::new((
+                                                                                            "at-mention",
+                                                                                            ix,
+                                                                                        ))
+                                                                                        .ghost()
+                                                                                        .small()
+                                                                                        .w_full()
+                                                                                        .child(
+                                                                                            wrapped_button_text(
+                                                                                                label,
+                                                                                            ),
+                                                                                        )
+                                                                                        .when(
+                                                                                            ix == at_mention_selected,
+                                                                                            |button| {
+                                                                                                button.bg(
+                                                                                                    theme.secondary,
+                                                                                                )
+                                                                                            },
+                                                                                        )
+                                                                                        .on_click(
+                                                                                            window.listener_for(
+                                                                                                &view,
+                                                                                                move |this,
+                                                                                                      _,
+                                                                                                      _window,
+                                                                                                      cx| {
+                                                                                                    this.accept_at_mention(
+                                                                                                        &path_for_click,
+                                                                                                        cx,
+                                                                                                    );
+                                                                                                },
+                                                                                            ),
+                                                                                        )
+                                                                                    }),
+                                                                            ),
+                                                                    )
+                                                                },
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        Button::new("attach-files")
+                                                            .icon(IconName::Plus)
+                                                            .tooltip("Attach files")
+                                                            .small()
+                                                            .ghost()
+                                                            .disabled(!can_pick)
+                                                            .on_click(cx.listener(
+                                                                |this,
+                                                                 _: &ClickEvent,
+                                                                 window,
+                                                                 cx| {
+                                                                    this.prompt_attach_files(
+                                                                        window, cx,
+                                                                    );
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .w(px(1.))
+                                                    .h_full()
+                                                    .bg(theme.border)
+                                                    .flex_shrink_0(),
+                                            )
+                                            .child(
+                                                Button::new("send")
+                                                    .primary()
+                                                    // Avoid Medium's h_8; fill the chrome height.
+                                                    .with_size(gpui_component::Size::Size(px(0.)))
+                                                    .h_full()
+                                                    .rounded_none()
+                                                    .px_3()
+                                                    .label(if composer_uses_steer(
+                                                        &self.projection.run_phase,
+                                                    ) {
+                                                        "Steer"
+                                                    } else {
+                                                        "Send"
+                                                    })
+                                                    .tooltip(if composer_uses_steer(
+                                                        &self.projection.run_phase,
+                                                    ) {
+                                                        if cfg!(target_os = "macos") {
+                                                            "Steer running turn (⌘↩)"
+                                                        } else {
+                                                            "Steer running turn (Ctrl+Enter)"
+                                                        }
+                                                    } else if cfg!(target_os = "macos") {
+                                                        "Send (⌘↩)"
+                                                    } else {
+                                                        "Send (Ctrl+Enter)"
+                                                    })
+                                                    .disabled(!self.can_send())
+                                                    .on_click(cx.listener(
+                                                        |this, _: &ClickEvent, window, cx| {
+                                                            this.send_composer_message(cx);
+                                                            this.clear_composer = false;
+                                                            this.pending_composer_value = None;
+                                                            this.composer.update(cx, |input, cx| {
+                                                                input.set_value("", window, cx);
+                                                            });
+                                                        },
+                                                    )),
+                                            ),
                                     )
                                     .when_some(self.send_disabled_reason(), |row, reason| {
                                         row.child(
@@ -6848,6 +6939,9 @@ impl Render for SessionView {
                                                 Button::new("follow-up")
                                                     .label("Follow-up")
                                                     .ghost()
+                                                    .with_size(gpui_component::Size::Size(px(0.)))
+                                                    .h(composer_control_height())
+                                                    .px_3()
                                                     .disabled(!self.can_follow_up(cx))
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
@@ -6861,6 +6955,9 @@ impl Render for SessionView {
                                         parent.child(
                                             Button::new("abort")
                                                 .danger()
+                                                .with_size(gpui_component::Size::Size(px(0.)))
+                                                .h(composer_control_height())
+                                                .px_3()
                                                 .label("Abort")
                                                 .on_click(cx.listener(
                                                     |this, _: &ClickEvent, _window, cx| {
@@ -7980,6 +8077,27 @@ pub(crate) fn subagent_snapshot_session_file(snapshot: &serde_json::Value) -> Op
 
 pub(crate) fn subagent_snapshot_summary(snapshot: &serde_json::Value) -> String {
     let id = subagent_snapshot_id(snapshot).unwrap_or("unknown");
+    let meta = subagent_snapshot_meta(snapshot);
+    let description = snapshot
+        .get("description")
+        .or_else(|| snapshot.get("task"))
+        .or_else(|| snapshot.get("assignment"))
+        .map(compact_subagent_value)
+        .unwrap_or_default();
+    if description.is_empty() {
+        format!("{meta} · {id}")
+    } else {
+        format!("{meta} · {id}: {description}")
+    }
+}
+
+/// Primary label for an inspector agent row (id when present).
+pub(crate) fn subagent_snapshot_title(snapshot: &serde_json::Value) -> String {
+    subagent_snapshot_id(snapshot).map_or_else(|| "unknown".to_owned(), str::to_owned)
+}
+
+/// Secondary meta line: `agent · status` from wire fields only.
+pub(crate) fn subagent_snapshot_meta(snapshot: &serde_json::Value) -> String {
     let agent = snapshot
         .get("agent")
         .and_then(serde_json::Value::as_str)
@@ -7988,17 +8106,7 @@ pub(crate) fn subagent_snapshot_summary(snapshot: &serde_json::Value) -> String 
         .get("status")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
-    let description = snapshot
-        .get("description")
-        .or_else(|| snapshot.get("task"))
-        .or_else(|| snapshot.get("assignment"))
-        .map(compact_subagent_value)
-        .unwrap_or_default();
-    if description.is_empty() {
-        format!("{agent} · {status} · {id}")
-    } else {
-        format!("{agent} · {status} · {id}: {description}")
-    }
+    format!("{agent} · {status}")
 }
 
 pub(crate) fn subagent_message_digest(message: &serde_json::Value) -> String {

@@ -61,6 +61,41 @@ fn tool_icon_color(kind: ToolVisualKind, theme: &Theme) -> gpui::Hsla {
     }
 }
 
+/// Readable prose measure for user/assistant rows (~48rem). Tools stay full-width.
+pub(crate) fn transcript_prose_max() -> Pixels {
+    px(768.)
+}
+
+/// Shared outer height for the compose chrome (field + inlaid Send).
+pub(crate) fn composer_control_height() -> Pixels {
+    px(40.)
+}
+
+/// Left accent rail width reserved on every prose row so user/assistant
+/// text share one vertical axis (user paints `theme.accent`; others stay clear).
+pub(crate) fn transcript_accent_rail() -> Pixels {
+    px(2.)
+}
+
+/// Padding after the accent rail before prose / markdown content.
+pub(crate) fn transcript_content_pl() -> Pixels {
+    px(12.)
+}
+
+/// Trailing hover-copy column so row text does not shift when the affordance appears.
+pub(crate) fn transcript_copy_slot() -> Pixels {
+    px(28.)
+}
+
+pub(crate) fn entry_starts_user_turn(transcript: &[TranscriptEntry], row_ix: usize) -> bool {
+    matches!(transcript.get(row_ix), Some(TranscriptEntry::User { .. }))
+        && (row_ix == 0
+            || !matches!(
+                transcript.get(row_ix.saturating_sub(1)),
+                Some(TranscriptEntry::User { .. })
+            ))
+}
+
 /// Derive action-group chrome without merging transcript entries.
 ///
 /// Keeping one rendered item per transcript entry preserves every `ListState`
@@ -92,6 +127,7 @@ pub(crate) fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,
     tool_group: ToolGroupPosition,
+    turn_start: bool,
     expanded: &HashSet<String>,
     running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
@@ -104,29 +140,39 @@ pub(crate) fn render_entry(
                 .w_full()
                 .items_start()
                 .gap_2()
-                .py_2()
+                .when(turn_start, gpui::Styled::pt_4)
+                .when(!turn_start, gpui::Styled::pt_2)
+                .pb_1()
+                .group("transcript-row")
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .border_l_2()
+                        .max_w(transcript_prose_max())
+                        .border_l(transcript_accent_rail())
                         .border_color(theme.accent)
-                        .pl_4()
+                        .pl(transcript_content_pl())
                         .pr_3()
-                        .py_1p5()
+                        .py_1()
+                        .text_sm()
+                        .text_color(theme.foreground)
                         .child(soft_wrap_dynamic_text(text)),
                 )
                 .child(
-                    Button::new(("copy-user", row_ix))
-                        .icon(IconName::Copy)
-                        .tooltip("Copy message")
-                        .small()
-                        .ghost()
-                        .invisible()
-                        .group_hover("transcript-row", gpui::Styled::visible)
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(text_for_copy.clone()));
-                        }),
+                    div().w(transcript_copy_slot()).flex_shrink_0().child(
+                        Button::new(("copy-user", row_ix))
+                            .icon(IconName::Copy)
+                            .tooltip("Copy message")
+                            .small()
+                            .ghost()
+                            .invisible()
+                            .group_hover("transcript-row", gpui::Styled::visible)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    text_for_copy.clone(),
+                                ));
+                            }),
+                    ),
                 )
                 .into_any_element()
         }
@@ -161,21 +207,38 @@ pub(crate) fn render_entry(
                 .w_full()
                 .items_start()
                 .gap_2()
-                .py_2()
-                .child(div().flex_1().min_w_0().child(assistant_content))
+                .pt_1()
+                .pb_3()
+                .group("transcript-row")
                 .child(
-                    Button::new(("copy-assistant", row_ix))
-                        .icon(IconName::Copy)
-                        .tooltip("Copy response")
-                        .small()
-                        .ghost()
-                        .invisible()
-                        .group_hover("transcript-row", gpui::Styled::visible)
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                markdown_for_copy.clone(),
-                            ));
-                        }),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(transcript_prose_max())
+                        // Reserve the same rail width as user rows so prose lines up.
+                        .border_l(transcript_accent_rail())
+                        .border_color(gpui::transparent_black())
+                        .pl(transcript_content_pl())
+                        .pr_3()
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(assistant_content),
+                )
+                .child(
+                    div().w(transcript_copy_slot()).flex_shrink_0().child(
+                        Button::new(("copy-assistant", row_ix))
+                            .icon(IconName::Copy)
+                            .tooltip("Copy response")
+                            .small()
+                            .ghost()
+                            .invisible()
+                            .group_hover("transcript-row", gpui::Styled::visible)
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    markdown_for_copy.clone(),
+                                ));
+                            }),
+                    ),
                 )
                 .into_any_element()
         }
@@ -201,6 +264,8 @@ pub(crate) fn render_entry(
                 .items_start()
                 .gap_2()
                 .py_1()
+                .pl(transcript_accent_rail() + transcript_content_pl())
+                .pr_3()
                 .child(
                     div()
                         .id(("thinking-collapsed", row_ix))
@@ -242,6 +307,8 @@ pub(crate) fn render_entry(
                 .id(("thinking-expanded", row_ix))
                 .w_full()
                 .py_2()
+                .pl(transcript_accent_rail() + transcript_content_pl())
+                .pr_3()
                 .child(
                     v_flex()
                         .gap_1()
@@ -899,8 +966,10 @@ pub(crate) fn render_tool_card(
         .when(!group.grouped || group.first, gpui::Styled::pt_2)
         .when(!group.grouped, gpui::Styled::pb_2)
         .when(group.grouped, gpui::Styled::pb_1)
-        .px_2()
-        .gap_0p5()
+        // Align tool cards with the prose column (accent rail + content pad).
+        .pl(transcript_accent_rail() + transcript_content_pl())
+        .pr_3()
+        .gap_1()
         .rounded_md()
         .border_1()
         .border_color(theme.border)
