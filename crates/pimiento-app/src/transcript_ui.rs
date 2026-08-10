@@ -66,6 +66,20 @@ pub(crate) fn transcript_prose_max() -> Pixels {
     px(768.)
 }
 
+/// Shared height for the compose field and primary Send/Steer control.
+pub(crate) fn composer_control_height() -> Pixels {
+    px(40.)
+}
+
+pub(crate) fn entry_starts_user_turn(transcript: &[TranscriptEntry], row_ix: usize) -> bool {
+    matches!(transcript.get(row_ix), Some(TranscriptEntry::User { .. }))
+        && (row_ix == 0
+            || !matches!(
+                transcript.get(row_ix.saturating_sub(1)),
+                Some(TranscriptEntry::User { .. })
+            ))
+}
+
 /// Derive action-group chrome without merging transcript entries.
 ///
 /// Keeping one rendered item per transcript entry preserves every `ListState`
@@ -97,6 +111,7 @@ pub(crate) fn render_entry(
     row_ix: usize,
     entry: &TranscriptEntry,
     tool_group: ToolGroupPosition,
+    turn_start: bool,
     expanded: &HashSet<String>,
     running_tool_started: &HashMap<String, Instant>,
     cx: &mut Context<SessionView>,
@@ -108,8 +123,10 @@ pub(crate) fn render_entry(
             h_flex()
                 .w_full()
                 .items_start()
-                .gap_2()
-                .py_3()
+                .gap_3()
+                .when(turn_start, gpui::Styled::pt_5)
+                .when(!turn_start, gpui::Styled::pt_3)
+                .pb_2()
                 .group("transcript-row")
                 .child(
                     div()
@@ -122,6 +139,7 @@ pub(crate) fn render_entry(
                         .pr_2()
                         .py_1()
                         .text_sm()
+                        .text_color(theme.foreground)
                         .child(soft_wrap_dynamic_text(text)),
                 )
                 .child(
@@ -168,15 +186,18 @@ pub(crate) fn render_entry(
             h_flex()
                 .w_full()
                 .items_start()
-                .gap_2()
-                .py_3()
+                .gap_3()
+                .pt_1()
+                .pb_4()
                 .group("transcript-row")
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .max_w(transcript_prose_max())
+                        .pl_1()
                         .text_sm()
+                        .text_color(theme.foreground)
                         .child(assistant_content),
                 )
                 .child(
@@ -912,8 +933,8 @@ pub(crate) fn render_tool_card(
 
     v_flex()
         .w_full()
-        .when(!group.grouped || group.first, gpui::Styled::pt_2)
-        .when(!group.grouped, gpui::Styled::pb_2)
+        .when(!group.grouped || group.first, gpui::Styled::pt_3)
+        .when(!group.grouped, gpui::Styled::pb_3)
         .when(group.grouped, gpui::Styled::pb_1)
         .px_3()
         .gap_1()

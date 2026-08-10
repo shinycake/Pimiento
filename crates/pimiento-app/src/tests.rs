@@ -953,6 +953,25 @@ fn subagent_snapshot_title_and_meta_split_wire_fields() {
 }
 
 #[test]
+fn entry_starts_user_turn_marks_new_user_messages() {
+    let transcript = vec![
+        TranscriptEntry::User { text: "one".into() },
+        TranscriptEntry::AssistantText {
+            markdown: pimiento_core::transcript::Markdown::new("a"),
+            streaming: false,
+        },
+        TranscriptEntry::User { text: "two".into() },
+        TranscriptEntry::User {
+            text: "two-b".into(),
+        },
+    ];
+    assert!(entry_starts_user_turn(&transcript, 0));
+    assert!(!entry_starts_user_turn(&transcript, 1));
+    assert!(entry_starts_user_turn(&transcript, 2));
+    assert!(!entry_starts_user_turn(&transcript, 3));
+}
+
+#[test]
 fn workspace_status_rollup_uses_child_phase_priority() {
     let entry = |ix, phase| RailEntry {
         ix,
@@ -1123,7 +1142,10 @@ fn persisted_ui_theme_parses_and_serializes_lowercase_values() {
     assert_eq!(value["rail_collapsed"], true);
     assert_eq!(value["light_theme"], "Pepperwood Light");
     assert_eq!(value["dark_theme"], "Pepperwood Dark");
-    assert!((value["rail_width"].as_f64().unwrap_or_default() - f64::from(default_rail_width())).abs() < 0.001);
+    assert!(
+        (value["rail_width"].as_f64().unwrap_or_default() - f64::from(default_rail_width())).abs()
+            < 0.001
+    );
     assert!(
         (value["inspector_width"].as_f64().unwrap_or_default()
             - f64::from(default_inspector_width()))

@@ -5710,10 +5710,15 @@ impl Render for SessionView {
                                                     &this.projection.transcript,
                                                     ix,
                                                 );
+                                                let turn_start = entry_starts_user_turn(
+                                                    &this.projection.transcript,
+                                                    ix,
+                                                );
                                                 render_entry(
                                                     ix,
                                                     e,
                                                     tool_group,
+                                                    turn_start,
                                                     &this.expanded_tools,
                                                     &this.running_tool_started,
                                                     cx,
@@ -5724,8 +5729,8 @@ impl Render for SessionView {
                                     .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .size_full()
-                                .px_4()
-                                .py_3(),
+                                .px_6()
+                                .py_4(),
                             )
                             .when(transcript_empty, |parent| {
                                 parent.child(
@@ -6285,17 +6290,17 @@ impl Render for SessionView {
                                     .px_4()
                                     .pb_3()
                                     .pt_1()
-                                    .items_end()
+                                    .items_stretch()
                                     .gap_2()
                                     .child(
                                         h_flex()
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
-                                            .items_end()
+                                            .h(composer_control_height())
+                                            .items_center()
                                             .gap_2()
                                             .px_3()
-                                            .py_2()
                                             .rounded_md()
                                             .border_1()
                                             .border_color(theme.border)
@@ -6481,6 +6486,7 @@ impl Render for SessionView {
                                     .child(
                                         Button::new("send")
                                             .primary()
+                                            .h(composer_control_height())
                                             .label(if composer_uses_steer(
                                                 &self.projection.run_phase,
                                             ) {
@@ -6530,6 +6536,7 @@ impl Render for SessionView {
                                                 Button::new("follow-up")
                                                     .label("Follow-up")
                                                     .ghost()
+                                                    .h(composer_control_height())
                                                     .disabled(!self.can_follow_up(cx))
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
@@ -6543,6 +6550,7 @@ impl Render for SessionView {
                                         parent.child(
                                             Button::new("abort")
                                                 .danger()
+                                                .h(composer_control_height())
                                                 .label("Abort")
                                                 .on_click(cx.listener(
                                                     |this, _: &ClickEvent, _window, cx| {
