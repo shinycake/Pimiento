@@ -908,6 +908,27 @@ fn groups_sessions_by_workspace_name_and_preserves_session_order() {
 }
 
 #[test]
+fn rail_cwd_label_uses_tilde_and_end_truncates() {
+    let home = PathBuf::from("/home/ada");
+    assert_eq!(rail_cwd_label(Path::new("/home/ada"), Some(&home)), "~");
+    assert_eq!(
+        rail_cwd_label(Path::new("/home/ada/code/pimiento"), Some(&home)),
+        "~/code/pimiento"
+    );
+    assert_eq!(
+        rail_cwd_label(Path::new("/tmp/elsewhere"), Some(&home)),
+        "/tmp/elsewhere"
+    );
+    let long = PathBuf::from(
+        "/home/ada/very/long/nested/path/that/should/not/fit/in/the/narrow/rail/column",
+    );
+    let labeled = rail_cwd_label(&long, Some(&home));
+    assert!(labeled.starts_with('…'), "{labeled}");
+    assert!(labeled.ends_with("rail/column"), "{labeled}");
+    assert!(labeled.chars().count() <= 34, "{labeled}");
+}
+
+#[test]
 fn workspace_status_rollup_uses_child_phase_priority() {
     let entry = |ix, phase| RailEntry {
         ix,

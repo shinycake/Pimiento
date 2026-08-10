@@ -51,6 +51,28 @@ pub(crate) fn workspace_display_name(path: &Path) -> String {
         .map_or_else(|| path.display().to_string(), str::to_owned)
 }
 
+/// Compact cwd for the session rail: `~/…` when under home, end-truncated to fit.
+pub(crate) fn rail_cwd_label(path: &Path, home: Option<&Path>) -> String {
+    const MAX_CHARS: usize = 34;
+    let display = match home {
+        Some(home) => match path.strip_prefix(home) {
+            Ok(stripped) if stripped.as_os_str().is_empty() => "~".to_owned(),
+            Ok(stripped) => format!("~/{}", stripped.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    };
+    let count = display.chars().count();
+    if count <= MAX_CHARS {
+        return display;
+    }
+    let keep = display
+        .chars()
+        .skip(count - (MAX_CHARS - 1))
+        .collect::<String>();
+    format!("…{keep}")
+}
+
 pub(crate) fn group_sessions_by_workspace(
     entries: Vec<RailEntry>,
 ) -> Vec<(PathBuf, Vec<RailEntry>)> {
@@ -1443,26 +1465,29 @@ impl Render for WorkspaceView {
             .on_action(cx.listener(Self::handle_zoom_menu))
             .on_action(cx.listener(Self::handle_fullscreen_menu))
             .when(!self.rail_collapsed, |parent| {
+                let home = home_dir();
                 parent.child(
                     v_flex()
                         .w(rail_width)
                         .h_full()
-                        .p_2()
-                        .gap_2()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
                         .text_color(theme.sidebar_foreground)
+                        // Top chrome — workspace actions, separated from session list.
                         .child(
                             h_flex()
                                 .w_full()
                                 .items_center()
                                 .gap_2()
+                                .px_2()
+                                .pt_2()
+                                .pb_2()
                                 .child(
                                     Button::new("workspace-new-workspace")
                                         .icon(IconName::FolderOpen)
                                         .label("Workspace…")
-                                        .tooltip("Open workspace")
+                                        .tooltip("Open workspace directory")
                                         .small()
                                         .ghost()
                                         .on_click(cx.listener(
@@ -1481,219 +1506,323 @@ impl Render for WorkspaceView {
                                         .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
                                             this.toggle_rail(cx);
                                         })),
-                                )
-                                .child(
-                                    Label::new("⌘B")
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground),
                                 ),
                         )
+                        .child(Separator::horizontal())
+                        // Session list — workspaces as section headers, sessions nested.
                         .child(
                             v_flex()
                                 .w_full()
                                 .flex_1()
-                                .gap_2()
+                                .px_2()
+                                .pt_2()
+                                .pb_2()
+                                .gap_3()
                                 .overflow_y_scrollbar()
                                 .children(groups.into_iter().enumerate().map(
                                     |(group_ix, (cwd, entries))| {
                                         let cwd_for_add = cwd.clone();
                                         let display = workspace_display_name(&cwd);
                                         let group_status = workspace_status_for_entries(&entries);
-                                        let path_label = cwd.display().to_string();
+                                        let path_label =
+                                            rail_cwd_label(&cwd, home.as_deref());
+                                        let group_count = entries.len();
                                         v_flex()
                                             .w_full()
                                             .gap_1()
-                                            .when(group_ix > 0, gpui::Styled::pt_1)
+                                            .when(group_ix > 0, |group| {
+                                                group.child(Separator::horizontal())
+                                            })
+                                            // Workspace header — folder identity + path meta.
                                             .child(
-                                                h_flex()
+                                                v_flex()
                                                     .w_full()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(
-                                                        v_flex()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .child(
-                                                                Label::new(soft_wrap_dynamic_text(
-                                                                    &display,
-                                                                ))
-                                                                    .text_xs()
-                                                                    .font_weight(
-                                                                        gpui::FontWeight::SEMIBOLD,
-                                                                    ),
-                                                            )
-                                                            .child(
-                                                                Label::new(soft_wrap_dynamic_text(
-                                                                    &path_label,
-                                                                ))
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        theme.muted_foreground,
-                                                                    )
-                                                                    .w_full(),
-                                                            ),
-                                                    )
-                                                    .child(
-                                                        group_status
-                                                            .tag()
-                                                            .small()
-                                                            .child(group_status.label()),
-                                                    )
-                                                    .child(
-                                                        Button::new((
-                                                            "workspace-add-session",
-                                                            group_ix,
-                                                        ))
-                                                        .icon(IconName::Plus)
-                                                        .tooltip("Add session in this workspace")
-                                                        .small()
-                                                        .ghost()
-                                                        .on_click(cx.listener(
-                                                            move |this,
-                                                                  _: &ClickEvent,
-                                                                  window,
-                                                                  cx| {
-                                                                this.add_session_for_cwd(
-                                                                    cwd_for_add.clone(),
-                                                                    window,
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        )),
-                                                    ),
-                                            )
-                                            .children(entries.into_iter().map(|entry| {
-                                                let selected = entry.ix == active;
-                                                let ix = entry.ix;
-                                                let phase_label = run_phase_label(&entry.phase);
-                                                let attention_color = match entry.attention {
-                                                    RailAttention::Quiet => None,
-                                                    RailAttention::Active => Some(theme.info),
-                                                    RailAttention::Unread => Some(theme.warning),
-                                                };
-                                                h_flex()
-                                                    .id(("workspace-session", ix))
-                                                    .group("rail-row")
-                                                    .w_full()
-                                                    .justify_between()
-                                                    .items_start()
                                                     .gap_1()
                                                     .px_2()
                                                     .py_1()
                                                     .rounded_sm()
-                                                    .cursor_pointer()
-                                                    .when(selected, |row| {
-                                                        row.bg(theme.sidebar_accent).rounded_sm()
-                                                    })
-                                                    .when(!selected, |row| {
-                                                        row.rounded_sm()
-                                                            .hover(|row| row.bg(theme.secondary))
-                                                    })
+                                                    .bg(theme.secondary.opacity(0.55))
                                                     .child(
                                                         h_flex()
-                                                            .flex_1()
-                                                            .min_w_0()
+                                                            .w_full()
+                                                            .items_center()
                                                             .gap_2()
-                                                            .when_some(
-                                                                attention_color,
-                                                                |label, color| {
-                                                                    label.child(
-                                                                        div()
-                                                                            .size(px(7.))
-                                                                            .rounded_full()
-                                                                            .bg(color),
+                                                            .child(
+                                                                Icon::new(IconName::FolderOpen)
+                                                                    .small()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                Label::new(
+                                                                    soft_wrap_dynamic_text(
+                                                                        &display,
+                                                                    ),
+                                                                )
+                                                                .text_sm()
+                                                                .font_weight(
+                                                                    gpui::FontWeight::SEMIBOLD,
+                                                                )
+                                                                .flex_1()
+                                                                .min_w_0(),
+                                                            )
+                                                            .when(
+                                                                group_status != StatusKind::Idle,
+                                                                |row| {
+                                                                    row.child(
+                                                                        group_status
+                                                                            .tag()
+                                                                            .small()
+                                                                            .child(
+                                                                                group_status
+                                                                                    .label(),
+                                                                            ),
                                                                     )
                                                                 },
                                                             )
                                                             .child(
-                                                                Label::new(soft_wrap_dynamic_text(
-                                                                    &entry.label,
+                                                                Button::new((
+                                                                    "workspace-add-session",
+                                                                    group_ix,
                                                                 ))
-                                                                    .text_sm()
-                                                                    .flex_1()
-                                                                    .min_w_0()
-                                                                    .when(selected, |label| {
-                                                                        label.font_weight(
-                                                                            gpui::FontWeight::MEDIUM,
-                                                                        )
-                                                                    }),
+                                                                .icon(IconName::Plus)
+                                                                .tooltip(
+                                                                    "Add session in this workspace",
+                                                                )
+                                                                .small()
+                                                                .ghost()
+                                                                .on_click(cx.listener(
+                                                                    move |this,
+                                                                          _: &ClickEvent,
+                                                                          window,
+                                                                          cx| {
+                                                                        this.add_session_for_cwd(
+                                                                            cwd_for_add.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                )),
                                                             ),
                                                     )
                                                     .child(
-                                                        status_pill_for_phase(&entry.phase)
-                                                            .small()
-                                                            .child(phase_label),
-                                                    )
-                                                    .child(
-                                                        Button::new(("workspace-close-session", ix))
-                                                            .icon(IconName::Close)
-                                                            .tooltip("Close session")
-                                                            .small()
-                                                            .ghost()
-                                                            .invisible()
-                                                            .group_hover(
-                                                                "rail-row",
-                                                                gpui::Styled::visible,
+                                                        h_flex()
+                                                            .w_full()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .pl(px(22.))
+                                                            .child(
+                                                                Label::new(
+                                                                    soft_wrap_dynamic_text(
+                                                                        &path_label,
+                                                                    ),
+                                                                )
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    theme.muted_foreground,
+                                                                )
+                                                                .flex_1()
+                                                                .min_w_0(),
+                                                            )
+                                                            .child(
+                                                                Label::new(if group_count == 1 {
+                                                                    "1 session".to_owned()
+                                                                } else {
+                                                                    format!(
+                                                                        "{group_count} sessions"
+                                                                    )
+                                                                })
+                                                                .text_xs()
+                                                                .text_color(
+                                                                    theme.muted_foreground,
+                                                                ),
+                                                            ),
+                                                    ),
+                                            )
+                                            // Nested session rows — visually under the workspace.
+                                            .child(
+                                                v_flex().w_full().gap_0().pl_1().children(
+                                                    entries.into_iter().map(|entry| {
+                                                        let selected = entry.ix == active;
+                                                        let ix = entry.ix;
+                                                        let phase_label =
+                                                            run_phase_label(&entry.phase);
+                                                        let attention_color =
+                                                            match entry.attention {
+                                                                RailAttention::Quiet => None,
+                                                                RailAttention::Active => {
+                                                                    Some(theme.info)
+                                                                }
+                                                                RailAttention::Unread => {
+                                                                    Some(theme.warning)
+                                                                }
+                                                            };
+                                                        h_flex()
+                                                            .id(("workspace-session", ix))
+                                                            .group("rail-row")
+                                                            .w_full()
+                                                            .justify_between()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .px_2()
+                                                            .py_1()
+                                                            .rounded_sm()
+                                                            .cursor_pointer()
+                                                            .when(selected, |row| {
+                                                                row.bg(theme.sidebar_accent)
+                                                            })
+                                                            .when(!selected, |row| {
+                                                                row.hover(|row| {
+                                                                    row.bg(theme.secondary)
+                                                                })
+                                                            })
+                                                            .child(
+                                                                h_flex()
+                                                                    .flex_1()
+                                                                    .min_w_0()
+                                                                    .items_center()
+                                                                    .gap_2()
+                                                                    .child(
+                                                                        // Attention / quiet slot keeps titles aligned.
+                                                                        div()
+                                                                            .size(px(7.))
+                                                                            .rounded_full()
+                                                                            .flex_shrink_0()
+                                                                            .when_some(
+                                                                                attention_color,
+                                                                                |dot, color| {
+                                                                                    dot.bg(color)
+                                                                                },
+                                                                            )
+                                                                            .when(
+                                                                                attention_color
+                                                                                    .is_none(),
+                                                                                |dot| {
+                                                                                    dot.bg(
+                                                                                        theme
+                                                                                            .muted_foreground
+                                                                                            .opacity(0.28),
+                                                                                    )
+                                                                                },
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        Label::new(
+                                                                            soft_wrap_dynamic_text(
+                                                                                &entry.label,
+                                                                            ),
+                                                                        )
+                                                                        .text_sm()
+                                                                        .flex_1()
+                                                                        .min_w_0()
+                                                                        .when(
+                                                                            selected,
+                                                                            |label| {
+                                                                                label.font_weight(
+                                                                                    gpui::FontWeight::MEDIUM,
+                                                                                )
+                                                                            },
+                                                                        ),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                status_pill_for_phase(
+                                                                    &entry.phase,
+                                                                )
+                                                                .small()
+                                                                .child(phase_label),
+                                                            )
+                                                            .child(
+                                                                Button::new((
+                                                                    "workspace-close-session",
+                                                                    ix,
+                                                                ))
+                                                                .icon(IconName::Close)
+                                                                .tooltip("Close session")
+                                                                .small()
+                                                                .ghost()
+                                                                .invisible()
+                                                                .group_hover(
+                                                                    "rail-row",
+                                                                    gpui::Styled::visible,
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    move |this,
+                                                                          _: &ClickEvent,
+                                                                          window,
+                                                                          cx| {
+                                                                        this.close_session_at(
+                                                                            ix, window, cx,
+                                                                        );
+                                                                    },
+                                                                )),
                                                             )
                                                             .on_click(cx.listener(
                                                                 move |this,
                                                                       _: &ClickEvent,
-                                                                      window,
+                                                                      _window,
                                                                       cx| {
-                                                                    this.close_session_at(
-                                                                        ix, window, cx,
-                                                                    );
+                                                                    this.select_session(ix, cx);
                                                                 },
-                                                            )),
-                                                    )
-                                                    .on_click(cx.listener(
-                                                        move |this, _: &ClickEvent, _window, cx| {
-                                                            this.select_session(ix, cx);
-                                                        },
-                                                    ))
-                                                    .context_menu({
-                                                        let workspace = cx.weak_entity();
-                                                        move |menu, _window, _cx| {
-                                                            menu.item(
-                                                                PopupMenuItem::new("Rename")
-                                                                    .on_click({
-                                                                        let workspace =
-                                                                            workspace.clone();
-                                                                        move |_, window, cx| {
-                                                                            let _ = workspace
-                                                                                .update(
-                                                                                    cx,
-                                                                                    |this, cx| {
-                                                                                        this.rename_session_at(
-                                                                                            ix, window, cx,
-                                                                                        );
-                                                                                    },
-                                                                                );
-                                                                        }
-                                                                    }),
-                                                            )
-                                                            .separator()
-                                                            .item(
-                                                                PopupMenuItem::new("Close")
-                                                                    .on_click({
-                                                                        let workspace =
-                                                                            workspace.clone();
-                                                                        move |_, window, cx| {
-                                                                            let _ = workspace
-                                                                                .update(
-                                                                                    cx,
-                                                                                    |this, cx| {
-                                                                                        this.close_session_at(
-                                                                                            ix, window, cx,
-                                                                                        );
-                                                                                    },
-                                                                                );
-                                                                        }
-                                                                    }),
-                                                            )
-                                                        }
-                                                    })
-                                            }))
+                                                            ))
+                                                            .context_menu({
+                                                                let workspace = cx.weak_entity();
+                                                                move |menu, _window, _cx| {
+                                                                    menu.item(
+                                                                        PopupMenuItem::new(
+                                                                            "Rename",
+                                                                        )
+                                                                        .on_click({
+                                                                            let workspace =
+                                                                                workspace
+                                                                                    .clone();
+                                                                            move |_,
+                                                                                  window,
+                                                                                  cx| {
+                                                                                let _ = workspace
+                                                                                    .update(
+                                                                                        cx,
+                                                                                        |this,
+                                                                                         cx| {
+                                                                                            this.rename_session_at(
+                                                                                                ix, window, cx,
+                                                                                            );
+                                                                                        },
+                                                                                    );
+                                                                            }
+                                                                        }),
+                                                                    )
+                                                                    .separator()
+                                                                    .item(
+                                                                        PopupMenuItem::new(
+                                                                            "Close",
+                                                                        )
+                                                                        .on_click({
+                                                                            let workspace =
+                                                                                workspace
+                                                                                    .clone();
+                                                                            move |_,
+                                                                                  window,
+                                                                                  cx| {
+                                                                                let _ = workspace
+                                                                                    .update(
+                                                                                        cx,
+                                                                                        |this,
+                                                                                         cx| {
+                                                                                            this.close_session_at(
+                                                                                                ix, window, cx,
+                                                                                            );
+                                                                                        },
+                                                                                    );
+                                                                            }
+                                                                        }),
+                                                                    )
+                                                                }
+                                                            })
+                                                    }),
+                                                ),
+                                            )
                                     },
                                 )),
                         ),
@@ -1706,8 +1835,8 @@ impl Render for WorkspaceView {
                         .w(px(40.))
                         .h_full()
                         .items_center()
-                        .gap_1()
-                        .pt_3()
+                        .gap_2()
+                        .pt_2()
                         .border_r_1()
                         .border_color(theme.sidebar_border)
                         .bg(theme.sidebar)
@@ -1718,16 +1847,9 @@ impl Render for WorkspaceView {
                                 .tooltip("Show sessions (⌘B)")
                                 .small()
                                 .ghost()
-                                .on_click(cx.listener(
-                                    |this, _: &ClickEvent, _w, cx| {
-                                        this.toggle_rail(cx);
-                                    },
-                                )),
-                        )
-                        .child(
-                            Label::new("⌘B")
-                                .text_xs()
-                                .text_color(theme.muted_foreground),
+                                .on_click(cx.listener(|this, _: &ClickEvent, _w, cx| {
+                                    this.toggle_rail(cx);
+                                })),
                         ),
                 )
             })
