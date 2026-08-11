@@ -1,0 +1,58 @@
+---
+source: crates/pimiento-core/tests/replay_snapshots.rs
+expression: "& summary"
+---
+run_phase: idle
+state:
+  quality: unknown
+  has_snapshot: false
+  model: ~
+  is_streaming: false
+  is_compacting: ~
+  fast_mode_enabled: ~
+  fast_mode_active: ~
+transcript:
+  - kind: tool_call
+    name: ask
+    args_json:
+      questions:
+        - header: proceed?
+          id: confirm
+          options:
+            - label: "Yes"
+            - label: "No"
+          question: ok to proceed?
+    status: Ok
+    output: "User selected: Yes"
+    duration_ms: ~
+  - kind: assistant_text
+    markdown: acknowledged
+    streaming: false
+pending_dialogs:
+  - method: select
+    payload:
+      method: select
+      options:
+        - "Yes"
+        - "No"
+        - Other (type your own)
+      title: ok to proceed?
+      type: extension_ui_request
+    timeout_ms: ~
+display:
+  title: ~
+  statuses: {}
+  widget_keys:
+    - autoresearch
+  editor_text: ~
+todos:
+  present: false
+  entries: ~
+subagents_count: 0
+available_commands_count: 47
+dead_reason: ~
+counts:
+  physical_frames: 52
+  logical_frames: 52
+  chunk_frames: 0
+  reassembled_sequences: 0

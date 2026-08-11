@@ -1,0 +1,38 @@
+[package]
+name = "pimiento-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pimiento — native GPUI desktop client for the Oh My Pi (omp) coding-agent harness."
+
+[dependencies]
+pimiento-core = { workspace = true }
+omp-rpc-client = { workspace = true }
+
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+base64 = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"] }
+smol = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true
+
+# cargo-bundle / packaging metadata — mirrors Zed's channel icon layout
+# (`app-icon.png` + `app-icon@2x.png` full-bleed square masters).
+[package.metadata.bundle]
+name = "Pimiento"
+identifier = "dev.pimiento.app"
+icon = ["../../assets/app-icon@2x.png", "../../assets/app-icon.png"]
+category = "Developer Tool"
+short_description = "Native desktop client for Oh My Pi (omp)"
+osx_minimum_system_version = "13.0"

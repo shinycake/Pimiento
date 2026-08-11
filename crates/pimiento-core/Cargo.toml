@@ -1,0 +1,20 @@
+[package]
+name = "pimiento-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Pimiento core — projection, transcript, and domain types (UI-free)."
+
+[dependencies]
+omp-rpc-client = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml", "redactions"] }
+
+[lints]
+workspace = true

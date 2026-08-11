@@ -1,0 +1,13 @@
+# cargo-audit configuration for the Pimiento workspace gate.
+# Prefer upgrading dependencies over ignores; only waive with a reason.
+#
+# Location required by cargo-audit: `.cargo/audit.toml` (not repo-root).
+
+[advisories]
+# Transitive build-dep of `xcb` 1.7.0 (GPUI Linux X11 stack). Pimiento does not
+# parse untrusted XML through this path; upgrading requires an upstream xcb bump
+# in the pinned Zed GPUI graph. Revisit on next GPUI pin.
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
