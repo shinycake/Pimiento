@@ -335,6 +335,32 @@ impl SessionView {
             cx.subscribe(&dialog_input, Self::on_dialog_input_event),
             cx.subscribe(&rename_input, Self::on_rename_input_event),
             cx.subscribe(&compact_input, Self::on_compact_input_event),
+            // GPUI dispatches keybindings (InputState Paste) *before* capture_key_down.
+            // Intercept Ctrl/Cmd+V first so images / path pastes become attachments
+            // instead of being inserted as plain text by the focused Input.
+            {
+                let weak = cx.weak_entity();
+                cx.intercept_keystrokes(move |event, window, cx| {
+                    let key = event.keystroke.key.to_ascii_lowercase();
+                    let is_paste = key == "v"
+                        && (event.keystroke.modifiers.platform
+                            || event.keystroke.modifiers.control);
+                    if !is_paste {
+                        return;
+                    }
+                    let _ = weak.update(cx, |this, cx| {
+                        if !this.composer.read(cx).focus_handle(cx).is_focused(window) {
+                            return;
+                        }
+                        let Some(item) = cx.read_from_clipboard() else {
+                            return;
+                        };
+                        if this.handle_clipboard_item(&item, cx) {
+                            cx.stop_propagation();
+                        }
+                    });
+                })
+            },
         ];
 
         let initial_len = initial_projection.transcript.len();
