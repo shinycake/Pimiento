@@ -333,6 +333,19 @@ fn encode_image_for_rpc_matches_omp_budget_and_returns_dims() {
     assert_eq!(kept.mime, "image/png");
     assert_eq!(kept.width, 240);
     assert_eq!(kept.height, 240);
+
+    assert_eq!(
+        gpui_image_format_for_mime("image/png"),
+        Some(ImageFormat::Png)
+    );
+    assert_eq!(
+        gpui_image_format_for_mime("image/jpeg"),
+        Some(ImageFormat::Jpeg)
+    );
+    assert!(gpui_image_format_for_mime("image/bmp").is_none());
+    let preview = pending_image_gpui(&kept.mime, &kept.data_b64).expect("preview image");
+    assert_eq!(preview.format(), ImageFormat::Png);
+    assert!(!preview.bytes().is_empty());
 }
 
 #[test]

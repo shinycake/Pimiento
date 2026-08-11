@@ -6051,7 +6051,7 @@ impl Render for SessionView {
                                                     &this.projection.transcript,
                                                     ix,
                                                 );
-                                                render_entry(
+                                                let row = render_entry(
                                                     ix,
                                                     e,
                                                     tool_group,
@@ -6059,14 +6059,20 @@ impl Render for SessionView {
                                                     &this.expanded_tools,
                                                     &this.running_tool_started,
                                                     cx,
-                                                )
+                                                );
+                                                // List ignores horizontal padding on the element —
+                                                // inset each row so content is not flush to the edge.
+                                                div()
+                                                    .w_full()
+                                                    .px(transcript_gutter_x())
+                                                    .child(row)
+                                                    .into_any_element()
                                             },
                                         )
                                     })
                                     .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .size_full()
-                                .px_6()
                                 .py_4(),
                             )
                             .when(transcript_empty, |parent| {
@@ -6579,44 +6585,111 @@ impl Render for SessionView {
                                         .gap_2()
                                         .flex_wrap()
                                         .children(self.pending_attachments.iter().enumerate().map(
-                                            |(ix, attachment)| {
-                                                let kind = if attachment.is_image() {
-                                                    "img"
-                                                } else {
-                                                    "@"
-                                                };
-                                                let label =
-                                                    format!("{kind} {}", attachment.chip_label());
-                                                h_flex()
-                                                    .gap_1()
-                                                    .items_center()
-                                                    .px_2()
-                                                    .py_1()
-                                                    .rounded_md()
-                                                    .bg(theme.background)
-                                                    .border_1()
-                                                    .border_color(theme.border)
-                                                    .child(
-                                                        Label::new(soft_wrap_dynamic_text(&label))
+                                            |(ix, attachment)| match attachment {
+                                                PendingAttachment::Image {
+                                                    mime,
+                                                    data_b64,
+                                                    label,
+                                                    width,
+                                                    height,
+                                                    ..
+                                                } => {
+                                                    let preview =
+                                                        pending_image_gpui(mime, data_b64);
+                                                    let dims = format!("{width}×{height}");
+                                                    let label = label.clone();
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .items_center()
+                                                        .p_1()
+                                                        .pr_2()
+                                                        .rounded_md()
+                                                        .bg(theme.background)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .when_some(preview, |chip, image| {
+                                                            chip.child(
+                                                                img(image)
+                                                                    .id(("attach-preview", ix))
+                                                                    .size(px(56.))
+                                                                    .rounded_sm()
+                                                                    .object_fit(ObjectFit::Cover)
+                                                                    .flex_shrink_0(),
+                                                            )
+                                                        })
+                                                        .child(
+                                                            v_flex()
+                                                                .gap_0()
+                                                                .min_w_0()
+                                                                .child(
+                                                                    Label::new(
+                                                                        soft_wrap_dynamic_text(
+                                                                            &label,
+                                                                        ),
+                                                                    )
+                                                                    .text_xs(),
+                                                                )
+                                                                .child(
+                                                                    Label::new(dims)
+                                                                        .text_xs()
+                                                                        .text_color(
+                                                                            theme.muted_foreground,
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            Button::new(("remove-attachment", ix))
+                                                                .icon(IconName::Close)
+                                                                .tooltip("Remove attachment")
+                                                                .small()
+                                                                .ghost()
+                                                                .on_click(cx.listener(
+                                                                    move |this,
+                                                                          _: &ClickEvent,
+                                                                          _window,
+                                                                          cx| {
+                                                                        this.remove_attachment_at(
+                                                                            ix, cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        )
+                                                }
+                                                PendingAttachment::PathMention { .. } => {
+                                                    let label = attachment.chip_label().to_owned();
+                                                    h_flex()
+                                                        .gap_1()
+                                                        .items_center()
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .bg(theme.background)
+                                                        .border_1()
+                                                        .border_color(theme.border)
+                                                        .child(
+                                                            Label::new(soft_wrap_dynamic_text(
+                                                                &label,
+                                                            ))
                                                             .text_xs(),
-                                                    )
-                                                    .child(
-                                                        Button::new(("remove-attachment", ix))
-                                                            .icon(IconName::Close)
-                                                            .tooltip("Remove attachment")
-                                                            .small()
-                                                            .ghost()
-                                                            .on_click(cx.listener(
-                                                                move |this,
-                                                                      _: &ClickEvent,
-                                                                      _window,
-                                                                      cx| {
-                                                                    this.remove_attachment_at(
-                                                                        ix, cx,
-                                                                    );
-                                                                },
-                                                            )),
-                                                    )
+                                                        )
+                                                        .child(
+                                                            Button::new(("remove-attachment", ix))
+                                                                .icon(IconName::Close)
+                                                                .tooltip("Remove attachment")
+                                                                .small()
+                                                                .ghost()
+                                                                .on_click(cx.listener(
+                                                                    move |this,
+                                                                          _: &ClickEvent,
+                                                                          _window,
+                                                                          cx| {
+                                                                        this.remove_attachment_at(
+                                                                            ix, cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        )
+                                                }
                                             },
                                         )),
                                 )
@@ -6627,32 +6700,32 @@ impl Render for SessionView {
                                     .px_4()
                                     .pb_3()
                                     .pt_1()
-                                    .items_center()
+                                    .items_end()
                                     .gap_2()
                                     .child(
                                         // One bordered chrome owns height: input + attach + Send
-                                        // share the same top/bottom edges (no optical border mismatch).
+                                        // share edges. min_h (not fixed h) so auto_grow can expand.
                                         h_flex()
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
-                                            .h(composer_control_height())
-                                            .items_center()
+                                            .min_h(composer_control_height())
+                                            .items_stretch()
                                             .rounded_md()
                                             .border_1()
                                             .border_color(theme.border)
                                             .bg(theme.background)
-                                            .overflow_hidden()
                                             .child(
                                                 h_flex()
                                                     .relative()
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .h_full()
-                                                    .items_center()
+                                                    .min_h(composer_control_height())
+                                                    .items_end()
                                                     .gap_2()
                                                     .pl_3()
                                                     .pr_1()
+                                                    .py_1()
                                                     .child(
                                                         div()
                                                             .relative()
@@ -6886,6 +6959,7 @@ impl Render for SessionView {
                                                     .primary()
                                                     // Avoid Medium's h_8; fill the chrome height.
                                                     .with_size(gpui_component::Size::Size(px(0.)))
+                                                    .min_h(composer_control_height())
                                                     .h_full()
                                                     .rounded_none()
                                                     .px_3()
@@ -6940,7 +7014,7 @@ impl Render for SessionView {
                                                     .label("Follow-up")
                                                     .ghost()
                                                     .with_size(gpui_component::Size::Size(px(0.)))
-                                                    .h(composer_control_height())
+                                                    .min_h(composer_control_height())
                                                     .px_3()
                                                     .disabled(!self.can_follow_up(cx))
                                                     .on_click(cx.listener(
@@ -6956,7 +7030,7 @@ impl Render for SessionView {
                                             Button::new("abort")
                                                 .danger()
                                                 .with_size(gpui_component::Size::Size(px(0.)))
-                                                .h(composer_control_height())
+                                                .min_h(composer_control_height())
                                                 .px_3()
                                                 .label("Abort")
                                                 .on_click(cx.listener(

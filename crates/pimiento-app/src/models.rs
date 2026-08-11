@@ -901,6 +901,28 @@ pub(crate) fn load_pending_image_bytes(
     })
 }
 
+/// Map OMP-supported image MIME types to GPUI decode formats for composer previews.
+pub(crate) fn gpui_image_format_for_mime(mime: &str) -> Option<ImageFormat> {
+    match mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => Some(ImageFormat::Jpeg),
+        "image/gif" => Some(ImageFormat::Gif),
+        "image/webp" => Some(ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// Decode a pending image's wire payload into a GPUI `Image` for thumbnail preview.
+pub(crate) fn pending_image_gpui(mime: &str, data_b64: &str) -> Option<Arc<Image>> {
+    let format = gpui_image_format_for_mime(mime)?;
+    let bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
 /// Wire `ImageContent` parts — only image variants (path mentions stay in message text).
 pub(crate) fn pending_images_to_wire(attachments: &[PendingAttachment]) -> Vec<serde_json::Value> {
     attachments

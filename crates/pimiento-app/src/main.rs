@@ -8,14 +8,18 @@ use std::ffi::{OsStr, OsString};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gpui::{
     App, Bounds, ClickEvent, ClipboardItem, Context, CursorStyle, ElementId, ExternalPaths,
-    Focusable, FollowMode, Global, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Render, Task, Window,
-    WindowAppearance, WindowBounds, WindowOptions, div, list, point, prelude::*, px, size,
+    Focusable, FollowMode, Global, Image, ImageFormat, KeyDownEvent, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Pixels, Render, Task, Window, WindowAppearance, WindowBounds, WindowOptions,
+    div, img, list, point, prelude::*, px, size,
 };
 use gpui_component::{
     ActiveTheme, Disableable as _, Icon, IconName, Root, Sizable as _, Theme, ThemeMode, WindowExt,

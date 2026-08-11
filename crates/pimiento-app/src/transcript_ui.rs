@@ -66,9 +66,19 @@ pub(crate) fn transcript_prose_max() -> Pixels {
     px(768.)
 }
 
-/// Shared outer height for the compose chrome (field + inlaid Send).
+/// Minimum outer height for the compose chrome (field + inlaid Send).
+/// Grows with multiline `InputState::auto_grow` — do not lock the band to this.
 pub(crate) fn composer_control_height() -> Pixels {
     px(40.)
+}
+
+/// Horizontal inset for each transcript row.
+///
+/// GPUI `list` only applies **vertical** padding to item origins
+/// (`item_origin.x` stays at the list bound). Left/right gutters must live
+/// on each row — `.px_*` on the list element alone leaves prose flush.
+pub(crate) fn transcript_gutter_x() -> Pixels {
+    px(24.)
 }
 
 /// Left accent rail width reserved on every prose row so user/assistant
@@ -79,7 +89,7 @@ pub(crate) fn transcript_accent_rail() -> Pixels {
 
 /// Padding after the accent rail before prose / markdown content.
 pub(crate) fn transcript_content_pl() -> Pixels {
-    px(12.)
+    px(16.)
 }
 
 /// Trailing hover-copy column so row text does not shift when the affordance appears.
