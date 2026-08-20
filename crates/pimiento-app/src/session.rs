@@ -208,6 +208,10 @@ pub(crate) struct SessionView {
     pub(crate) at_mention_open: bool,
     pub(crate) at_mention_selected: usize,
     pub(crate) at_mention_candidates: Vec<PathBuf>,
+    pub(crate) at_mention_index: Vec<PathBuf>,
+    pub(crate) at_mention_index_cwd: Option<PathBuf>,
+    /// Last observed composer emptiness, used to avoid session-wide paints on each keystroke.
+    pub(crate) composer_empty: bool,
     pub(crate) omp_roles: Vec<OmpRole>,
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
@@ -402,6 +406,9 @@ impl SessionView {
             at_mention_open: false,
             at_mention_selected: 0,
             at_mention_candidates: Vec::new(),
+            at_mention_index: Vec::new(),
+            at_mention_index_cwd: None,
+            composer_empty: true,
             omp_roles: load_omp_roles_from_home(home_dir().as_deref()),
             subagent_snapshots: Vec::new(),
             subagent_subscription: SubagentSubscriptionLevel::Events,
@@ -929,7 +936,12 @@ impl SessionView {
             self.transcript_list.reset(new_len);
             self.unread_below = 0;
         }
-        if new_len > 0 {
+        let content_may_have_grown = new_len != old_len
+            || matches!(
+                self.projection.run_phase,
+                RunPhase::Streaming | RunPhase::Compacting
+            );
+        if content_may_have_grown && new_len > 0 {
             let start = new_len.saturating_sub(4);
             self.transcript_list.remeasure_items(start..new_len);
         }
@@ -2275,12 +2287,23 @@ impl SessionView {
     ) {
         match event {
             InputEvent::Change => {
+                let slash_was_open = self.slash_menu == SlashMenuState::Open;
+                let mention_was_open = self.at_mention_open;
                 if self.slash_menu == SlashMenuState::Dismissed {
                     self.slash_menu = SlashMenuState::Closed;
                 }
                 self.update_slash_menu(cx);
                 self.update_at_mention_menu(cx);
-                cx.notify();
+                let empty = self.composer.read(cx).value().trim().is_empty();
+                let emptiness_flipped = empty != self.composer_empty;
+                self.composer_empty = empty;
+                let menus_need_paint = slash_was_open
+                    || mention_was_open
+                    || self.slash_menu == SlashMenuState::Open
+                    || self.at_mention_open;
+                if menus_need_paint || emptiness_flipped {
+                    cx.notify();
+                }
             }
             InputEvent::PressEnter {
                 secondary,
@@ -2324,11 +2347,27 @@ impl SessionView {
             return;
         };
         let cwd = self.session_cwd_path();
-        self.at_mention_candidates = list_cwd_files_for_at_mention(&cwd, query);
+        if self.at_mention_index_cwd.as_deref() != Some(cwd.as_path()) {
+            self.at_mention_index = list_cwd_files_for_at_mention(&cwd, "");
+            self.at_mention_index_cwd = Some(cwd.clone());
+        }
+        let needle = query.to_ascii_lowercase();
+        self.at_mention_candidates = self
+            .at_mention_index
+            .iter()
+            .filter(|path| {
+                needle.is_empty()
+                    || path
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .contains(&needle)
+            })
+            .cloned()
+            .collect();
         self.at_mention_selected = self
             .at_mention_selected
             .min(self.at_mention_candidates.len().saturating_sub(1));
-        self.at_mention_open = !self.at_mention_candidates.is_empty();
+        self.at_mention_open = self.at_mention_candidates.is_empty() == false;
     }
 
     pub(crate) fn accept_at_mention(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -6128,8 +6167,16 @@ impl Render for SessionView {
         let omp_update_ui = self.omp_update_ui.clone();
         let omp_update_disabled_reason = self.omp_update_disabled_reason();
         let can_pick = self.client.is_some();
-        let query = self.model_search.read(cx).value().to_string();
-        let filtered = filter_models(&self.available_models, &query);
+        let query = if self.model_picker_open {
+            self.model_search.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let filtered = if self.model_picker_open {
+            filter_models(&self.available_models, &query)
+        } else {
+            Vec::new()
+        };
         let total_matches = filtered.len();
         let visible_count = total_matches.min(MODEL_PICKER_VISIBLE_CAP);
         let visible = &filtered[..visible_count];
@@ -6143,8 +6190,16 @@ impl Render for SessionView {
             String::new()
         };
         let view = cx.entity();
-        let composer_text = self.composer.read(cx).value().to_string();
-        let slash_commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
+        let composer_text = if self.slash_menu == SlashMenuState::Open || self.palette_open {
+            self.composer.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let slash_commands = if self.slash_menu == SlashMenuState::Open || self.palette_open {
+            parse_slash_commands(self.projection.available_commands_raw.as_ref())
+        } else {
+            Vec::new()
+        };
         let slash_menu_visible = self.slash_menu == SlashMenuState::Open
             && slash_draft_is_open(&slash_commands, &composer_text);
         let slash_matches = if slash_menu_visible {
@@ -6172,21 +6227,41 @@ impl Render for SessionView {
         let at_mention_selected = self
             .at_mention_selected
             .min(at_mention_items.len().saturating_sub(1));
-        let palette_query = self.palette_search.read(cx).value().to_string();
-        let palette_matches = filter_command_palette_entries(
-            &slash_commands,
-            &palette_query,
-            self.omp_update_is_offered(),
-        );
+        let palette_query = if self.palette_open {
+            self.palette_search.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let palette_matches = if self.palette_open {
+            filter_command_palette_entries(
+                &slash_commands,
+                &palette_query,
+                self.omp_update_is_offered(),
+            )
+        } else {
+            Vec::new()
+        };
         if palette_matches.is_empty() {
             self.palette_selected = 0;
         } else {
             self.palette_selected = self.palette_selected.min(palette_matches.len() - 1);
         }
         let palette_selected = self.palette_selected;
-        let registered_themes = registered_theme_choices(cx);
-        let theme_query = self.theme_search.read(cx).value().to_string();
-        let theme_picker_items = filter_theme_picker_items(&registered_themes, &theme_query);
+        let registered_themes = if self.theme_picker_open {
+            registered_theme_choices(cx)
+        } else {
+            Vec::new()
+        };
+        let theme_query = if self.theme_picker_open {
+            self.theme_search.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        let theme_picker_items = if self.theme_picker_open {
+            filter_theme_picker_items(&registered_themes, &theme_query)
+        } else {
+            Vec::new()
+        };
         if theme_picker_items.is_empty() {
             self.theme_picker_selected = 0;
         } else {

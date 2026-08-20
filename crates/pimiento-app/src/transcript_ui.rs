@@ -4,6 +4,7 @@ use crate::*;
 pub(crate) struct ToolGroupPosition {
     pub(crate) grouped: bool,
     pub(crate) first: bool,
+    pub(crate) last: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +120,7 @@ pub(crate) fn tool_group_position(
     ToolGroupPosition {
         grouped: is_tool && (previous_is_tool || next_is_tool),
         first: is_tool && !previous_is_tool,
+        last: is_tool && !next_is_tool,
     }
 }
 
@@ -722,6 +724,63 @@ fn wire_snippet(value: &str, max_chars: usize) -> String {
     snippet
 }
 
+fn json_string_field(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+/// One-line target for a collapsed tool row. Prefer a human field over JSON.
+pub(crate) fn tool_arg_summary(tool_name: &str, args: &serde_json::Value) -> String {
+    let input = args.get("input").unwrap_or(args);
+    let pick =
+        |keys: &[&str]| json_string_field(input, keys).or_else(|| json_string_field(args, keys));
+    let name = tool_name.to_ascii_lowercase();
+    let summary = match name.as_str() {
+        "read" | "read_file" | "write" | "write_file" | "edit" | "ast_edit" => {
+            pick(&["path", "file", "target"])
+        }
+        "grep" | "search" => match (
+            pick(&["pattern", "query", "regex"]),
+            pick(&["path", "glob"]),
+        ) {
+            (Some(pattern), Some(path)) => Some(format!("{pattern}  {path}")),
+            (Some(pattern), None) => Some(pattern),
+            (None, Some(path)) => Some(path),
+            (None, None) => None,
+        },
+        "glob" => pick(&["glob", "pattern", "path"]),
+        "bash" | "shell" | "terminal" => pick(&["command", "cmd"]),
+        "web" | "web_search" => pick(&["query", "q", "url"]),
+        "browser" => pick(&["url", "query"]),
+        _ => pick(&[
+            "path", "file", "pattern", "query", "command", "glob", "url", "title",
+        ]),
+    };
+    summary
+        .map(|text| compact_tool_target(&text, 72))
+        .unwrap_or_default()
+}
+
+fn compact_tool_target(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_owned();
+    }
+    if text.contains('/') || text.contains('\\') {
+        let skip = count.saturating_sub(max_chars.saturating_sub(1));
+        let mut out = String::from("…");
+        out.extend(text.chars().skip(skip));
+        return out;
+    }
+    wire_snippet(text, max_chars)
+}
+
 fn hub_job_command(job: &serde_json::Value) -> Option<String> {
     if let Some(command) = nonempty_wire_string(job.get("command").or_else(|| job.get("label"))) {
         return Some(wire_snippet(&command, 96));
@@ -878,71 +937,26 @@ pub(crate) fn render_tool_card(
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let (status_color, status_foreground, status_label) = match tc.status {
-        ToolStatus::Running => (theme.info, theme.info_foreground, "running"),
-        ToolStatus::Ok => (theme.success, theme.success_foreground, "ok"),
-        ToolStatus::Err => (theme.danger, theme.danger_foreground, "error"),
+    let status_label = match tc.status {
+        ToolStatus::Running => "running",
+        ToolStatus::Ok => "",
+        ToolStatus::Err => "error",
     };
-    let output_text = tc.output.to_string();
-    let has_output = !tc.output.is_empty();
-    let args_text =
-        serde_json::to_string_pretty(&tc.args_json).unwrap_or_else(|_| compact_json(&tc.args_json));
-    let output_value = serde_json::from_str::<serde_json::Value>(&output_text)
-        .unwrap_or_else(|_| serde_json::Value::String(output_text.clone()));
-    let edit_diff = parse_edit_diff(&tc.name, &tc.args_json, &output_value).or_else(|| {
-        // Fallback: treat plain tool output as a unified/compact diff body.
-        let lines = parse_unified_diff_lines(&output_text);
-        lines
-            .iter()
-            .any(|line| matches!(line.kind, DiffLineKind::Add | DiffLineKind::Remove))
-            .then(|| pimiento_core::diff::EditDiffView {
-                path: tc
-                    .args_json
-                    .get("path")
-                    .or_else(|| tc.args_json.pointer("/input/path"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                op: None,
-                lines,
-            })
-    });
-    let hub_summary = parse_hub_job_summary(&tc.name, &tc.args_json, &output_value);
-    let hub_lines = hub_summary
-        .as_ref()
-        .map(hub_job_summary_display_lines)
-        .unwrap_or_default();
+    let has_output = tc.output.is_empty() == false;
     let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
-    let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
     let visual_kind = tool_visual_kind(&tc.name);
-    let tool_title = if hub_summary.is_some() {
+    let tool_title = if tc.name.eq_ignore_ascii_case("hub") {
         "Jobs".to_owned()
     } else {
         eval_summary
             .as_ref()
             .map_or_else(|| tc.name.clone(), |summary| summary.title.clone())
     };
-    let arg_digest: String = edit_diff
+    let arg_digest = eval_summary
         .as_ref()
-        .and_then(|diff| {
-            diff.path.as_ref().map(|path| {
-                format!(
-                    "{}{}",
-                    diff.op
-                        .as_deref()
-                        .map(|op| format!("{op} "))
-                        .unwrap_or_default(),
-                    path
-                )
-            })
-        })
-        .or_else(|| {
-            eval_summary
-                .as_ref()
-                .map(|summary| summary.digest.clone())
-                .filter(|digest| !digest.is_empty())
-        })
-        .or_else(|| hub_lines.first().cloned())
-        .unwrap_or_else(|| wire_snippet(&tc.args_json.to_string(), 80));
+        .map(|summary| summary.digest.clone())
+        .filter(|digest| !digest.is_empty())
+        .unwrap_or_else(|| tool_arg_summary(&tc.name, &tc.args_json));
     let duration_str = tc
         .duration_ms
         .map(|ms| format!("{}.{:03}s", ms / 1000, ms % 1000))
@@ -957,130 +971,123 @@ pub(crate) fn render_tool_card(
         })
         .unwrap_or_default();
     let tc_id = tc.tool_call_id.clone();
-    let view = cx.entity().downgrade();
-    let view_for_toggle = view.clone();
-    let view_for_revert = view.clone();
-    let view_for_agents = view.clone();
+    let view_for_toggle = cx.entity().downgrade();
     let tc_id_for_toggle = tc_id.clone();
+    let title_color = if tc.status == ToolStatus::Err {
+        theme.danger
+    } else {
+        theme.foreground
+    };
 
-    v_flex()
+    let mut card = v_flex()
         .w_full()
         .when(!group.grouped || group.first, gpui::Styled::pt_2)
-        .when(!group.grouped, gpui::Styled::pb_2)
-        .when(group.grouped, gpui::Styled::pb_1)
-        // Align tool cards with the prose column (accent rail + content pad).
+        .when(group.last || !group.grouped, gpui::Styled::pb_1)
         .pl(transcript_accent_rail() + transcript_content_pl())
         .pr_3()
         .gap_1()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.secondary)
-        .when(group.grouped && group.first, |card| {
-            card.child(
-                div()
-                    .w_full()
-                    .pb_1()
-                    .mb_0p5()
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("Tools"),
-            )
-        })
         .child(
             h_flex()
+                .id(("tool-row", row_ix))
                 .w_full()
-                .items_start()
+                .h(px(22.))
+                .items_center()
                 .gap_2()
+                .overflow_hidden()
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    let _ = view_for_toggle.update(cx, |this, cx| {
+                        this.toggle_tool_expanded(&tc_id_for_toggle, cx);
+                    });
+                })
+                .child(
+                    Icon::new(if expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .small()
+                    .text_color(theme.muted_foreground),
+                )
                 .child(
                     Icon::new(tool_icon(visual_kind))
                         .small()
-                        .mt_0p5()
                         .text_color(tool_icon_color(visual_kind, &theme)),
                 )
                 .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(soft_wrap_dynamic_text(&tool_title)),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .text_xs()
-                                .text_color(theme.muted_foreground)
-                                .child(soft_wrap_dynamic_text(&arg_digest)),
-                        ),
+                    Label::new(tool_title)
+                        .text_xs()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(title_color)
+                        .flex_shrink_0(),
                 )
                 .child(
-                    div()
-                        .flex_shrink_0()
-                        .px_2()
-                        .py_0p5()
-                        .rounded_sm()
-                        .bg(status_color)
-                        .text_color(status_foreground)
-                        .text_xs()
-                        .child(status_label),
+                    div().flex_1().min_w_0().overflow_hidden().child(
+                        Label::new(arg_digest)
+                            .text_xs()
+                            .text_color(theme.muted_foreground),
+                    ),
                 )
-                .when(!duration_str.is_empty(), |el| {
-                    el.child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child("·"),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .child(duration_str),
-                            ),
+                .when(!status_label.is_empty(), |row| {
+                    row.child(
+                        Label::new(status_label)
+                            .text_xs()
+                            .text_color(if tc.status == ToolStatus::Err {
+                                theme.danger
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .flex_shrink_0(),
                     )
                 })
-                .child(
-                    Button::new(("toggle-tool", row_ix))
-                        .icon(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .tooltip(if expanded {
-                            "Collapse tool"
-                        } else {
-                            "Expand tool"
-                        })
-                        .small()
-                        .ghost()
-                        .flex_shrink_0()
-                        .on_click(move |_, _, cx| {
-                            let _ = view_for_toggle.update(cx, |this, cx| {
-                                this.toggle_tool_expanded(&tc_id_for_toggle, cx);
-                            });
-                        }),
-                ),
-        )
-        .when(tc.status == ToolStatus::Running, |card| {
-            card.child(
+                .when(!duration_str.is_empty(), |row| {
+                    row.child(
+                        Label::new(duration_str)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .flex_shrink_0(),
+                    )
+                }),
+        );
+
+    if expanded {
+        let output_text = tc.output.to_string();
+        let args_text = serde_json::to_string_pretty(&tc.args_json)
+            .unwrap_or_else(|_| compact_json(&tc.args_json));
+        let output_value = serde_json::from_str::<serde_json::Value>(&output_text)
+            .unwrap_or_else(|_| serde_json::Value::String(output_text.clone()));
+        let edit_diff = parse_edit_diff(&tc.name, &tc.args_json, &output_value).or_else(|| {
+            let lines = parse_unified_diff_lines(&output_text);
+            lines
+                .iter()
+                .any(|line| matches!(line.kind, DiffLineKind::Add | DiffLineKind::Remove))
+                .then(|| pimiento_core::diff::EditDiffView {
+                    path: tc
+                        .args_json
+                        .get("path")
+                        .or_else(|| tc.args_json.pointer("/input/path"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned),
+                    op: None,
+                    lines,
+                })
+        });
+        let hub_summary = parse_hub_job_summary(&tc.name, &tc.args_json, &output_value);
+        let hub_lines = hub_summary
+            .as_ref()
+            .map(hub_job_summary_display_lines)
+            .unwrap_or_default();
+        let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
+
+        if tc.status == ToolStatus::Running {
+            card = card.child(
                 Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
                     .text_xs()
                     .text_color(theme.muted_foreground),
-            )
-        })
-        .when(!hub_lines.is_empty(), |card| {
-            card.child(
+            );
+        }
+        if !hub_lines.is_empty() {
+            card = card.child(
                 v_flex()
                     .w_full()
                     .gap_0p5()
@@ -1096,52 +1103,51 @@ pub(crate) fn render_tool_card(
                             .text_color(theme.muted_foreground)
                             .child(soft_wrap_dynamic_text(&line))
                     })),
-            )
-        })
-        .when(expanded, |parent| {
-            let args_for_copy = args_text.clone();
-            parent.child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_start()
-                            .gap_2()
-                            .child(div().flex_1().min_w_0().text_xs().child("Arguments"))
-                            .child(
-                                Button::new(("copy-tool-args", row_ix))
-                                    .icon(IconName::Copy)
-                                    .tooltip("Copy arguments")
-                                    .small()
-                                    .ghost()
-                                    .invisible()
-                                    .group_hover("transcript-row", gpui::Styled::visible)
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            args_for_copy.clone(),
-                                        ));
-                                    }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .max_h(px(320.))
-                            .overflow_scrollbar()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(theme.background)
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(theme.mono_font_size)
-                            .child(args_text.clone()),
-                    ),
-            )
-        })
-        .when(expanded && has_output, |parent| {
-            parent.child(if let Some(diff) = edit_diff.as_ref() {
+            );
+        }
+        let args_for_copy = args_text.clone();
+        card = card.child(
+            v_flex()
+                .w_full()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .items_center()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().text_xs().child("Arguments"))
+                        .child(
+                            Button::new(("copy-tool-args", row_ix))
+                                .icon(IconName::Copy)
+                                .tooltip("Copy arguments")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        args_for_copy.clone(),
+                                    ));
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .max_h(px(320.))
+                        .overflow_scrollbar()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.secondary)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(theme.mono_font_size)
+                        .child(args_text),
+                ),
+        );
+        if has_output {
+            let view_for_revert = cx.entity().downgrade();
+            let view_for_agents = cx.entity().downgrade();
+            let output_for_copy = output_text.clone();
+            card = card.child(if let Some(diff) = edit_diff.as_ref() {
                 v_flex()
                     .w_full()
                     .max_h(px(320.))
@@ -1150,7 +1156,7 @@ pub(crate) fn render_tool_card(
                     .py_1()
                     .gap_0p5()
                     .rounded_sm()
-                    .bg(theme.background)
+                    .bg(theme.secondary)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
                     .children(diff.lines.iter().enumerate().map(|(ix, line)| {
@@ -1174,75 +1180,77 @@ pub(crate) fn render_tool_card(
                     .px_2()
                     .py_1()
                     .rounded_sm()
-                    .bg(theme.background)
+                    .bg(theme.secondary)
                     .font_family(theme.mono_font_family.clone())
                     .text_size(theme.mono_font_size)
-                    .child(output_text.clone())
+                    .child(output_text)
                     .into_any_element()
-            })
-        })
-        .child(
-            h_flex()
-                .flex_wrap()
-                .gap_2()
-                .when(has_output, |controls| {
-                    controls.child(
+            });
+            card = card.child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
                         Button::new(("copy-tool-output", row_ix))
                             .icon(IconName::Copy)
                             .tooltip("Copy output")
                             .small()
                             .ghost()
-                            .invisible()
-                            .group_hover("transcript-row", gpui::Styled::visible)
                             .on_click({
-                                let output_text = output_text.clone();
                                 move |_, _window, cx| {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        output_text.clone(),
+                                        output_for_copy.clone(),
                                     ));
                                 }
                             }),
                     )
-                })
-                .when(task_subagent.is_some(), |controls| {
-                    controls.child(
-                        Button::new(("open-agents", row_ix))
-                            .icon(IconName::Bot)
-                            .tooltip("Open agents")
-                            .small()
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                let _ = view_for_agents.update(cx, |this, cx| {
-                                    this.request_inspector_focus(PaletteActionId::ToggleAgents, cx);
-                                });
-                            }),
-                    )
-                })
-                .children({
-                    let revert_path =
-                        edit_diff.as_ref().and_then(|d| d.path.clone()).or_else(|| {
-                            tc.args_json
-                                .get("path")
-                                .or_else(|| tc.args_json.pointer("/input/path"))
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned)
-                        });
-                    revert_path.map(|path| {
-                        let tc_id = tc_id.clone();
-                        Button::new(format!("revert-tool-{tc_id}"))
-                            .label("Revert file…")
-                            .small()
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                let path = path.clone();
-                                let _ = view_for_revert.update(cx, |this, cx| {
-                                    this.request_file_revert(path, cx);
-                                });
-                            })
+                    .when(task_subagent.is_some(), |controls| {
+                        controls.child(
+                            Button::new(("open-agents", row_ix))
+                                .icon(IconName::Bot)
+                                .tooltip("Open agents")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let _ = view_for_agents.update(cx, |this, cx| {
+                                        this.request_inspector_focus(
+                                            PaletteActionId::ToggleAgents,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        )
                     })
-                }),
-        )
-        .into_any_element()
+                    .children({
+                        let revert_path = edit_diff
+                            .as_ref()
+                            .and_then(|diff| diff.path.clone())
+                            .or_else(|| {
+                                tc.args_json
+                                    .get("path")
+                                    .or_else(|| tc.args_json.pointer("/input/path"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_owned)
+                            });
+                        revert_path.map(|path| {
+                            let tc_id = tc_id.clone();
+                            Button::new(format!("revert-tool-{tc_id}"))
+                                .label("Revert file…")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    let path = path.clone();
+                                    let _ = view_for_revert.update(cx, |this, cx| {
+                                        this.request_file_revert(path, cx);
+                                    });
+                                })
+                        })
+                    }),
+            );
+        }
+    }
+
+    card.into_any_element()
 }
 
 // ── crash card ────────────────────────────────────────────────────────────

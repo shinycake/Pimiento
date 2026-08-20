@@ -2409,22 +2409,59 @@ fn tool_group_positions_preserve_one_row_per_entry() {
         tool_group_position(&transcript, 1),
         ToolGroupPosition {
             grouped: true,
-            first: true
+            first: true,
+            last: false
         }
     );
     assert_eq!(
         tool_group_position(&transcript, 2),
         ToolGroupPosition {
             grouped: true,
-            first: false
+            first: false,
+            last: true
         }
     );
     assert_eq!(
         tool_group_position(&transcript, 0),
         ToolGroupPosition {
             grouped: false,
-            first: false
+            first: false,
+            last: false
         }
+    );
+}
+
+#[test]
+fn tool_arg_summary_prefers_human_fields() {
+    assert_eq!(
+        tool_arg_summary(
+            "Read",
+            &serde_json::json!({"path": "crates/pimiento-app/src/session.rs"})
+        ),
+        "crates/pimiento-app/src/session.rs"
+    );
+    assert_eq!(
+        tool_arg_summary(
+            "grep",
+            &serde_json::json!({"pattern": "composer", "path": "crates"})
+        ),
+        "composer  crates"
+    );
+    assert_eq!(
+        tool_arg_summary("Glob", &serde_json::json!({"glob": "**/*composer*"})),
+        "**/*composer*"
+    );
+    assert_eq!(
+        tool_arg_summary("bash", &serde_json::json!({"command": "ls -la"})),
+        "ls -la"
+    );
+    assert_eq!(
+        tool_arg_summary("read", &serde_json::json!({"input": {"path": "a.rs"}})),
+        "a.rs"
+    );
+    assert_eq!(
+        tool_arg_summary("unknown", &serde_json::json!({"foo": 1})),
+        ""
     );
 }
 
