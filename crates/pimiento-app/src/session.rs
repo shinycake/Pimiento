@@ -9,6 +9,12 @@ pub(crate) const MAX_DISCOVERED_SESSIONS: usize = 24;
 pub(crate) const SESSION_HEADER_PREFIX_BYTES: usize = 8192;
 pub(crate) const ABORT_ARM_WINDOW: Duration = Duration::from_millis(1200);
 pub(crate) const ABORT_ARM_STATUS: &str = "Press Esc again to abort";
+/// `abort_bash` is synchronous on OMP; a short deadline only covers a wedged queue.
+pub(crate) const ABORT_BASH_TIMEOUT: Duration = Duration::from_secs(1);
+/// Cursor-hosted bash ignores `abort_bash` (execute is called with no signal).
+/// If turn `abort` has not received an ACK by this deadline, the rpc-ui serial queue is
+/// wedged on `waitForIdle` and the child must be recycled.
+pub(crate) const ABORT_RPC_TIMEOUT: Duration = Duration::from_secs(4);
 pub(crate) const MIN_WINDOW_WIDTH: f32 = 480.0;
 pub(crate) const MIN_WINDOW_HEIGHT: f32 = 320.0;
 pub(crate) static PERSISTENCE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -169,14 +175,27 @@ pub(crate) struct SessionView {
     /// shutdown or a fresh session.
     pub(crate) supervisor: Option<Supervisor>,
     pub(crate) composer: gpui::Entity<InputState>,
+    /// Tiny view that owns `Input::new` so keystrokes do not invalidate `SessionView`.
+    pub(crate) composer_view: gpui::Entity<ComposerInputView>,
     pub(crate) model_search: gpui::Entity<InputState>,
     pub(crate) palette_search: gpui::Entity<InputState>,
     /// Shared text field for `input` / `editor` extension UI dialogs.
     pub(crate) dialog_input: gpui::Entity<InputState>,
+    /// Isolated view around [`Self::dialog_input`] so editor keystrokes do not
+    /// lease `SessionView` (GPUI `double_lease_panic`).
+    pub(crate) dialog_input_view: gpui::Entity<ComposerInputView>,
     /// Dialog id currently bound into [`Self::dialog_input`].
     pub(crate) dialog_input_bound_id: Option<String>,
     /// Applied in `render` (needs `Window`) when a text dialog appears/clears.
     pub(crate) pending_dialog_input_sync: Option<(String, String)>,
+    /// Marked option for the current `select` dialog; submit is explicit Continue.
+    pub(crate) select_draft: Option<SelectDraft>,
+    /// Last ask-question choice, kept across sequential `select` request ids.
+    pub(crate) select_memory: Option<SelectMemory>,
+    /// Typed custom answer waiting for OMP's follow-up `editor` request.
+    pub(crate) pending_custom_answer: Option<String>,
+    /// True when [`Self::dialog_input`] is empty; avoids reading `InputState` in render.
+    pub(crate) dialog_input_empty: bool,
     /// Per-dialog timeout generation so superseded timers no-op.
     pub(crate) dialog_timeout_gens: HashMap<String, u64>,
     pub(crate) dialog_timeout_generation: u64,
@@ -212,11 +231,15 @@ pub(crate) struct SessionView {
     pub(crate) at_mention_index_cwd: Option<PathBuf>,
     /// Last observed composer emptiness, used to avoid session-wide paints on each keystroke.
     pub(crate) composer_empty: bool,
+    /// Last observed hard line count, used to relayout chrome when the composer grows.
+    pub(crate) composer_rows: usize,
     pub(crate) omp_roles: Vec<OmpRole>,
     /// Latest `get_subagents` response, retained losslessly for tolerant rendering.
     pub(crate) subagent_snapshots: Vec<serde_json::Value>,
     pub(crate) subagent_subscription: SubagentSubscriptionLevel,
     pub(crate) subagent_refresh_in_flight: bool,
+    pub(crate) state_refresh_in_flight: bool,
+    pub(crate) state_refresh_queued: bool,
     pub(crate) selected_subagent_id: Option<String>,
     pub(crate) subagent_modal_open: bool,
     pub(crate) subagent_modal_status: String,
@@ -257,6 +280,8 @@ pub(crate) struct SessionView {
     pub(crate) expanded_tools: HashSet<String>,
     pub(crate) running_tool_started: HashMap<String, Instant>,
     pub(crate) running_tool_timer: Option<Task<()>>,
+    /// Polls `get_state` while a turn is live so inspector ctx%/tps stay current.
+    pub(crate) live_state_timer: Option<Task<()>>,
     pub(crate) clear_composer: bool,
     pub(crate) pending_composer_value: Option<String>,
     pub(crate) refocus_composer: bool,
@@ -267,6 +292,12 @@ pub(crate) struct SessionView {
     /// Virtualized transcript list (GPUI `ListState`, bottom-aligned chat).
     pub(crate) transcript_list: ListState,
     pub(crate) last_transcript_len: usize,
+    /// Cheap tail signature so streaming paints do not `remeasure_items` unless content grew.
+    pub(crate) last_transcript_fingerprint: u64,
+    /// Persistent selectable Markdown/HTML views; `TextView::markdown` keyed state
+    /// notifies `SessionView` on every drag and the virtualized list drops it.
+    pub(crate) transcript_text_views:
+        HashMap<(usize, TranscriptTextSlot), gpui::Entity<TextViewState>>,
     /// Count of rows appended while the user was scrolled away from the tail.
     pub(crate) unread_below: usize,
     pub(crate) _subscriptions: Vec<gpui::Subscription>,
@@ -300,9 +331,13 @@ impl SessionView {
         let composer = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
-                .auto_grow(1, 8)
+                .auto_grow(COMPOSER_GROW_MIN_ROWS, COMPOSER_GROW_MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder("Message · Enter to send")
+        });
+        let composer_view = cx.new({
+            let input = composer.clone();
+            move |_cx| ComposerInputView { input }
         });
         let model_search = cx.new(|cx| {
             InputState::new(window, cx)
@@ -326,6 +361,10 @@ impl SessionView {
                 .multi_line(true)
                 .auto_grow(1, 6)
                 .placeholder("Enter a value…")
+        });
+        let dialog_input_view = cx.new({
+            let input = dialog_input.clone();
+            move |_cx| ComposerInputView { input }
         });
         let rename_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -359,9 +398,12 @@ impl SessionView {
             transcript_list.set_scroll_handler(move |ev, _window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if ev.is_following_tail {
+                        if this.unread_below == 0 {
+                            return;
+                        }
                         this.unread_below = 0;
+                        cx.notify();
                     }
-                    cx.notify();
                 });
             });
         }
@@ -379,11 +421,17 @@ impl SessionView {
             client,
             supervisor: None,
             composer,
+            composer_view,
             model_search,
             palette_search,
             dialog_input,
+            dialog_input_view,
             dialog_input_bound_id: None,
             pending_dialog_input_sync: None,
+            select_draft: None,
+            select_memory: None,
+            pending_custom_answer: None,
+            dialog_input_empty: true,
             dialog_timeout_gens: HashMap::new(),
             dialog_timeout_generation: 0,
             rename_open: false,
@@ -409,10 +457,13 @@ impl SessionView {
             at_mention_index: Vec::new(),
             at_mention_index_cwd: None,
             composer_empty: true,
+            composer_rows: COMPOSER_GROW_MIN_ROWS,
             omp_roles: load_omp_roles_from_home(home_dir().as_deref()),
             subagent_snapshots: Vec::new(),
             subagent_subscription: SubagentSubscriptionLevel::Events,
             subagent_refresh_in_flight: false,
+            state_refresh_in_flight: false,
+            state_refresh_queued: false,
             selected_subagent_id: None,
             subagent_modal_open: false,
             subagent_modal_status: String::new(),
@@ -450,6 +501,7 @@ impl SessionView {
             expanded_tools: HashSet::new(),
             running_tool_started: HashMap::new(),
             running_tool_timer: None,
+            live_state_timer: None,
             clear_composer: false,
             pending_composer_value: None,
             refocus_composer: false,
@@ -459,6 +511,8 @@ impl SessionView {
             pending_palette_enter: false,
             transcript_list,
             last_transcript_len: initial_len,
+            last_transcript_fingerprint: 0,
+            transcript_text_views: HashMap::new(),
             unread_below: 0,
             _subscriptions: subscriptions,
             pump: None,
@@ -525,7 +579,13 @@ impl SessionView {
                                 this.observe_host_bridge_frame(frame);
                                 this.projection.apply(frame);
                                 this.sync_pending_dialogs(cx);
-                                if is_model_changed {
+                                let refresh_runtime_state = is_model_changed
+                                    || matches!(
+                                        &frame.kind,
+                                        omp_rpc_client::frames::IncomingFrameKind::AgentEnd(_)
+                                            | omp_rpc_client::frames::IncomingFrameKind::AutoCompactionEnd
+                                    );
+                                if refresh_runtime_state {
                                     this.refresh_state(cx);
                                 }
                                 if refresh_subagents {
@@ -538,6 +598,7 @@ impl SessionView {
                         }
                     }
                     this.sync_running_tools(cx);
+                    this.sync_live_state_timer(cx);
                     if !this.can_abort() {
                         this.clear_abort_arm();
                     }
@@ -558,8 +619,11 @@ impl SessionView {
         self.invalidate_omp_update();
         self.client = None;
         self.host_bridge.reset();
+        self.clear_live_timers();
         self.dialog_timeout_gens.clear();
         self.dialog_input_bound_id = None;
+        self.pending_custom_answer = None;
+        self.dialog_input_empty = true;
 
         let Some(supervisor) = self.supervisor.clone() else {
             let reason = info
@@ -682,6 +746,7 @@ impl SessionView {
         self.clear_abort_arm();
         self.take_and_close_client(cx);
         self.host_bridge.reset();
+        self.clear_live_timers();
         self.version_gate_notice = None;
         self.launcher_phase = LauncherPhase::Connecting;
         if launcher_mode {
@@ -695,13 +760,16 @@ impl SessionView {
             self.thinking_picker_open = false;
             self.expanded_tools.clear();
             self.running_tool_started.clear();
-            self.running_tool_timer.take();
             self.dialog_timeout_gens.clear();
             self.dialog_input_bound_id = None;
+            self.pending_custom_answer = None;
+            self.dialog_input_empty = true;
             self.slash_menu = SlashMenuState::Closed;
             self.slash_selected = 0;
             self.transcript_list.reset(0);
             self.last_transcript_len = 0;
+            self.last_transcript_fingerprint = 0;
+            self.transcript_text_views.clear();
             self.unread_below = 0;
             "Connecting to OMP…".clone_into(&mut self.status_message);
         } else {
@@ -770,6 +838,8 @@ impl SessionView {
                 self.transcript_list.reset(self.projection.transcript.len());
                 self.transcript_list.set_follow_mode(FollowMode::Tail);
                 self.last_transcript_len = self.projection.transcript.len();
+                self.last_transcript_fingerprint = 0;
+                self.transcript_text_views.clear();
                 self.unread_below = 0;
                 self.attach_supervisor(resume);
                 self.sync_running_tools(cx);
@@ -895,6 +965,8 @@ impl SessionView {
         self.handoff_confirm_open = false;
         self.close_slash_menu();
         self.clear_composer = true;
+        self.composer_rows = COMPOSER_GROW_MIN_ROWS;
+        self.composer_empty = true;
         if let Some(cwd) = self.session_cwd.take() {
             self.launcher_cwd = cwd;
         }
@@ -903,12 +975,16 @@ impl SessionView {
         self.available_models.clear();
         self.expanded_tools.clear();
         self.running_tool_started.clear();
-        self.running_tool_timer.take();
+        self.clear_live_timers();
         self.dialog_timeout_gens.clear();
         self.dialog_input_bound_id = None;
+        self.pending_custom_answer = None;
+        self.dialog_input_empty = true;
         self.pending_dialog_input_sync = Some(("Enter a value…".to_owned(), String::new()));
         self.transcript_list.reset(0);
         self.last_transcript_len = 0;
+        self.last_transcript_fingerprint = 0;
+        self.transcript_text_views.clear();
         self.unread_below = 0;
         self.launcher_phase = LauncherPhase::Visible;
         self.launcher_error = None;
@@ -936,16 +1012,38 @@ impl SessionView {
             self.transcript_list.reset(new_len);
             self.unread_below = 0;
         }
-        let content_may_have_grown = new_len != old_len
-            || matches!(
-                self.projection.run_phase,
-                RunPhase::Streaming | RunPhase::Compacting
-            );
-        if content_may_have_grown && new_len > 0 {
+        self.transcript_text_views
+            .retain(|&(row_ix, _), _| row_ix < new_len);
+        let fingerprint =
+            transcript_tail_fingerprint(&self.projection.transcript, &self.expanded_tools);
+        if (new_len != old_len || fingerprint != self.last_transcript_fingerprint) && new_len > 0 {
             let start = new_len.saturating_sub(4);
             self.transcript_list.remeasure_items(start..new_len);
         }
         self.last_transcript_len = new_len;
+        self.last_transcript_fingerprint = fingerprint;
+    }
+
+    pub(crate) fn render_transcript_row(
+        &mut self,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let tool_group = tool_group_position(&self.projection.transcript, ix);
+        let turn_start = entry_starts_user_turn(&self.projection.transcript, ix);
+        let Some(entry) = self.projection.transcript.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        render_entry(
+            &mut self.transcript_text_views,
+            ix,
+            &entry,
+            tool_group,
+            turn_start,
+            &self.expanded_tools,
+            &self.running_tool_started,
+            cx,
+        )
     }
 
     pub(crate) fn sync_running_tools(&mut self, cx: &mut Context<Self>) {
@@ -986,11 +1084,91 @@ impl SessionView {
         }
     }
 
+    pub(crate) fn sync_live_state_timer(&mut self, cx: &mut Context<Self>) {
+        let live = matches!(
+            self.projection.run_phase,
+            RunPhase::Streaming | RunPhase::Compacting | RunPhase::Retrying
+        );
+        if !live || self.client.is_none() {
+            self.live_state_timer.take();
+            return;
+        }
+        if self.live_state_timer.is_some() {
+            return;
+        }
+        self.live_state_timer = Some(cx.spawn(async move |view, cx| {
+            loop {
+                smol::Timer::after(Duration::from_secs(2)).await;
+                let keep_going = view.update(cx, |this, cx| {
+                    let live = matches!(
+                        this.projection.run_phase,
+                        RunPhase::Streaming | RunPhase::Compacting | RunPhase::Retrying
+                    );
+                    if live && this.client.is_some() {
+                        this.refresh_state(cx);
+                        true
+                    } else {
+                        this.live_state_timer.take();
+                        false
+                    }
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn clear_live_timers(&mut self) {
+        self.running_tool_timer.take();
+        self.live_state_timer.take();
+        self.state_refresh_in_flight = false;
+        self.state_refresh_queued = false;
+    }
+
     pub(crate) fn jump_to_transcript_tail(&mut self, cx: &mut Context<Self>) {
         self.transcript_list.scroll_to_end();
         self.transcript_list.set_follow_mode(FollowMode::Tail);
         self.unread_below = 0;
         cx.notify();
+    }
+
+    /// Ordinary compositor keystrokes should reach `InputState` without walking
+    /// every overlay handler or `read`ing sibling inputs first.
+    fn composer_typing_should_bypass_capture(
+        &self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> bool {
+        if event.keystroke.modifiers.modified() {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" | "esc" | "up" | "down" | "tab" | "enter" | "pageup" | "page-up"
+            | "pagedown" | "page-down" | "home" | "end" => return false,
+            _ => {}
+        }
+        if self.slash_menu == SlashMenuState::Open
+            || self.at_mention_open
+            || self.palette_open
+            || self.theme_picker_open
+            || self.model_picker_open
+            || self.thinking_picker_open
+            || self.about_open
+            || self.rename_open
+            || self.compact_open
+            || self.handoff_confirm_open
+            || self.subagent_modal_open
+            || self.branch_picker.is_some()
+            || self.login_picker.is_some()
+            || self.large_paste_pending.is_some()
+            || !self.projection.pending_dialogs.is_empty()
+            || self.host_bridge.has_pending_requests()
+        {
+            return false;
+        }
+        self.composer.read(cx).focus_handle(cx).is_focused(window)
     }
 
     pub(crate) fn handle_transcript_nav_key(
@@ -1507,14 +1685,23 @@ impl SessionView {
 
     pub(crate) fn refresh_state(&mut self, cx: &mut Context<Self>) {
         let Some(client) = self.client.clone() else {
+            self.state_refresh_in_flight = false;
+            self.state_refresh_queued = false;
             return;
         };
+        if self.state_refresh_in_flight {
+            self.state_refresh_queued = true;
+            return;
+        }
+        self.state_refresh_in_flight = true;
         cx.spawn(async move |view, cx| {
-            if let Ok(resp) = client.send(RpcCommandBody::GetState).await
-                && resp.success
-                && let Some(data) = resp.data
-            {
-                let _ = view.update(cx, |this, cx| {
+            let resp = client.send(RpcCommandBody::GetState).await;
+            let _ = view.update(cx, |this, cx| {
+                this.state_refresh_in_flight = false;
+                if let Ok(resp) = resp
+                    && resp.success
+                    && let Some(data) = resp.data
+                {
                     this.projection.hydrate_get_state(&data);
                     if let Some(supervisor) = &this.supervisor {
                         let path = this
@@ -1529,8 +1716,12 @@ impl SessionView {
                     }
                     this.sync_status_model();
                     cx.notify();
-                });
-            }
+                }
+                if this.state_refresh_queued {
+                    this.state_refresh_queued = false;
+                    this.refresh_state(cx);
+                }
+            });
         })
         .detach();
     }
@@ -2005,6 +2196,8 @@ impl SessionView {
     }
 
     pub(crate) fn set_composer_draft(&mut self, text: String, cx: &mut Context<Self>) {
+        self.composer_rows = composer_hard_rows(&text);
+        self.composer_empty = text.trim().is_empty();
         self.pending_composer_value = Some(text);
         self.refocus_composer = true;
         cx.notify();
@@ -2136,16 +2329,23 @@ impl SessionView {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // gpui subscribe callback owns the input entity.
     pub(crate) fn on_dialog_input_event(
         &mut self,
-        _input: gpui::Entity<InputState>,
+        input: gpui::Entity<InputState>,
         event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
         match event {
-            InputEvent::Change => cx.notify(),
-            // Single-line `input` submits on Enter; multiline `editor` keeps
-            // newlines and uses the Submit button.
+            InputEvent::Change => {
+                let empty = input.read(cx).value().trim().is_empty();
+                if self.dialog_input_empty != empty {
+                    self.dialog_input_empty = empty;
+                    cx.notify();
+                }
+            }
+            // Single-line `input` submits on Enter; multiline fields keep
+            // newlines and submit with ⌘↩ / Submit.
             InputEvent::PressEnter {
                 secondary: false,
                 shift: false,
@@ -2156,6 +2356,16 @@ impl SessionView {
                 .is_some_and(|d| d.method == "input") =>
             {
                 self.submit_dialog_input(cx);
+            }
+            InputEvent::PressEnter {
+                secondary: true,
+                shift: false,
+            } => {
+                if self.current_select_is_custom() {
+                    self.confirm_dialog_selection(cx);
+                } else {
+                    self.submit_dialog_input(cx);
+                }
             }
             _ => {}
         }
@@ -2170,16 +2380,264 @@ impl SessionView {
         }
         let id = dialog.id.clone();
         let value = self.dialog_input.read(cx).value().to_string();
-        let view = cx.entity().downgrade();
+        if value.trim().is_empty() {
+            return;
+        }
         let mut fields = serde_json::Map::new();
         fields.insert("value".into(), serde_json::Value::String(value));
-        do_dialog_response(&view, &id, fields, cx);
+        self.submit_dialog_response(&id, fields, cx);
     }
 
     /// Bind dialog text field + schedule timeouts when pending dialogs change.
     pub(crate) fn sync_pending_dialogs(&mut self, cx: &mut Context<Self>) {
+        self.sync_select_draft();
+        self.flush_pending_custom_answer(cx);
         self.sync_dialog_input(cx);
         self.sync_dialog_timeouts(cx);
+    }
+
+    pub(crate) fn current_select_is_custom(&self) -> bool {
+        let Some(dialog) = self.projection.pending_dialogs.first() else {
+            return false;
+        };
+        self.select_draft
+            .as_ref()
+            .is_some_and(|draft| select_option_is_custom(dialog, draft))
+    }
+
+    pub(crate) fn sync_select_draft(&mut self) {
+        let Some(dialog) = self.projection.pending_dialogs.first() else {
+            self.select_draft = None;
+            return;
+        };
+        if dialog.method != "select" {
+            self.select_draft = None;
+            return;
+        }
+        if self
+            .select_draft
+            .as_ref()
+            .is_some_and(|draft| draft.dialog_id == dialog.id)
+        {
+            return;
+        }
+        let (title, choice_values) = select_question_fingerprint(dialog);
+        let (restore_value, last_sent_value, checked_values) = match &self.select_memory {
+            Some(memory) if memory.title == title && memory.choice_values == choice_values => (
+                memory.selected_value.clone(),
+                memory.last_sent_value.clone(),
+                memory.checked_values.clone(),
+            ),
+            _ => (None, None, Vec::new()),
+        };
+        let mut draft = select_draft_for_dialog(dialog);
+        if let Some(value) = restore_value.as_deref()
+            && let Some(index) = dialog_primary_options(dialog)
+                .iter()
+                .position(|option| option.value == value || option.label == value)
+        {
+            draft.selected = Some(index);
+        }
+        draft.checked_values.clone_from(&checked_values);
+        let selected_value = draft
+            .selected
+            .and_then(|index| choice_values.get(index).cloned());
+        self.select_draft = Some(draft);
+        self.select_memory = Some(SelectMemory {
+            title,
+            choice_values,
+            selected_value,
+            last_sent_value,
+            checked_values,
+        });
+    }
+
+    fn remember_select_choice(&mut self, value: &str) {
+        let Some(memory) = self.select_memory.as_mut() else {
+            return;
+        };
+        memory.last_sent_value = Some(value.to_owned());
+        let is_choice = memory.choice_values.iter().any(|choice| choice == value)
+            && !is_custom_ask_option(value)
+            && !is_select_completion_option(value);
+        if is_choice {
+            memory.selected_value = Some(value.to_owned());
+            toggle_checked_value(&mut memory.checked_values, value);
+        }
+        if let Some(draft) = self.select_draft.as_mut() {
+            draft.checked_values.clone_from(&memory.checked_values);
+        }
+    }
+
+    pub(crate) fn mark_dialog_selection(&mut self, idx: usize, cx: &mut Context<Self>) {
+        let Some((id, value, toggle_now, checked_values)) =
+            self.projection.pending_dialogs.first().and_then(|dialog| {
+                if dialog.method != "select" {
+                    return None;
+                }
+                let options = dialog_primary_options(dialog);
+                let option = options.get(idx)?;
+                Some((
+                    dialog.id.clone(),
+                    option.value.clone(),
+                    select_completion_value(dialog).is_some() && option_is_choice(option),
+                    self.select_memory
+                        .as_ref()
+                        .map(|memory| memory.checked_values.clone())
+                        .unwrap_or_default(),
+                ))
+            })
+        else {
+            return;
+        };
+        self.select_draft = Some(SelectDraft {
+            dialog_id: id.clone(),
+            selected: Some(idx),
+            checked_values,
+        });
+        if let Some(memory) = self.select_memory.as_mut() {
+            memory.selected_value = Some(value.clone());
+        }
+        if toggle_now {
+            self.remember_select_choice(&value);
+            let mut fields = serde_json::Map::new();
+            fields.insert("value".into(), serde_json::Value::String(value));
+            self.submit_dialog_response(&id, fields, cx);
+            return;
+        }
+        self.sync_dialog_input(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_dialog_selection(&mut self, cx: &mut Context<Self>) {
+        let Some((id, choice_options, completion, selected, last_sent, checked, needs_typed)) =
+            self.projection.pending_dialogs.first().and_then(|dialog| {
+                if dialog.method != "select" {
+                    return None;
+                }
+                let draft = self.select_draft.as_ref()?;
+                if draft.dialog_id != dialog.id {
+                    return None;
+                }
+                let choice_options = dialog_primary_options(dialog);
+                let selected = draft.selected;
+                let needs_typed = selected
+                    .and_then(|idx| choice_options.get(idx))
+                    .is_some_and(option_is_custom);
+                Some((
+                    dialog.id.clone(),
+                    choice_options,
+                    select_completion_value(dialog),
+                    selected,
+                    self.select_memory
+                        .as_ref()
+                        .and_then(|memory| memory.last_sent_value.clone()),
+                    self.select_memory
+                        .as_ref()
+                        .map(|memory| memory.checked_values.clone())
+                        .unwrap_or_default(),
+                    needs_typed,
+                ))
+            })
+        else {
+            return;
+        };
+        let typed = if needs_typed {
+            self.dialog_input.read(cx).value().to_string()
+        } else {
+            String::new()
+        };
+        match resolve_select_continue(
+            &choice_options,
+            selected,
+            completion.as_deref(),
+            last_sent.as_deref(),
+            &checked,
+            &typed,
+        ) {
+            SelectContinue::Nothing | SelectContinue::NeedCustomText => {}
+            SelectContinue::Send(value) => {
+                self.remember_select_choice(&value);
+                let mut fields = serde_json::Map::new();
+                fields.insert("value".into(), serde_json::Value::String(value));
+                self.submit_dialog_response(&id, fields, cx);
+            }
+            SelectContinue::SendCustom { wire_value } => {
+                self.pending_custom_answer = Some(typed);
+                self.remember_select_choice(&wire_value);
+                let mut fields = serde_json::Map::new();
+                fields.insert("value".into(), serde_json::Value::String(wire_value));
+                self.submit_dialog_response(&id, fields, cx);
+            }
+            SelectContinue::FinishCustom {
+                other_value,
+                answer,
+            } => {
+                self.pending_custom_answer = Some(answer);
+                self.remember_select_choice(&other_value);
+                let mut fields = serde_json::Map::new();
+                fields.insert("value".into(), serde_json::Value::String(other_value));
+                self.submit_dialog_response(&id, fields, cx);
+            }
+        }
+    }
+
+    pub(crate) fn flush_pending_custom_answer(&mut self, cx: &mut Context<Self>) {
+        let Some(answer) = self.pending_custom_answer.take() else {
+            return;
+        };
+        let Some(id) = self.projection.pending_dialogs.first().and_then(|dialog| {
+            matches!(dialog.method.as_str(), "input" | "editor").then(|| dialog.id.clone())
+        }) else {
+            self.pending_custom_answer = Some(answer);
+            return;
+        };
+        let mut fields = serde_json::Map::new();
+        fields.insert("value".into(), serde_json::Value::String(answer.clone()));
+        if !self.send_dialog_response(&id, fields, cx) {
+            self.pending_custom_answer = Some(answer);
+        }
+    }
+
+    /// Send an extension-UI response while `SessionView` is already leased.
+    /// Callers that only have a `WeakEntity` should use [`do_dialog_response`].
+    pub(crate) fn submit_dialog_response(
+        &mut self,
+        id: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.send_dialog_response(id, fields, cx) {
+            return;
+        }
+        self.sync_pending_dialogs(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn send_dialog_response(
+        &mut self,
+        id: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(client) = self.client.clone() else {
+            return false;
+        };
+        if !self.projection.pending_dialogs.iter().any(|d| d.id == id) {
+            return false;
+        }
+        let id_owned = id.to_owned();
+        cx.spawn(async move |_, _| {
+            let _ = client
+                .send(RpcCommandBody::ExtensionUiResponse {
+                    id: id_owned,
+                    fields,
+                })
+                .await;
+        })
+        .detach();
+        self.projection.pending_dialogs.retain(|d| d.id != id);
+        true
     }
 
     pub(crate) fn sync_dialog_input(&mut self, _cx: &mut Context<Self>) {
@@ -2189,35 +2647,58 @@ impl SessionView {
             .iter()
             .find(|d| matches!(d.method.as_str(), "input" | "editor"))
             .cloned();
-        let Some(dialog) = text_dialog else {
-            if self.dialog_input_bound_id.take().is_some() {
-                self.pending_dialog_input_sync = Some(("Enter a value…".to_owned(), String::new()));
+        if let Some(dialog) = text_dialog {
+            if self.dialog_input_bound_id.as_deref() == Some(dialog.id.as_str()) {
+                return;
             }
-            return;
-        };
-        if self.dialog_input_bound_id.as_deref() == Some(dialog.id.as_str()) {
+            self.dialog_input_bound_id = Some(dialog.id.clone());
+            let placeholder = dialog
+                .payload
+                .get("placeholder")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if dialog.method == "editor" {
+                    "Edit text…"
+                } else {
+                    "Enter a value…"
+                })
+                .to_owned();
+            let prefill = dialog
+                .payload
+                .get("prefill")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            self.dialog_input_empty = prefill.trim().is_empty();
+            self.pending_dialog_input_sync = Some((placeholder, prefill));
             return;
         }
-        self.dialog_input_bound_id = Some(dialog.id.clone());
-        let placeholder = dialog
-            .payload
-            .get("placeholder")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(if dialog.method == "editor" {
-                "Edit text…"
-            } else {
-                "Enter a value…"
-            })
-            .to_owned();
-        let prefill = dialog
-            .payload
-            .get("prefill")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_owned();
-        self.pending_dialog_input_sync = Some((placeholder, prefill));
+
+        if self.current_select_is_custom() {
+            let Some(dialog_id) = self
+                .projection
+                .pending_dialogs
+                .first()
+                .map(|dialog| dialog.id.clone())
+            else {
+                return;
+            };
+            let bind_id = format!("{dialog_id}#custom");
+            if self.dialog_input_bound_id.as_deref() == Some(bind_id.as_str()) {
+                return;
+            }
+            self.dialog_input_bound_id = Some(bind_id);
+            self.dialog_input_empty = true;
+            self.pending_dialog_input_sync =
+                Some(("Type your own answer…".to_owned(), String::new()));
+            return;
+        }
+
+        if self.dialog_input_bound_id.take().is_some() {
+            self.dialog_input_empty = true;
+            self.pending_dialog_input_sync = Some(("Enter a value…".to_owned(), String::new()));
+        }
     }
 
     pub(crate) fn sync_dialog_timeouts(&mut self, cx: &mut Context<Self>) {
@@ -2292,16 +2773,20 @@ impl SessionView {
                 if self.slash_menu == SlashMenuState::Dismissed {
                     self.slash_menu = SlashMenuState::Closed;
                 }
-                self.update_slash_menu(cx);
-                self.update_at_mention_menu(cx);
-                let empty = self.composer.read(cx).value().trim().is_empty();
+                let text = self.composer.read(cx).value().to_string();
+                self.update_slash_menu_from(&text);
+                self.update_at_mention_menu_from(&text);
+                let empty = text.trim().is_empty();
                 let emptiness_flipped = empty != self.composer_empty;
                 self.composer_empty = empty;
+                let rows = composer_hard_rows(&text);
+                let rows_changed = rows != self.composer_rows;
+                self.composer_rows = rows;
                 let menus_need_paint = slash_was_open
                     || mention_was_open
                     || self.slash_menu == SlashMenuState::Open
                     || self.at_mention_open;
-                if menus_need_paint || emptiness_flipped {
+                if menus_need_paint || emptiness_flipped || rows_changed {
                     cx.notify();
                 }
             }
@@ -2339,9 +2824,8 @@ impl SessionView {
         }
     }
 
-    pub(crate) fn update_at_mention_menu(&mut self, cx: &mut Context<Self>) {
-        let text = self.composer_draft(cx);
-        let Some(query) = at_mention_query(&text) else {
+    pub(crate) fn update_at_mention_menu_from(&mut self, text: &str) {
+        let Some(query) = at_mention_query(text) else {
             self.at_mention_open = false;
             self.at_mention_candidates.clear();
             return;
@@ -2362,12 +2846,13 @@ impl SessionView {
                         .to_ascii_lowercase()
                         .contains(&needle)
             })
+            .take(12)
             .cloned()
             .collect();
         self.at_mention_selected = self
             .at_mention_selected
             .min(self.at_mention_candidates.len().saturating_sub(1));
-        self.at_mention_open = self.at_mention_candidates.is_empty() == false;
+        self.at_mention_open = !self.at_mention_candidates.is_empty();
     }
 
     pub(crate) fn accept_at_mention(&mut self, path: &Path, cx: &mut Context<Self>) {
@@ -2621,6 +3106,8 @@ impl SessionView {
         // clears even if a later flag race skips `clear_composer`.
         self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
+        self.composer_rows = COMPOSER_GROW_MIN_ROWS;
+        self.composer_empty = true;
         self.pending_attachments.clear();
         self.refocus_composer = true;
         cx.notify();
@@ -2671,19 +3158,21 @@ impl SessionView {
         filter_slash_commands(&commands, text)
     }
 
-    pub(crate) fn update_slash_menu(&mut self, cx: &Context<Self>) {
-        let text = self.composer.read(cx).value().to_string();
+    pub(crate) fn update_slash_menu_from(&mut self, text: &str) {
         if self.slash_menu == SlashMenuState::Dismissed {
             return;
         }
+        if !slash_menu_should_scan(self.slash_menu, text) {
+            return;
+        }
         let commands = parse_slash_commands(self.projection.available_commands_raw.as_ref());
-        if !slash_draft_is_open(&commands, &text) {
+        if !slash_draft_is_open(&commands, text) {
             self.close_slash_menu();
             return;
         }
 
         self.slash_menu = SlashMenuState::Open;
-        let match_count = self.filtered_slash_commands(&text).len();
+        let match_count = filter_slash_commands(&commands, text).len();
         self.slash_selected = self.slash_selected.min(match_count.saturating_sub(1));
     }
 
@@ -2889,9 +3378,11 @@ impl SessionView {
         self.pump.take();
         self.host_bridge.reset();
         self.running_tool_started.clear();
-        self.running_tool_timer.take();
+        self.clear_live_timers();
         self.dialog_timeout_gens.clear();
         self.dialog_input_bound_id = None;
+        self.pending_custom_answer = None;
+        self.dialog_input_empty = true;
         self.palette_open = false;
         self.about_open = false;
         self.projection.mark_restarting();
@@ -2967,6 +3458,7 @@ impl SessionView {
     pub(crate) fn handle_abort_esc_key(
         &mut self,
         event: &KeyDownEvent,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if event.keystroke.modifiers.modified()
@@ -2981,21 +3473,47 @@ impl SessionView {
             .as_ref()
             .is_some_and(|arm| Instant::now() < arm.deadline)
         {
-            self.do_abort(cx);
+            self.do_abort(window, cx);
         } else {
             self.arm_abort(cx);
         }
         true
     }
 
-    pub(crate) fn do_abort(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn do_abort(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.clear_abort_arm();
+        // Cursor-hosted bash is started with no AbortSignal, so OMP's
+        // `abort`/`abort_bash` often never emit `tool_execution_end`. Stop the
+        // spinner on the user action; a later end frame can still overwrite.
+        self.projection.settle_orphaned_running_tools();
+        self.sync_running_tools(cx);
+        self.sync_transcript_list();
         cx.notify();
         let Some(client) = self.client.clone() else {
             return;
         };
-        cx.spawn(async move |_, _| {
-            let _ = client.send(RpcCommandBody::Abort).await;
+        cx.spawn_in(window, async move |view, cx| {
+            let _ = client
+                .send_with_timeout(RpcCommandBody::AbortBash, ABORT_BASH_TIMEOUT)
+                .await;
+            let abort = client
+                .send_with_timeout(RpcCommandBody::Abort, ABORT_RPC_TIMEOUT)
+                .await;
+            let abort_ok = matches!(abort, Ok(resp) if resp.success);
+            if abort_ok {
+                return;
+            }
+            let _ = view.update_in(cx, |this, window, cx| {
+                if !this.can_abort() {
+                    return;
+                }
+                // Turn abort did not ACK — rpc-ui is blocked on waitForIdle
+                // behind a tool that ignores abort. Recycle the child so the
+                // serial queue (Steer/prompt/get_state) can move again.
+                let resume = this.restart_resume_path();
+                let cwd = this.restart_cwd(resume.as_deref());
+                this.begin_connection(window, cwd, resume, false, cx);
+            });
         })
         .detach();
     }
@@ -3014,17 +3532,11 @@ impl SessionView {
         cx.notify();
     }
 
-    pub(crate) fn client_and_dialog_id(&self, dialog_id: &str) -> Option<(RpcClient, bool)> {
-        let client = self.client.clone()?;
-        let exists = self
-            .projection
-            .pending_dialogs
-            .iter()
-            .any(|d| d.id == dialog_id);
-        Some((client, exists))
-    }
-
-    pub(crate) fn handle_dialog_key(&self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn handle_dialog_key(
+        &mut self,
+        event: &KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if event.keystroke.modifiers.modified() {
             return false;
         }
@@ -3044,38 +3556,38 @@ impl SessionView {
             return false;
         };
 
-        let view = cx.entity().downgrade();
         let id = dialog.id.clone();
         match action {
             DialogKeyAction::Confirm => {
                 let mut fields = serde_json::Map::new();
                 fields.insert("confirmed".into(), serde_json::Value::Bool(true));
-                do_dialog_response(&view, &id, fields, cx);
+                self.submit_dialog_response(&id, fields, cx);
             }
             DialogKeyAction::Deny => {
                 let mut fields = serde_json::Map::new();
                 fields.insert("confirmed".into(), serde_json::Value::Bool(false));
-                do_dialog_response(&view, &id, fields, cx);
+                self.submit_dialog_response(&id, fields, cx);
             }
-            DialogKeyAction::Cancel => do_cancel_dialog(&view, &id, cx),
-            DialogKeyAction::Select(idx) => {
-                if let Some(opt) = select_dialog_options(dialog).into_iter().nth(idx) {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("value".into(), serde_json::Value::String(opt));
-                    do_dialog_response(&view, &id, fields, cx);
+            DialogKeyAction::Cancel => {
+                self.submit_dialog_response(&id, dialog_cancel_fields(false), cx);
+            }
+            DialogKeyAction::Select(idx) => self.mark_dialog_selection(idx, cx),
+            DialogKeyAction::SubmitSelect => {
+                if self.current_select_is_custom() {
+                    return false;
                 }
+                self.confirm_dialog_selection(cx);
             }
         }
         true
     }
 
-    pub(crate) fn can_follow_up(&self, cx: &Context<Self>) -> bool {
+    pub(crate) fn can_follow_up(&self) -> bool {
         self.client.is_some()
             && matches!(self.projection.run_phase, RunPhase::Streaming)
             && self.projection.pending_dialogs.is_empty()
             && !self.host_bridge.has_pending_requests()
-            && (!self.composer.read(cx).value().trim().is_empty()
-                || !self.pending_attachments.is_empty())
+            && (!self.composer_empty || !self.pending_attachments.is_empty())
     }
 
     pub(crate) fn do_follow_up(&mut self, cx: &mut Context<Self>) {
@@ -3108,6 +3620,8 @@ impl SessionView {
         };
         self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
+        self.composer_rows = COMPOSER_GROW_MIN_ROWS;
+        self.composer_empty = true;
         self.pending_attachments.clear();
         self.at_mention_open = false;
         self.large_paste_pending = None;
@@ -3901,7 +4415,7 @@ impl SessionView {
             PaletteActionId::ExportHtml => self.export_html(cx),
             PaletteActionId::ShareSession => self.share_session(cx),
             PaletteActionId::RenameSession => self.rename_session(window, cx),
-            PaletteActionId::AbortRun => self.do_abort(cx),
+            PaletteActionId::AbortRun => self.do_abort(window, cx),
             PaletteActionId::SessionsLauncher => self.return_to_launcher(cx),
             PaletteActionId::RevealLogs => {
                 if reveal_in_file_manager(&self.persistence.root).is_err() {
@@ -3983,6 +4497,8 @@ impl SessionView {
         self.large_paste_pending = None;
         self.pending_composer_value = Some(String::new());
         self.clear_composer = true;
+        self.composer_rows = COMPOSER_GROW_MIN_ROWS;
+        self.composer_empty = true;
         self.pending_attachments.clear();
         self.refocus_composer = true;
         self.clear_abort_arm();
@@ -4930,6 +5446,22 @@ impl SessionView {
         classify_rail_attention(&self.projection.run_phase, self.unread_below)
     }
 
+    /// Fields the workspace rail / window title actually paint. Used so
+    /// transcript streaming does not rebuild the whole workspace tree.
+    pub(crate) fn workspace_chrome_sig(&self) -> SessionChromeSig {
+        let cwd = self
+            .session_cwd
+            .as_deref()
+            .unwrap_or(self.launcher_cwd.as_path());
+        SessionChromeSig {
+            label: projection_session_name(&self.projection, cwd),
+            phase: self.projection.run_phase.clone(),
+            unread: self.unread_below,
+            attention: self.rail_attention(),
+            launcher: self.launcher_phase,
+        }
+    }
+
     pub(crate) fn window_title(&self) -> String {
         if self.launcher_phase != LauncherPhase::Hidden {
             return "Pimiento".to_owned();
@@ -4966,9 +5498,11 @@ impl SessionView {
         self.take_and_close_client(cx);
         self.host_bridge.reset();
         self.running_tool_started.clear();
-        self.running_tool_timer.take();
+        self.clear_live_timers();
         self.dialog_timeout_gens.clear();
         self.dialog_input_bound_id = None;
+        self.pending_custom_answer = None;
+        self.dialog_input_empty = true;
         cx.notify();
     }
 }
@@ -5464,6 +5998,7 @@ pub(crate) enum DialogKeyAction {
     Deny,
     Cancel,
     Select(usize),
+    SubmitSelect,
 }
 
 pub(crate) fn dialog_key_action(
@@ -5473,6 +6008,7 @@ pub(crate) fn dialog_key_action(
 ) -> Option<DialogKeyAction> {
     match key {
         "escape" => Some(DialogKeyAction::Cancel),
+        "enter" | "return" if method == "select" => Some(DialogKeyAction::SubmitSelect),
         "y" | "Y" if method == "confirm" => Some(DialogKeyAction::Confirm),
         "n" | "N" if method == "confirm" => Some(DialogKeyAction::Deny),
         "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" if method == "select" => {
@@ -5528,6 +6064,64 @@ pub(crate) fn composer_enter_action(
 
 pub(crate) fn slash_draft_is_open(commands: &[SlashCommand], text: &str) -> bool {
     slash_completion_context(commands, text).is_some()
+}
+
+pub(crate) fn slash_menu_should_scan(menu: SlashMenuState, text: &str) -> bool {
+    match menu {
+        SlashMenuState::Dismissed => false,
+        SlashMenuState::Open => true,
+        SlashMenuState::Closed => text.trim_start().starts_with('/'),
+    }
+}
+
+fn transcript_tail_fingerprint(
+    transcript: &[TranscriptEntry],
+    expanded_tools: &HashSet<String>,
+) -> u64 {
+    let start = transcript.len().saturating_sub(4);
+    let mut h = 0xcbf2_9ce4_8422_2325_u64;
+    for entry in &transcript[start..] {
+        h ^= transcript_measure_key(entry, expanded_tools);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= transcript.len() as u64;
+    h
+}
+
+fn transcript_measure_key(entry: &TranscriptEntry, expanded_tools: &HashSet<String>) -> u64 {
+    match entry {
+        TranscriptEntry::User { text } => text.len() as u64,
+        TranscriptEntry::AssistantText {
+            markdown,
+            streaming,
+        } => (markdown.0.len() as u64) << 1 | u64::from(*streaming),
+        TranscriptEntry::Thinking {
+            text,
+            streaming,
+            collapsed,
+        } => (text.len() as u64) << 2 | u64::from(*streaming) << 1 | u64::from(*collapsed),
+        TranscriptEntry::ToolCall(tool) => {
+            let expanded = u64::from(expanded_tools.contains(&tool.tool_call_id) || tool.expanded);
+            let status = match tool.status {
+                ToolStatus::Running => 1,
+                ToolStatus::Ok => 2,
+                ToolStatus::Err => 3,
+            };
+            (tool.output.len() as u64) << 3 | expanded << 2 | status
+        }
+        TranscriptEntry::Notice(text) | TranscriptEntry::RetryInfo { detail: text } => {
+            text.len() as u64
+        }
+        TranscriptEntry::Error { message, .. } => message.len() as u64,
+        TranscriptEntry::CommandOutput(text) => text.len() as u64,
+        TranscriptEntry::Compaction { phase } => match phase {
+            CompactionPhase::Started => 1,
+            CompactionPhase::Progress => 2,
+            CompactionPhase::Completed => 3,
+            CompactionPhase::Failed => 4,
+        },
+        TranscriptEntry::Unknown { .. } => 7,
+    }
 }
 
 pub(crate) fn normalize_slash_name(name: &str) -> Option<String> {
@@ -6075,6 +6669,7 @@ impl Render for SessionView {
             self.dialog_input.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx);
                 input.set_value(value, window, cx);
+                input.focus(window, cx);
             });
         }
         if self.pending_compact_sync {
@@ -6295,6 +6890,9 @@ impl Render for SessionView {
             .size_full()
             .relative()
             .capture_key_down(cx.listener(|this, event, window, cx| {
+                if this.composer_typing_should_bypass_capture(event, window, cx) {
+                    return;
+                }
                 let handled = this.handle_subagent_modal_key(event, cx)
                     || this.handle_handoff_key(event, cx)
                     || this.handle_compact_key(event, cx)
@@ -6308,7 +6906,7 @@ impl Render for SessionView {
                     || this.handle_attachment_overlay_key(event, cx)
                     || this.handle_composer_paste_key(event, window, cx)
                     || this.handle_slash_key(event, window, cx)
-                    || this.handle_abort_esc_key(event, cx)
+                    || this.handle_abort_esc_key(event, window, cx)
                     || this.handle_transcript_nav_key(event, window, cx);
                 if handled {
                     cx.stop_propagation();
@@ -6585,31 +7183,8 @@ impl Render for SessionView {
                             .relative()
                             .child(
                                 list(list_state, move |ix, _window, cx| {
-                                    view.update(cx, |this, cx| {
-                                        this.projection.transcript.get(ix).map_or_else(
-                                            || div().into_any_element(),
-                                            |e| {
-                                                let tool_group = tool_group_position(
-                                                    &this.projection.transcript,
-                                                    ix,
-                                                );
-                                                let turn_start = entry_starts_user_turn(
-                                                    &this.projection.transcript,
-                                                    ix,
-                                                );
-                                                render_entry(
-                                                    ix,
-                                                    e,
-                                                    tool_group,
-                                                    turn_start,
-                                                    &this.expanded_tools,
-                                                    &this.running_tool_started,
-                                                    cx,
-                                                )
-                                            },
-                                        )
-                                    })
-                                    .unwrap_or_else(|_| div().into_any_element())
+                                    view.update(cx, |this, cx| this.render_transcript_row(ix, cx))
+                                        .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .size_full()
                                 .px_6()
@@ -6765,20 +7340,22 @@ impl Render for SessionView {
                         parent.child(
                             v_flex()
                                 .w_full()
-                                .max_h(gpui::relative(0.4))
-                                .overflow_y_scrollbar()
+                                .max_h(gpui::relative(0.55))
                                 .px_3()
-                                .py_2()
+                                .py_3()
                                 .gap_2()
                                 .bg(theme.secondary)
                                 .border_t_1()
                                 .border_color(theme.border)
-                                .children(
-                                    self.projection
-                                        .pending_dialogs
-                                        .iter()
-                                        .map(|d| render_dialog(d, cx)),
-                                ),
+                                .children(self.projection.pending_dialogs.iter().map(|d| {
+                                    render_dialog(
+                                        d,
+                                        self.dialog_input_view.clone(),
+                                        self.select_draft.as_ref(),
+                                        self.dialog_input_empty,
+                                        cx,
+                                    )
+                                })),
                         )
                     })
                     .when(
@@ -7173,17 +7750,19 @@ impl Render for SessionView {
                                     .px_4()
                                     .pb_3()
                                     .pt_1()
-                                    .items_center()
+                                    .items_end()
                                     .gap_2()
                                     .child(
                                         // One bordered chrome owns height: input + attach + Send
                                         // share the same top/bottom edges (no optical border mismatch).
+                                        // min_h (not h) so auto_grow can raise the field; overflow_hidden
+                                        // only clips Send's square corners to the rounded chrome.
                                         h_flex()
                                             .relative()
                                             .flex_1()
                                             .min_w_0()
-                                            .h(composer_control_height())
-                                            .items_center()
+                                            .min_h(composer_control_height())
+                                            .items_stretch()
                                             .rounded_md()
                                             .border_1()
                                             .border_color(theme.border)
@@ -7194,8 +7773,8 @@ impl Render for SessionView {
                                                     .relative()
                                                     .flex_1()
                                                     .min_w_0()
-                                                    .h_full()
-                                                    .items_center()
+                                                    .min_h(composer_control_height())
+                                                    .items_stretch()
                                                     .gap_2()
                                                     .pl_3()
                                                     .pr_1()
@@ -7204,11 +7783,10 @@ impl Render for SessionView {
                                                             .relative()
                                                             .flex_1()
                                                             .min_w_0()
-                                                            .child(
-                                                                Input::new(&self.composer)
-                                                                    .appearance(false)
-                                                                    .focus_bordered(false),
-                                                            )
+                                                            .flex()
+                                                            .items_center()
+                                                            .py_1()
+                                                            .child(self.composer_view.clone())
                                                             .when_some(
                                                                 large_paste_lines,
                                                                 |parent, lines| {
@@ -7402,28 +7980,34 @@ impl Render for SessionView {
                                                             ),
                                                     )
                                                     .child(
-                                                        Button::new("attach-files")
-                                                            .icon(IconName::Plus)
-                                                            .tooltip("Attach files")
-                                                            .small()
-                                                            .ghost()
-                                                            .disabled(!can_pick)
-                                                            .on_click(cx.listener(
-                                                                |this,
-                                                                 _: &ClickEvent,
-                                                                 window,
-                                                                 cx| {
-                                                                    this.prompt_attach_files(
-                                                                        window, cx,
-                                                                    );
-                                                                },
-                                                            )),
+                                                        div()
+                                                            .flex()
+                                                            .items_center()
+                                                            .flex_shrink_0()
+                                                            .child(
+                                                                Button::new("attach-files")
+                                                                    .icon(IconName::Plus)
+                                                                    .tooltip("Attach files")
+                                                                    .small()
+                                                                    .ghost()
+                                                                    .disabled(!can_pick)
+                                                                    .on_click(cx.listener(
+                                                                        |this,
+                                                                         _: &ClickEvent,
+                                                                         window,
+                                                                         cx| {
+                                                                            this.prompt_attach_files(
+                                                                                window, cx,
+                                                                            );
+                                                                        },
+                                                                    )),
+                                                            ),
                                                     ),
                                             )
                                             .child(
                                                 div()
                                                     .w(px(1.))
-                                                    .h_full()
+                                                    .self_stretch()
                                                     .bg(theme.border)
                                                     .flex_shrink_0(),
                                             )
@@ -7488,7 +8072,7 @@ impl Render for SessionView {
                                                     .with_size(gpui_component::Size::Size(px(0.)))
                                                     .h(composer_control_height())
                                                     .px_3()
-                                                    .disabled(!self.can_follow_up(cx))
+                                                    .disabled(!self.can_follow_up())
                                                     .on_click(cx.listener(
                                                         |this, _: &ClickEvent, _window, cx| {
                                                             this.do_follow_up(cx);
@@ -7506,8 +8090,8 @@ impl Render for SessionView {
                                                 .px_3()
                                                 .label("Abort")
                                                 .on_click(cx.listener(
-                                                    |this, _: &ClickEvent, _window, cx| {
-                                                        this.do_abort(cx);
+                                                    |this, _: &ClickEvent, window, cx| {
+                                                        this.do_abort(window, cx);
                                                     },
                                                 )),
                                         )
@@ -8826,6 +9410,7 @@ pub(crate) fn hydrate_history_pages(client: &RpcClient, proj: &mut SessionProjec
             }
         }
     }
+    proj.settle_orphaned_running_tools();
 }
 
 pub(crate) fn try_connect_omp(

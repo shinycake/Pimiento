@@ -453,6 +453,105 @@ fn tool_partial_result_recursive_extraction() {
     }
 }
 
+#[test]
+fn turn_end_tool_results_complete_running_rows() {
+    let mut p = SessionProjection::new();
+    apply(&mut p, tool_start("tc_1", "bash", &json!({"cmd": "ls"})));
+    apply(
+        &mut p,
+        json!({
+            "type": "turn_end",
+            "message": {"role": "assistant", "content": []},
+            "toolResults": [{
+                "toolCallId": "tc_1",
+                "result": {"content": [{"type": "text", "text": "ok"}]},
+                "isError": false
+            }],
+        }),
+    );
+    match &p.transcript[0] {
+        TranscriptEntry::ToolCall(c) => {
+            assert_eq!(c.status, ToolStatus::Ok);
+            assert!(c.output.render().contains("ok"));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn terminal_agent_end_settles_running_tools() {
+    let mut p = SessionProjection::new();
+    apply(
+        &mut p,
+        tool_start("hung", "bash", &json!({"cmd": "git log"})),
+    );
+    apply(&mut p, json!({ "type": "agent_end", "messages": [] }));
+    match &p.transcript[0] {
+        TranscriptEntry::ToolCall(c) => assert_eq!(c.status, ToolStatus::Err),
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_terminal_agent_end_leaves_running_tools() {
+    let mut p = SessionProjection::new();
+    apply(&mut p, tool_start("ask", "ask", &json!({})));
+    apply(
+        &mut p,
+        json!({ "type": "agent_end", "messages": [], "isTerminal": false }),
+    );
+    match &p.transcript[0] {
+        TranscriptEntry::ToolCall(c) => assert_eq!(c.status, ToolStatus::Running),
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn hydrate_then_settle_marks_history_tools_without_results() {
+    let mut p = SessionProjection::new();
+    p.hydrate_messages(&json!({
+        "messages": [{
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall",
+                "id": "orphaned",
+                "name": "bash",
+                "arguments": {"command": "sleep 999"}
+            }]
+        }]
+    }));
+    match &p.transcript[0] {
+        TranscriptEntry::ToolCall(c) => assert_eq!(c.status, ToolStatus::Running),
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+    p.settle_orphaned_running_tools();
+    match &p.transcript[0] {
+        TranscriptEntry::ToolCall(c) => assert_eq!(c.status, ToolStatus::Err),
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[test]
+fn settle_orphaned_running_tools_leaves_finished_rows() {
+    let mut p = SessionProjection::new();
+    apply(&mut p, tool_start("ok", "grep", &json!({})));
+    apply(&mut p, tool_end("ok", json!("hits"), None));
+    apply(&mut p, tool_start("hung", "bash", &json!({})));
+    p.settle_orphaned_running_tools();
+    let calls: Vec<_> = p
+        .transcript
+        .iter()
+        .filter_map(|e| match e {
+            TranscriptEntry::ToolCall(c) => Some((c.tool_call_id.as_str(), c.status)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        vec![("ok", ToolStatus::Ok), ("hung", ToolStatus::Err)]
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Compaction / retry phases
 // ---------------------------------------------------------------------------
@@ -1251,6 +1350,51 @@ fn hydrate_get_state_promotes_context_usage() {
             .and_then(serde_json::Value::as_f64),
         Some(11.5)
     );
+}
+
+#[test]
+fn session_info_update_title_does_not_clobber_context_usage() {
+    let mut p = SessionProjection::new();
+    p.hydrate_get_state(&json!({
+        "model": {"provider": "cursor", "id": "cursor-grok-4.6"},
+        "sessionName": "Pimiento",
+        "messageCount": 4,
+        "contextUsage": {"tokens": 15208, "contextWindow": 200_000, "percent": 7.6},
+        "tokensPerSecond": 7.9,
+    }));
+    apply(
+        &mut p,
+        json!({
+            "type": "session_info_update",
+            "title": "Renamed",
+            "sessionId": "sess-1",
+        }),
+    );
+    assert_eq!(
+        p.state
+            .context
+            .as_ref()
+            .and_then(|v| v.get("percent"))
+            .and_then(serde_json::Value::as_f64),
+        Some(7.6)
+    );
+    assert_eq!(
+        p.state
+            .state
+            .as_ref()
+            .and_then(|v| v.get("messageCount"))
+            .and_then(serde_json::Value::as_u64),
+        Some(4)
+    );
+    assert_eq!(
+        p.state
+            .state
+            .as_ref()
+            .and_then(|v| v.get("sessionName"))
+            .and_then(serde_json::Value::as_str),
+        Some("Renamed")
+    );
+    assert_eq!(p.state.session_id.as_deref(), Some("sess-1"));
 }
 
 #[test]

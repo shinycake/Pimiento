@@ -1,5 +1,24 @@
 use crate::*;
 
+/// Isolated GPUI view around the composer `Input`.
+///
+/// `Input::render` reads `InputState` during the parent view's frame. If that
+/// parent is `SessionView`, every keystroke rebuilds the toolbar, transcript
+/// list, and (via workspace observe) the session rail. Keep the observation
+/// graph on this tiny view so typing only repaints the field.
+pub(crate) struct ComposerInputView {
+    pub(crate) input: gpui::Entity<InputState>,
+}
+
+impl Render for ComposerInputView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Input::new(&self.input)
+            .w_full()
+            .appearance(false)
+            .focus_bordered(false)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ToolGroupPosition {
     pub(crate) grouped: bool,
@@ -62,14 +81,102 @@ fn tool_icon_color(kind: ToolVisualKind, theme: &Theme) -> gpui::Hsla {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TranscriptTextSlot {
+    User,
+    Assistant,
+    Thinking,
+    Notice,
+    Error,
+    Command,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TranscriptTextKind {
+    Markdown,
+    Plain,
+}
+
+pub(crate) fn html_plain_transcript_text(text: &str) -> String {
+    let wrapped = soft_wrap_dynamic_text(text);
+    let mut html = String::from("<div>");
+    for ch in wrapped.chars() {
+        match ch {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            '\n' => html.push_str("<br/>"),
+            _ => html.push(ch),
+        }
+    }
+    html.push_str("</div>");
+    html
+}
+
+fn ensure_transcript_text_view(
+    views: &mut HashMap<(usize, TranscriptTextSlot), gpui::Entity<TextViewState>>,
+    row_ix: usize,
+    slot: TranscriptTextSlot,
+    kind: TranscriptTextKind,
+    text: &str,
+    cx: &mut Context<SessionView>,
+) -> gpui::Entity<TextViewState> {
+    let source = match kind {
+        TranscriptTextKind::Markdown => text.to_owned(),
+        TranscriptTextKind::Plain => html_plain_transcript_text(text),
+    };
+    let key = (row_ix, slot);
+    if let Some(existing) = views.get(&key) {
+        existing.update(cx, |state, cx| state.set_text(&source, cx));
+        return existing.clone();
+    }
+    let entity = cx.new(|cx| match kind {
+        TranscriptTextKind::Markdown => TextViewState::markdown(&source, cx),
+        TranscriptTextKind::Plain => TextViewState::html(&source, cx),
+    });
+    views.insert(key, entity.clone());
+    entity
+}
+
+fn selectable_plain_text(
+    views: &mut HashMap<(usize, TranscriptTextSlot), gpui::Entity<TextViewState>>,
+    row_ix: usize,
+    slot: TranscriptTextSlot,
+    text: &str,
+    cx: &mut Context<SessionView>,
+) -> gpui::AnyElement {
+    let state =
+        ensure_transcript_text_view(views, row_ix, slot, TranscriptTextKind::Plain, text, cx);
+    TextView::new(&state).selectable(true).into_any_element()
+}
+
 /// Readable prose measure for user/assistant rows (~48rem). Tools stay full-width.
 pub(crate) fn transcript_prose_max() -> Pixels {
     px(768.)
 }
 
-/// Shared outer height for the compose chrome (field + inlaid Send).
+/// Minimum outer height for the compose chrome (field + inlaid Send).
+///
+/// The chrome grows with `InputState::auto_grow` up to [`COMPOSER_GROW_MAX_ROWS`].
 pub(crate) fn composer_control_height() -> Pixels {
     px(40.)
+}
+
+pub(crate) const COMPOSER_GROW_MIN_ROWS: usize = 1;
+pub(crate) const COMPOSER_GROW_MAX_ROWS: usize = 8;
+
+/// Hard line count for session relayout when the composer grows (Shift+Enter).
+///
+/// Soft-wrapped rows are handled by `InputState::auto_grow`; this only tracks
+/// explicit newlines so typing does not rebuild `SessionView` on every key.
+pub(crate) fn composer_hard_rows(text: &str) -> usize {
+    let rows = if text.is_empty() {
+        COMPOSER_GROW_MIN_ROWS
+    } else {
+        text.bytes().filter(|&b| b == b'\n').count() + 1
+    };
+    rows.clamp(COMPOSER_GROW_MIN_ROWS, COMPOSER_GROW_MAX_ROWS)
 }
 
 /// Left accent rail width reserved on every prose row so user/assistant
@@ -124,8 +231,9 @@ pub(crate) fn tool_group_position(
     }
 }
 
-#[allow(clippy::too_many_lines)] // Match arms mirror transcript variants.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Match arms mirror transcript variants.
 pub(crate) fn render_entry(
+    text_views: &mut HashMap<(usize, TranscriptTextSlot), gpui::Entity<TextViewState>>,
     row_ix: usize,
     entry: &TranscriptEntry,
     tool_group: ToolGroupPosition,
@@ -158,7 +266,14 @@ pub(crate) fn render_entry(
                         .py_1()
                         .text_sm()
                         .text_color(theme.foreground)
-                        .child(soft_wrap_dynamic_text(text)),
+                        .cursor(CursorStyle::IBeam)
+                        .child(selectable_plain_text(
+                            text_views,
+                            row_ix,
+                            TranscriptTextSlot::User,
+                            text,
+                            cx,
+                        )),
                 )
                 .child(
                     div().w(transcript_copy_slot()).flex_shrink_0().child(
@@ -190,7 +305,15 @@ pub(crate) fn render_entry(
                     .text_color(theme.muted_foreground)
                     .into_any_element()
             } else {
-                TextView::markdown(("assistant", row_ix), markdown_rendered)
+                let state = ensure_transcript_text_view(
+                    text_views,
+                    row_ix,
+                    TranscriptTextSlot::Assistant,
+                    TranscriptTextKind::Markdown,
+                    &markdown_rendered,
+                    cx,
+                );
+                TextView::new(&state)
                     .selectable(true)
                     .code_block_actions(move |code_block, _, _cx| {
                         let code = code_block.code().to_string();
@@ -225,6 +348,7 @@ pub(crate) fn render_entry(
                         .pr_3()
                         .text_sm()
                         .text_color(theme.foreground)
+                        .cursor(CursorStyle::IBeam)
                         .child(assistant_content),
                 )
                 .child(
@@ -356,7 +480,18 @@ pub(crate) fn render_entry(
                                 .bg(theme.secondary)
                                 .text_color(theme.muted_foreground)
                                 .italic()
-                                .child(TextView::markdown(("thinking", row_ix), text_rendered)),
+                                .cursor(CursorStyle::IBeam)
+                                .child({
+                                    let state = ensure_transcript_text_view(
+                                        text_views,
+                                        row_ix,
+                                        TranscriptTextSlot::Thinking,
+                                        TranscriptTextKind::Markdown,
+                                        &text_rendered,
+                                        cx,
+                                    );
+                                    TextView::new(&state).selectable(true).into_any_element()
+                                }),
                         ),
                 )
                 .into_any_element()
@@ -395,7 +530,14 @@ pub(crate) fn render_entry(
                                 .text_xs()
                                 .text_color(theme.muted_foreground)
                                 .opacity(if mount_noise { 0.72 } else { 1. })
-                                .child(soft_wrap_dynamic_text(text)),
+                                .cursor(CursorStyle::IBeam)
+                                .child(selectable_plain_text(
+                                    text_views,
+                                    row_ix,
+                                    TranscriptTextSlot::Notice,
+                                    text,
+                                    cx,
+                                )),
                         )
                         .child(
                             Button::new(("copy-notice", row_ix))
@@ -437,7 +579,14 @@ pub(crate) fn render_entry(
                                 .flex_1()
                                 .min_w_0()
                                 .text_sm()
-                                .child(soft_wrap_dynamic_text(message)),
+                                .cursor(CursorStyle::IBeam)
+                                .child(selectable_plain_text(
+                                    text_views,
+                                    row_ix,
+                                    TranscriptTextSlot::Error,
+                                    message,
+                                    cx,
+                                )),
                         )
                         .child(
                             Button::new(("copy-error", row_ix))
@@ -478,7 +627,14 @@ pub(crate) fn render_entry(
                                 .min_w_0()
                                 .max_h(px(320.))
                                 .overflow_scrollbar()
-                                .child(text_for_copy.clone()),
+                                .cursor(CursorStyle::IBeam)
+                                .child(selectable_plain_text(
+                                    text_views,
+                                    row_ix,
+                                    TranscriptTextSlot::Command,
+                                    &text_for_copy,
+                                    cx,
+                                )),
                         )
                         .child(
                             Button::new(("copy-command-output", row_ix))
@@ -616,7 +772,14 @@ pub(crate) fn render_entry(
                                     .min_w_0()
                                     .text_sm()
                                     .text_color(theme.muted_foreground)
-                                    .child(soft_wrap_dynamic_text(&summary)),
+                                    .cursor(CursorStyle::IBeam)
+                                    .child(selectable_plain_text(
+                                        text_views,
+                                        row_ix,
+                                        TranscriptTextSlot::Unknown,
+                                        &summary,
+                                        cx,
+                                    )),
                             )
                             .child(
                                 Button::new(("copy-file-mention", row_ix))
@@ -651,12 +814,15 @@ pub(crate) fn render_entry(
                         .text_color(theme.warning_foreground)
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(soft_wrap_dynamic_text(&format!("{raw:#}"))),
-                        )
+                        .child(div().flex_1().min_w_0().cursor(CursorStyle::IBeam).child(
+                            selectable_plain_text(
+                                text_views,
+                                row_ix,
+                                TranscriptTextSlot::Unknown,
+                                &format!("{raw:#}"),
+                                cx,
+                            ),
+                        ))
                         .child(
                             Button::new(("copy-unknown", row_ix))
                                 .icon(IconName::Copy)
@@ -942,7 +1108,7 @@ pub(crate) fn render_tool_card(
         ToolStatus::Ok => "",
         ToolStatus::Err => "error",
     };
-    let has_output = tc.output.is_empty() == false;
+    let has_output = !tc.output.is_empty();
     let eval_summary = parse_eval_card_summary(&tc.name, &tc.args_json);
     let visual_kind = tool_visual_kind(&tc.name);
     let tool_title = if tc.name.eq_ignore_ascii_case("hub") {
@@ -1079,13 +1245,6 @@ pub(crate) fn render_tool_card(
             .unwrap_or_default();
         let task_subagent = task_linkage_id(&tc.name, &tc.args_json, &output_value);
 
-        if tc.status == ToolStatus::Running {
-            card = card.child(
-                Label::new("Cancel via turn Abort — per-tool cancel is not on the wire")
-                    .text_xs()
-                    .text_color(theme.muted_foreground),
-            );
-        }
         if !hub_lines.is_empty() {
             card = card.child(
                 v_flex()
@@ -1348,6 +1507,269 @@ pub(crate) struct DialogQuestion {
     pub(crate) recommended: Option<usize>,
 }
 
+/// Disposable marked choice for a pending `select` dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectDraft {
+    pub(crate) dialog_id: String,
+    pub(crate) selected: Option<usize>,
+    /// Options already toggled on in OMP's multi-select loop.
+    pub(crate) checked_values: Vec<String>,
+}
+
+/// Survives the empty gap between sequential `select` requests for the same question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelectMemory {
+    pub(crate) title: String,
+    pub(crate) choice_values: Vec<String>,
+    pub(crate) selected_value: Option<String>,
+    pub(crate) last_sent_value: Option<String>,
+    pub(crate) checked_values: Vec<String>,
+}
+
+/// What Continue / Enter should send for the current `select` dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SelectContinue {
+    Send(String),
+    SendCustom { wire_value: String },
+    FinishCustom { other_value: String, answer: String },
+    NeedCustomText,
+    Nothing,
+}
+
+/// OMP `ask` always appends this label; rpc-ui then opens `editor` for custom text.
+pub(crate) const ASK_OTHER_OPTION: &str = "Other (type your own)";
+
+pub(crate) fn is_custom_ask_option(label: &str) -> bool {
+    let lower = label.trim().to_ascii_lowercase();
+    lower == ASK_OTHER_OPTION.to_ascii_lowercase()
+        || lower == "other (type my own)"
+        || lower == "type my own answer"
+        || lower == "type your own answer"
+        || (lower.starts_with("other") && lower.contains("type") && lower.contains("own"))
+}
+
+/// OMP appends `Done selecting` (ANSI-colored) or reserved `Next →` to finish a select loop.
+pub(crate) fn is_select_completion_option(label: &str) -> bool {
+    let stripped = strip_ansi_csi(label);
+    let lower = stripped.trim().to_ascii_lowercase();
+    lower == "done selecting"
+        || lower.ends_with(" done selecting")
+        || lower == "next →"
+        || lower == "next ->"
+}
+
+pub(crate) fn option_is_custom(option: &DialogOption) -> bool {
+    is_custom_ask_option(&option.label) || is_custom_ask_option(&option.value)
+}
+
+pub(crate) fn option_is_completion(option: &DialogOption) -> bool {
+    is_select_completion_option(&option.label) || is_select_completion_option(&option.value)
+}
+
+pub(crate) fn option_is_choice(option: &DialogOption) -> bool {
+    !option_is_custom(option) && !option_is_completion(option)
+}
+
+pub(crate) fn select_choice_values(dialog: &UiDialog) -> Vec<String> {
+    dialog_primary_options(dialog)
+        .into_iter()
+        .map(|option| option.value)
+        .collect()
+}
+
+pub(crate) fn select_question_fingerprint(dialog: &UiDialog) -> (String, Vec<String>) {
+    (dialog_heading(dialog), select_choice_values(dialog))
+}
+
+pub(crate) fn select_completion_value(dialog: &UiDialog) -> Option<String> {
+    let mut options = parse_dialog_options(&dialog.payload);
+    if let Some(questions) = dialog
+        .payload
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+    {
+        for question in questions {
+            options.extend(parse_dialog_options(question));
+        }
+    }
+    options
+        .into_iter()
+        .find_map(|option| option_is_completion(&option).then_some(option.value))
+}
+
+pub(crate) fn toggle_checked_value(values: &mut Vec<String>, value: &str) {
+    if let Some(index) = values.iter().position(|existing| existing == value) {
+        values.remove(index);
+    } else {
+        values.push(value.to_owned());
+    }
+}
+
+fn choice_display_label(options: &[DialogOption], value: &str) -> String {
+    options
+        .iter()
+        .find(|option| option.value == value || option.label == value)
+        .map_or_else(
+            || value.to_owned(),
+            |option| dialog_option_display_label(&option.label).to_owned(),
+        )
+}
+
+pub(crate) fn resolve_select_continue(
+    choice_options: &[DialogOption],
+    selected: Option<usize>,
+    completion_value: Option<&str>,
+    last_sent_value: Option<&str>,
+    checked_values: &[String],
+    typed: &str,
+) -> SelectContinue {
+    if let Some(option) = selected.and_then(|idx| choice_options.get(idx))
+        && option_is_custom(option)
+    {
+        if typed.trim().is_empty() {
+            return SelectContinue::NeedCustomText;
+        }
+        return SelectContinue::SendCustom {
+            wire_value: option.value.clone(),
+        };
+    }
+
+    if let Some(done) = completion_value {
+        return SelectContinue::Send(done.to_owned());
+    }
+
+    let Some(option) = selected.and_then(|idx| choice_options.get(idx)) else {
+        return SelectContinue::Nothing;
+    };
+
+    if last_sent_value == Some(option.value.as_str())
+        && let Some(other) = choice_options
+            .iter()
+            .find(|candidate| option_is_custom(candidate))
+    {
+        let mut answer = checked_values
+            .iter()
+            .map(|value| choice_display_label(choice_options, value))
+            .filter(|label| !label.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if answer.is_empty() {
+            dialog_option_display_label(&option.label).clone_into(&mut answer);
+        }
+        return SelectContinue::FinishCustom {
+            other_value: other.value.clone(),
+            answer,
+        };
+    }
+
+    SelectContinue::Send(option.value.clone())
+}
+
+pub(crate) fn select_option_is_custom(dialog: &UiDialog, draft: &SelectDraft) -> bool {
+    if draft.dialog_id != dialog.id {
+        return false;
+    }
+    draft
+        .selected
+        .and_then(|idx| dialog_primary_options(dialog).into_iter().nth(idx))
+        .is_some_and(|option| option_is_custom(&option))
+}
+
+pub(crate) fn strip_ansi_csi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn looks_like_tui_option_row(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if is_custom_ask_option(trimmed) {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("more option") {
+        return true;
+    }
+    let body = trimmed.trim_start_matches(['●', '○', '◉', '•', '>', '*', '-', ' ']);
+    is_custom_ask_option(body)
+        || trimmed.starts_with('●')
+        || trimmed.starts_with('○')
+        || trimmed.starts_with('◉')
+        || trimmed.starts_with("[ ]")
+        || trimmed.starts_with("[x]")
+        || trimmed.starts_with("[X]")
+        || trimmed.starts_with("( )")
+        || trimmed.starts_with("(x)")
+        || trimmed.starts_with('…')
+        || trimmed.starts_with("...")
+}
+
+pub(crate) fn compact_editor_title(title: &str) -> String {
+    let cleaned = strip_ansi_csi(title);
+    for line in cleaned.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.eq_ignore_ascii_case("enter your response:") {
+            continue;
+        }
+        if looks_like_tui_option_row(trimmed) {
+            continue;
+        }
+        return trimmed.to_owned();
+    }
+    "Your answer".to_owned()
+}
+
+pub(crate) fn dialog_heading(dialog: &UiDialog) -> String {
+    let raw = dialog
+        .payload
+        .get("title")
+        .and_then(|value| value.as_str())
+        .unwrap_or(&dialog.method);
+    if dialog.method == "editor" {
+        compact_editor_title(raw)
+    } else {
+        raw.to_owned()
+    }
+}
+
+pub(crate) fn dialog_option_display_label(label: &str) -> &str {
+    label
+        .strip_suffix(" (Recommended)")
+        .or_else(|| label.strip_suffix(" (recommended)"))
+        .unwrap_or(label)
+}
+
+pub(crate) fn select_draft_for_dialog(dialog: &UiDialog) -> SelectDraft {
+    let options = dialog_primary_options(dialog);
+    let selected = dialog_questions(dialog)
+        .first()
+        .and_then(|question| question.recommended)
+        .filter(|index| *index < options.len());
+    SelectDraft {
+        dialog_id: dialog.id.clone(),
+        selected,
+        checked_values: Vec::new(),
+    }
+}
+
 fn nonempty_dialog_string(value: Option<&serde_json::Value>) -> Option<String> {
     value
         .and_then(serde_json::Value::as_str)
@@ -1426,6 +1848,11 @@ pub(crate) fn dialog_recommended_index(
             })
         })
         .filter(|index| *index < options.len())
+        .or_else(|| {
+            options.iter().position(|option| {
+                option.label.ends_with(" (Recommended)") || option.label.ends_with(" (recommended)")
+            })
+        })
 }
 
 pub(crate) fn dialog_questions(dialog: &UiDialog) -> Vec<DialogQuestion> {
@@ -1455,17 +1882,26 @@ pub(crate) fn dialog_questions(dialog: &UiDialog) -> Vec<DialogQuestion> {
         })
         .unwrap_or_default();
     if !nested.is_empty() {
-        return nested;
+        return hide_select_completion_options(nested);
     }
 
     let options = parse_dialog_options(&dialog.payload);
-    vec![DialogQuestion {
+    hide_select_completion_options(vec![DialogQuestion {
         header: None,
         prompt: None,
         description: None,
         recommended: dialog_recommended_index(&dialog.payload, &options),
         options,
-    }]
+    }])
+}
+
+fn hide_select_completion_options(mut questions: Vec<DialogQuestion>) -> Vec<DialogQuestion> {
+    for question in &mut questions {
+        question
+            .options
+            .retain(|option| !option_is_completion(option));
+    }
+    questions
 }
 
 pub(crate) fn dialog_primary_options(dialog: &UiDialog) -> Vec<DialogOption> {
@@ -1476,23 +1912,20 @@ pub(crate) fn dialog_primary_options(dialog: &UiDialog) -> Vec<DialogOption> {
         .unwrap_or_default()
 }
 
-pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) -> gpui::AnyElement {
+pub(crate) fn render_dialog(
+    dialog: &UiDialog,
+    dialog_input_view: gpui::Entity<ComposerInputView>,
+    select_draft: Option<&SelectDraft>,
+    dialog_input_empty: bool,
+    cx: &mut Context<SessionView>,
+) -> gpui::AnyElement {
     let theme = cx.theme().clone();
-    let title = dialog
-        .payload
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or(&dialog.method);
+    let title = dialog_heading(dialog);
     v_flex()
         .w_full()
-        .p_4()
         .gap_3()
-        .rounded_md()
-        .bg(theme.secondary)
-        .border_1()
-        .border_color(theme.border)
         .child(
-            Label::new(soft_wrap_dynamic_text(title))
+            Label::new(soft_wrap_dynamic_text(&title))
                 .text_sm()
                 .font_weight(gpui::FontWeight::SEMIBOLD),
         )
@@ -1501,7 +1934,8 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
                 .payload
                 .get("message")
                 .and_then(|v| v.as_str())
-                .map(str::to_owned),
+                .map(str::to_owned)
+                .filter(|_| dialog.method != "editor"),
             |parent, msg| {
                 parent.child(
                     div()
@@ -1512,24 +1946,49 @@ pub(crate) fn render_dialog(dialog: &UiDialog, cx: &mut Context<SessionView>) ->
             },
         )
         .child(match dialog.method.as_str() {
-            "select" => render_select_dialog(dialog, &dialog_questions(dialog), cx),
+            "select" => render_select_dialog(
+                dialog,
+                &dialog_questions(dialog),
+                select_draft,
+                dialog_input_view,
+                dialog_input_empty,
+                cx,
+            ),
             "confirm" => render_confirm_dialog(dialog, cx),
-            "input" | "editor" => render_text_dialog(dialog, cx),
+            "input" | "editor" => {
+                render_text_dialog(dialog, dialog_input_view, dialog_input_empty, cx)
+            }
             "open_url" => render_open_url_dialog(dialog, cx),
             _ => render_cancel_button(dialog, cx),
         })
         .into_any_element()
 }
 
-#[allow(clippy::too_many_lines)] // Options keep full wrapping content and response wiring together.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Options keep wrapping content, custom field, and confirm wiring together.
 pub(crate) fn render_select_dialog(
     dialog: &UiDialog,
     questions: &[DialogQuestion],
+    select_draft: Option<&SelectDraft>,
+    dialog_input_view: gpui::Entity<ComposerInputView>,
+    dialog_input_empty: bool,
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
     let view = cx.entity().downgrade();
+    let selected = select_draft
+        .filter(|draft| draft.dialog_id == dialog.id)
+        .and_then(|draft| draft.selected);
+    let checked_values = select_draft
+        .filter(|draft| draft.dialog_id == dialog.id)
+        .map_or(&[][..], |draft| draft.checked_values.as_slice());
+    let completion_value = select_completion_value(dialog);
+    let can_finish = completion_value.is_some() || !checked_values.is_empty();
+    let can_continue = selected.is_some() || completion_value.is_some();
+    let continue_is_custom = selected
+        .and_then(|idx| dialog_primary_options(dialog).into_iter().nth(idx))
+        .is_some_and(|option| option_is_custom(&option));
     let mut blocks = v_flex().w_full().gap_3();
+    let mut flat_ix = 0usize;
     for (question_ix, question) in questions.iter().enumerate() {
         let mut block = v_flex().w_full().gap_1();
         if let Some(header) = &question.header {
@@ -1550,28 +2009,40 @@ pub(crate) fn render_select_dialog(
                     .child(soft_wrap_dynamic_text(description)),
             );
         }
-        for (option_ix, option) in question.options.iter().take(9).enumerate() {
-            let value = option.value.clone();
-            let id = dialog.id.clone();
+        for (option_ix, option) in question.options.iter().enumerate() {
+            let this_ix = flat_ix;
+            flat_ix += 1;
             let view = view.clone();
             let is_recommended = question.recommended == Some(option_ix);
+            let is_checked = checked_values.iter().any(|value| value == &option.value);
+            let is_selected = selected == Some(this_ix) || is_checked;
+            let is_custom = option_is_custom(option);
+            let display_label = dialog_option_display_label(&option.label);
             block = block.child(
                 h_flex()
                     .id(format!("dialog-option-{question_ix}-{option_ix}"))
                     .w_full()
                     .items_start()
                     .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.background)
+                    .border_color(if is_selected {
+                        theme.accent
+                    } else {
+                        theme.border
+                    })
+                    .bg(if is_selected {
+                        theme.secondary
+                    } else {
+                        theme.background
+                    })
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
-                        let mut fields = serde_json::Map::new();
-                        fields.insert("value".into(), serde_json::Value::String(value.clone()));
-                        do_dialog_response(&view, &id, fields, cx);
+                        let _ = view.update(cx, |this, cx| {
+                            this.mark_dialog_selection(this_ix, cx);
+                        });
                     })
                     .child(
                         div()
@@ -1579,17 +2050,34 @@ pub(crate) fn render_select_dialog(
                             .flex_shrink_0()
                             .text_xs()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(if is_selected {
+                                theme.accent
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(if is_selected { "●" } else { "○" }),
+                    )
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.muted_foreground)
-                            .child((option_ix + 1).to_string()),
+                            .child(if this_ix < 9 {
+                                (this_ix + 1).to_string()
+                            } else {
+                                String::new()
+                            }),
                     )
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
                             .gap_0p5()
-                            .child(div().text_sm().child(soft_wrap_dynamic_text(&option.label)))
-                            .when_some(option.description.clone(), |option, description| {
-                                option.child(
+                            .child(div().text_sm().child(soft_wrap_dynamic_text(display_label)))
+                            .when_some(option.description.clone(), |option_el, description| {
+                                option_el.child(
                                     div()
                                         .text_xs()
                                         .text_color(theme.muted_foreground)
@@ -1597,40 +2085,98 @@ pub(crate) fn render_select_dialog(
                                 )
                             }),
                     )
-                    .when(is_recommended, |row| {
+                    .when(is_recommended && !is_custom, |row| {
                         row.child(
                             Tag::secondary()
                                 .small()
                                 .flex_shrink_0()
                                 .child("Recommended"),
                         )
+                    })
+                    .when(is_custom, |row| {
+                        row.child(Tag::secondary().small().flex_shrink_0().child("Custom"))
                     }),
             );
         }
         blocks = blocks.child(block);
     }
-    blocks
+    let submit_enabled = can_continue && !(continue_is_custom && dialog_input_empty);
+    let mut column = v_flex().w_full().gap_3().child(
+        v_flex()
+            .w_full()
+            .max_h(px(220.))
+            .overflow_y_scrollbar()
+            .child(blocks),
+    );
+    if continue_is_custom {
+        column = column.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .min_h(px(56.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.accent)
+                .bg(theme.background)
+                .px_2()
+                .py_1()
+                .child(dialog_input_view),
+        );
+    } else {
+        drop(dialog_input_view);
+    }
+    column
         .child(
             h_flex()
                 .w_full()
-                .items_start()
+                .items_center()
                 .flex_wrap()
                 .gap_2()
                 .justify_between()
                 .child(
-                    Label::new("Press 1–9 · Esc cancel")
-                        .text_xs()
-                        .text_color(theme.muted_foreground),
+                    Label::new(if continue_is_custom {
+                        "Type an answer · ⌘↩ Submit · Esc cancel"
+                    } else if can_finish {
+                        "Click to add choices · Done to finish · Esc cancel"
+                    } else {
+                        "1–9 to choose · Enter to continue · Esc cancel"
+                    })
+                    .text_xs()
+                    .text_color(theme.muted_foreground),
                 )
-                .child({
-                    let view = view.clone();
-                    let id = dialog.id.clone();
-                    Button::new("cancel-select")
-                        .label("Cancel")
-                        .small()
-                        .ghost()
-                        .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
-                }),
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .flex_shrink_0()
+                        .child({
+                            let view = view.clone();
+                            let id = dialog.id.clone();
+                            Button::new("cancel-select")
+                                .label("Cancel")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
+                        })
+                        .child({
+                            let view = view.clone();
+                            Button::new("continue-select")
+                                .label(if continue_is_custom {
+                                    "Submit"
+                                } else if can_finish {
+                                    "Done"
+                                } else {
+                                    "Continue"
+                                })
+                                .small()
+                                .primary()
+                                .disabled(!submit_enabled)
+                                .on_click(move |_, _, cx| {
+                                    let _ = view.update(cx, |this, cx| {
+                                        this.confirm_dialog_selection(cx);
+                                    });
+                                })
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -1927,58 +2473,74 @@ pub(crate) fn render_open_url_dialog(
 
 pub(crate) fn render_text_dialog(
     dialog: &UiDialog,
+    dialog_input_view: gpui::Entity<ComposerInputView>,
+    dialog_input_empty: bool,
     cx: &mut Context<SessionView>,
 ) -> gpui::AnyElement {
     let theme = cx.theme().clone();
     let view = cx.entity().downgrade();
     let id = dialog.id.clone();
     let id_submit = dialog.id.clone();
-    let dialog_input = cx.entity().read(cx).dialog_input.clone();
-    h_flex()
+    let is_editor = dialog.method == "editor";
+    v_flex()
         .w_full()
-        .flex_wrap()
         .gap_2()
-        .items_end()
+        .child(
+            Label::new(if is_editor {
+                "⌘↩ to submit · Esc cancel"
+            } else {
+                "Enter to submit · Esc cancel"
+            })
+            .text_xs()
+            .text_color(theme.muted_foreground),
+        )
         .child(
             div()
-                .flex_1()
+                .w_full()
                 .min_w_0()
+                .min_h(if is_editor { px(72.) } else { px(40.) })
                 .rounded_md()
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.accent)
                 .bg(theme.background)
                 .px_2()
                 .py_1()
-                .child(
-                    Input::new(&dialog_input)
-                        .appearance(false)
-                        .focus_bordered(false),
-                ),
+                .child(dialog_input_view),
         )
-        .child({
-            let view = view.clone();
-            Button::new("dialog-submit")
-                .primary()
-                .label("Submit")
-                .small()
-                .on_click(move |_, _, cx| {
-                    let Some(entity) = view.upgrade() else {
-                        return;
-                    };
-                    let value = entity.read(cx).dialog_input.read(cx).value().to_string();
-                    let mut fields = serde_json::Map::new();
-                    fields.insert("value".into(), serde_json::Value::String(value));
-                    do_dialog_response(&view, &id_submit, fields, cx);
+        .child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .gap_2()
+                .justify_end()
+                .child({
+                    let view = view.clone();
+                    Button::new("cancel-text-dialog")
+                        .label("Cancel")
+                        .small()
+                        .ghost()
+                        .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
                 })
-        })
-        .child({
-            let view = view.clone();
-            Button::new("cancel-text-dialog")
-                .label("Cancel")
-                .small()
-                .ghost()
-                .on_click(move |_, _, cx| do_cancel_dialog(&view, &id, cx))
-        })
+                .child({
+                    let view = view.clone();
+                    Button::new("dialog-submit")
+                        .primary()
+                        .label("Submit")
+                        .small()
+                        .disabled(dialog_input_empty)
+                        .on_click(move |_, _, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                let value = this.dialog_input.read(cx).value().to_string();
+                                if value.trim().is_empty() {
+                                    return;
+                                }
+                                let mut fields = serde_json::Map::new();
+                                fields.insert("value".into(), serde_json::Value::String(value));
+                                this.submit_dialog_response(&id_submit, fields, cx);
+                            });
+                        })
+                }),
+        )
         .into_any_element()
 }
 
@@ -2040,25 +2602,9 @@ pub(crate) fn do_dialog_response(
     fields: serde_json::Map<String, serde_json::Value>,
     cx: &mut gpui::App,
 ) {
-    let id_owned = id.to_owned();
-    let Some(entity) = view.upgrade() else { return };
-    if let Some((client, _)) = entity.read(cx).client_and_dialog_id(id) {
-        cx.spawn(async move |_| {
-            let _ = client
-                .send(RpcCommandBody::ExtensionUiResponse {
-                    id: id_owned.clone(),
-                    fields,
-                })
-                .await;
-        })
-        .detach();
-        let id2 = id.to_owned();
-        let _ = view.update(cx, |this, cx| {
-            this.projection.pending_dialogs.retain(|d| d.id != id2);
-            this.sync_pending_dialogs(cx);
-            cx.notify();
-        });
-    }
+    let _ = view.update(cx, |this, cx| {
+        this.submit_dialog_response(id, fields, cx);
+    });
 }
 
 pub(crate) fn hub_job_summary_display_lines(summary: &HubJobSummary) -> Vec<String> {

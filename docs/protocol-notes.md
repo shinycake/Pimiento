@@ -294,6 +294,29 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - **Fresh session** deliberately sends the dynamic slash command `/fresh` through `prompt` while idle; it does not invent a client-owned session reset.
 - An idle `contextUsage.percent >= 80` shows a soft compact CTA. The threshold is display policy only; the percentage remains OMP-authoritative.
 
+## Live context + orphan tools — 2026-08-20
+
+- Installed OMP **17.4.0** still publishes `contextUsage` only on `get_state`. `session_info_update` is `{title, sessionId}` and is not a state snapshot; hydrating it as one would drop `messageCount` / `contextUsage`.
+- Pimiento refreshes `get_state` on terminal `agent_end`, `auto_compaction_end`, `model_changed`, and every 2s while Streaming/Compacting/Retrying so the inspector `ctx:N%` bar tracks OMP rather than the connect-time snapshot (~system-prompt occupancy).
+- `turn_end.toolResults` now complete matching tool rows. Terminal `agent_end` and finished history hydration settle leftover `Running` tools as error so abort/resume cannot leave a spinner after the turn is over.
+- Composer **Abort** also sends targetless `abort_bash`, then `abort`. Running tool rows settle immediately on that click (Cursor's `shellStream` path calls `tool.execute` with no `AbortSignal`, so OMP often never emits `tool_execution_end`). If `abort` does not ACK within 4s the rpc-ui serial queue is wedged on `waitForIdle`; Pimiento recycles the child with `--resume` so Steer/prompt are not stuck behind the hung tool. Expanded tool cards do not dump that wire limitation as transcript copy.
+
+## GPUI paint isolation — 2026-08-20
+
+- Composer `Input` lives in a dedicated child view so `InputState` invalidation does not rebuild `SessionView` (toolbar, transcript list, overlays). `WorkspaceView` observes sessions only for rail/title/launcher chrome, not every streaming token.
+- Inspector git is stale-while-revalidate: `Render` never runs `git` on the UI thread. A background refresh updates the cache about every 8s while the inspector is open.
+- Transcript `ListState` remeasures the tail only when row count or a content fingerprint changes, not on every Streaming paint.
+
+## Ask / select dialog — 2026-08-20
+
+- `select` marks a choice (click or 1–9) and waits for Continue / Enter. That matches the TUI ask flow of highlighting first; sending `{value}` immediately on click made "Other (type your own)" too easy to fire by accident.
+- rpc-ui has no `askDialog`; OMP's ask tool appends `Other (type your own)`, then opens a separate `editor` request. Continue on that option still sends the exact option label; the follow-up editor is the custom-answer surface.
+- Painting `editor`/`input` used to `SessionView::read` while `SessionView` was already leased (`gpui::double_lease_panic`). The field is now a child input view, same isolation as the composer.
+- Continue / Enter submit from inside an existing `SessionView` update and must not `entity.read`/`update` again (mouse-up on Continue panicked with `cannot read … while it is already being updated`).
+- Custom answers are typed on the select card (field + Submit). Pimiento then answers OMP's follow-up `editor` request automatically. The raw editor `title` is a TUI dump of every option; the fallback editor chrome uses only the question line and keeps Submit pinned.
+- Sequential `select` requests for the same question (new id each time) keep the marked choice. OMP's multi-select loop re-opens the prompt after each toggle and may append ANSI-colored `Done selecting`; Continue/Done sends that completion option instead of toggling the same choice again. If the last question of a multi-question ask never includes Done (`allowForward` stays true), the second Continue finishes via Other + the current choice text so the loop cannot spin.
+- Wire `{value}` / `{cancelled}` / `{confirmed}` shapes are unchanged.
+
 
 
 ## Rail persistence + streaming polish — 2026-08-08
@@ -307,6 +330,11 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - When the inspector is closed, a full-height 64 px **Show Context** strip mirrors the collapsed session-rail restore affordance.
 - While a run is abortable/streaming, the primary composer button reads **Steer** (same `steer` RPC path as Enter); **Follow-up** remains a separate control.
 - Empty transcript copy is a short brand-ready orientation pair (no keymap wall).
+
+## Transcript text selection — 2026-08-21
+
+- User/assistant/thinking/notice/error/command/unknown rows use persistent `TextViewState` entities owned by `SessionView`. Inline `TextView::markdown(id, …)` keyed state notifies the session view on every drag, and GPUI `list` lays items out as roots, so the selection never stuck.
+- Hover **Copy** still copies the whole projected row. Drag-select + ⌘C copies the highlighted range via gpui-component's window text selection.
 
 ## Export reveal — 2026-08-08
 
@@ -324,7 +352,6 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 
 - Pending extension-UI dialogs dim the composer row and disable Send/Steer with reason "Answer the dialog above first".
 - Dead sessions keep Restart only on the crash card (not duplicated on the composer). Crash Copy copies the full displayed detail (dead_reason + status).
-- Running tool cards note that cancel is turn-level Abort only.
 - Empty Checklist inspector shows "No checklist items yet". About keymap lists session digits and transcript paging.
 
 ## Palette theme label — 2026-08-08
@@ -343,8 +370,9 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 - **Resizable docks (2026-08-10):** left rail and right inspector widths drag via 3px handles; values clamp to min/max and leave a content floor, then persist in `ui.json` (`rail_width` / `inspector_width`).
 - **Agents inspector (2026-08-10):** header is a single aligned row — title, subscription `Tag`, icon-only cycle + refresh. Agent rows are two-line list items (id + `agent · status`) instead of soft-wrapped ghost buttons (those overlapped in a narrow pane).
 - **Chat chrome (2026-08-10):** status strip uses quieter muted status text + centered alignment; transcript list uses 16px padding with ~48rem prose measure on user/assistant rows (tools stay full-width); empty state is a short two-line prompt; composer band has a bordered input field, attach inside the field, Send tooltip for ⌘↩/Ctrl+Enter, and Fast n/a folded into the switch label.
-- **Chat rhythm (2026-08-10, follow-up):** transcript gutters are 24px; user turns get extra top padding; assistant rows close a turn with more bottom padding. Compose field and Send/Steer/Abort share a fixed 40px height with `items_stretch` so the primary control lines up with the field.
-- **Chat chrome alignment (2026-08-10, follow-up 2):** Send lives *inside* the bordered compose chrome (input | attach | hairline | Send) so top/bottom edges are identical — the previous side-by-side layout looked misaligned because the field's 1px border shrank the white fill vs a solid 40px Send. Follow-up/Abort stay outside at the same 40px height. Transcript prose locks a shared accent-rail + content pad so user/assistant/thinking/tool columns share one left edge; hover-copy uses a fixed trailing slot.
+- **Chat rhythm (2026-08-10, follow-up):** transcript gutters are 24px; user turns get extra top padding; assistant rows close a turn with more bottom padding. Compose chrome is min 40px and grows with the auto-grow field (1–8 rows); Send stretches with the chrome so edges stay aligned. Follow-up/Abort stay 40px, bottom-aligned beside a tall field.
+- **Chat chrome alignment (2026-08-10, follow-up 2):** Send lives *inside* the bordered compose chrome (input | attach | hairline | Send) so top/bottom edges are identical — the previous side-by-side layout looked misaligned because the field's 1px border shrank the white fill vs a solid 40px Send. Follow-up/Abort stay outside at 40px. Transcript prose locks a shared accent-rail + content pad so user/assistant/thinking/tool columns share one left edge; hover-copy uses a fixed trailing slot.
+- **Composer auto-grow (2026-08-21):** `InputState` was already `auto_grow(1, 8)`, but the bordered chrome used a fixed `h(40)` + `overflow_hidden` + `items_center`, which clipped extra lines (middle line visible, top/bottom cut off). Chrome is now `min_h(40)` + `items_stretch`. SessionView relayouts when hard line count changes so the transcript list can yield space; keystrokes that do not add a newline still only repaint `ComposerInputView`.
 - **Composer band:** model + thinking + Fast `Switch` live immediately above the input (removed from the status-strip trailing cluster). Model opens a floating picker with search, provider-grouped list, and **Roles (from omp config)** chips.
 - **`modelRoles` / `modelTags`:** not on rpc-ui. Pimiento peeks `~/.omp/agent/config.yml` for roles + tag colors (built-in OMP colors for default/smol/slow/…). Click a role to `set_model`. **Set** assigns the current session model to that role via `omp config set modelRoles` (full-record merge — never hand-edit YAML).
 - **Fast mode:** OMP `/fast` only works for models with a service-tier family (OpenAI / Google / Anthropic-messages / matching OpenRouter ids). Cursor/Grok has none — Switch is disabled with `n/a · no service tier`. Failed `set_fast_mode` reverts optimistic UI and shows OMP's error as a notice.
@@ -391,7 +419,7 @@ Pimiento loads the full `models` array into the composer-band model picker (sear
 
 - `hub` tool cards render a Jobs summary only from fields present on args/results (`op`, job id, status, command, or a `jobs[]` array). Unparseable payloads keep the generic card.
 - `task` cards show **Open agents** only when a named `subagentId`/`toolCallId` linkage field is present; the button opens the existing Agents inspector focus and does not invent linkage. `eval` titles/digests use only supplied title, language, and code.
-- `abort_bash` is targetless (`{type:"abort_bash"}`), while transcript bash rows are identified by `tool_execution_* .toolCallId`; no safe correlation exists, so no per-card Abort button renders.
+- `abort_bash` is targetless (`{type:"abort_bash"}`), while transcript bash rows are identified by `tool_execution_* .toolCallId`; no safe correlation exists, so no per-card Abort button renders. Turn **Abort** (composer / Esc×2 / palette) is the cancel surface; it sends `abort_bash` then `abort`.
 
 ## Discoverable slash commands + theme preview — 2026-08-09
 

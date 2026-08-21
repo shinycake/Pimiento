@@ -24,7 +24,7 @@ use omp_rpc_client::frames::{
     AgentEndFrame, AssistantMessageEventKind, ExtensionUiMethod, ExtensionUiRequestFrame,
     IncomingFrame, IncomingFrameKind, MessageUpdateFrame, NoticeFrame, NoticeLevel,
     PromptResultFrame, RpcFrameErrorFrame, ThinkingLevelChangedFrame, ToolExecutionEndFrame,
-    ToolExecutionStartFrame, ToolExecutionUpdateFrame,
+    ToolExecutionStartFrame, ToolExecutionUpdateFrame, TurnEndFrame,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -216,8 +216,8 @@ impl SessionProjection {
             IncomingFrameKind::Ready(_)
             | IncomingFrameKind::Response(_)
             | IncomingFrameKind::RpcChunk(_)
-            | IncomingFrameKind::TurnStart
-            | IncomingFrameKind::TurnEnd(_) => {}
+            | IncomingFrameKind::TurnStart => {}
+            IncomingFrameKind::TurnEnd(end) => self.apply_turn_end(end),
 
             IncomingFrameKind::RpcFrameError(err) => self.apply_rpc_frame_error(err, &frame.raw),
             IncomingFrameKind::AgentStart => self.apply_agent_start(),
@@ -464,8 +464,32 @@ impl SessionProjection {
     }
 
     fn apply_session_info_update(&mut self, raw: &Value) {
-        self.hydrate_state_object(raw);
-        self.state.quality = StateQuality::Durable;
+        // OMP 17.4 `session_info_update` is `{title, sessionId}` only — not a
+        // `get_state` snapshot. Treating it as one would clobber `contextUsage`
+        // extras such as `messageCount`. Full snapshots still hydrate as before.
+        if session_info_looks_like_state_snapshot(raw) {
+            self.hydrate_state_object(raw);
+            self.state.quality = StateQuality::Durable;
+            return;
+        }
+        if let Some(id) = raw_string(raw, "sessionId") {
+            self.state.session_id = Some(id.clone());
+            self.patch_state_field("sessionId", Value::String(id));
+        }
+        if let Some(title) = raw_string(raw, "title").or_else(|| raw_string(raw, "sessionName")) {
+            self.patch_state_field("sessionName", Value::String(title));
+        }
+    }
+
+    fn patch_state_field(&mut self, key: &str, value: Value) {
+        match self.state.state.as_mut() {
+            Some(Value::Object(map)) => {
+                map.insert(key.to_owned(), value);
+            }
+            _ => {
+                self.state.state = Some(serde_json::json!({ key: value }));
+            }
+        }
     }
 
     fn apply_extension_error(&mut self, raw: &Value) {
@@ -491,8 +515,39 @@ impl SessionProjection {
         if matches!(self.state.quality, StateQuality::Live) {
             self.state.quality = StateQuality::Durable;
         }
+        for message in &end.messages {
+            if message.get("role").and_then(Value::as_str) == Some("toolResult") {
+                self.apply_late_tool_result(message);
+            }
+        }
         if terminal {
             self.emit_terminal_assistant_error(&end.messages);
+            // Abort/error can omit `tool_execution_end` for still-pending calls
+            // (`pendingToolCalls` on session dispose). A finished turn cannot
+            // still be executing tools.
+            self.settle_orphaned_running_tools();
+        }
+    }
+
+    fn apply_turn_end(&mut self, end: &TurnEndFrame) {
+        let Some(results) = end.tool_results.as_array() else {
+            return;
+        };
+        for result in results {
+            self.apply_late_tool_result(result);
+        }
+    }
+
+    /// Mark leftover `Running` tool rows finished. Used after history hydration
+    /// and terminal `agent_end`, where a missing `tool_execution_end` would
+    /// otherwise leave the row spinning forever.
+    pub fn settle_orphaned_running_tools(&mut self) {
+        for entry in &mut self.transcript {
+            if let TranscriptEntry::ToolCall(call) = entry
+                && call.status == ToolStatus::Running
+            {
+                call.status = ToolStatus::Err;
+            }
         }
     }
 
@@ -954,20 +1009,7 @@ impl SessionProjection {
     }
 
     fn hydrate_tool_result(&mut self, message: &Value) {
-        let tool_call_id = message
-            .get("toolCallId")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let text = message_content_text(message.get("content"));
-        let status = if message
-            .get("isError")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            ToolStatus::Err
-        } else {
-            ToolStatus::Ok
-        };
+        let (tool_call_id, text, status) = parse_tool_result_payload(message);
 
         if let Some(idx) = self.tool_index.get(tool_call_id).copied()
             && let Some(TranscriptEntry::ToolCall(call)) = self.transcript.get_mut(idx)
@@ -979,6 +1021,25 @@ impl SessionProjection {
                 .push(TranscriptEntry::CommandOutput(BoundedText::from_text(
                     &text,
                 )));
+        }
+    }
+
+    fn apply_late_tool_result(&mut self, message: &Value) {
+        let (tool_call_id, text, status) = parse_tool_result_payload(message);
+        if tool_call_id.is_empty() {
+            return;
+        }
+        let idx = self
+            .tool_index
+            .get(tool_call_id)
+            .copied()
+            .unwrap_or_else(|| self.synth_tool_row(tool_call_id, "", &Value::Null));
+        if let Some(TranscriptEntry::ToolCall(call)) = self.transcript.get_mut(idx)
+            && call.status == ToolStatus::Running
+        {
+            call.output.clear();
+            call.output.push_str(&text);
+            call.status = status;
         }
     }
 
@@ -1066,6 +1127,39 @@ impl SessionProjection {
         self.transcript
             .push(TranscriptEntry::Unknown { raw: raw.clone() });
     }
+}
+
+fn parse_tool_result_payload(message: &Value) -> (&str, String, ToolStatus) {
+    let tool_call_id = message
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = if message.get("content").is_some() {
+        message_content_text(message.get("content"))
+    } else if let Some(result) = message.get("result") {
+        extract_visible_output(result)
+    } else {
+        String::new()
+    };
+    let status = if message
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        ToolStatus::Err
+    } else {
+        ToolStatus::Ok
+    };
+    (tool_call_id, text, status)
+}
+
+fn session_info_looks_like_state_snapshot(raw: &Value) -> bool {
+    raw.get("state").is_some()
+        || raw.get("contextUsage").is_some()
+        || raw.get("context").is_some()
+        || raw.get("model").is_some()
+        || raw.get("dumpTools").is_some()
+        || raw.get("messageCount").is_some()
 }
 
 fn raw_string(raw: &Value, field: &str) -> Option<String> {

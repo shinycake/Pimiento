@@ -44,6 +44,15 @@ pub(crate) struct RailEntry {
     pub(crate) session_file: Option<PathBuf>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SessionChromeSig {
+    pub(crate) label: String,
+    pub(crate) phase: RunPhase,
+    pub(crate) unread: usize,
+    pub(crate) attention: RailAttention,
+    pub(crate) launcher: LauncherPhase,
+}
+
 pub(crate) fn workspace_display_name(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -151,6 +160,8 @@ pub(crate) struct WorkspaceView {
     pub(crate) pending_quit_confirm: bool,
     pub(crate) quit_in_progress: bool,
     pub(crate) last_window_title: String,
+    pub(crate) session_chrome_sigs: Vec<Option<SessionChromeSig>>,
+    pub(crate) git_refresh_task: Option<Task<()>>,
 }
 
 impl WorkspaceView {
@@ -160,9 +171,7 @@ impl WorkspaceView {
         initial_cwd: PathBuf,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first_subscription = cx.observe(&first, |_this, _session, cx| {
-            cx.notify();
-        });
+        let first_subscription = Self::observe_session(&first, cx);
         let inspector_open = persistence.load_inspector_open();
         first.update(cx, |session, _cx| {
             session.inspector_open = inspector_open;
@@ -183,12 +192,83 @@ impl WorkspaceView {
             pending_quit_confirm: false,
             quit_in_progress: false,
             last_window_title: String::new(),
+            session_chrome_sigs: vec![None],
+            git_refresh_task: None,
         }
     }
 
     pub(crate) fn persist_sidebar_widths(&self) {
         self.persistence
             .save_sidebar_widths(self.rail_width, self.inspector_width);
+    }
+
+    fn observe_session(
+        session: &gpui::Entity<SessionView>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.observe(session, |this, session, cx| {
+            this.on_session_observed(&session, cx);
+        })
+    }
+
+    fn on_session_observed(&mut self, session: &gpui::Entity<SessionView>, cx: &mut Context<Self>) {
+        let Some(ix) = self.sessions.iter().position(|s| s == session) else {
+            return;
+        };
+        if self.session_chrome_sigs.len() < self.sessions.len() {
+            self.session_chrome_sigs
+                .resize_with(self.sessions.len(), || None);
+        }
+        let sig = session.read(cx).workspace_chrome_sig();
+        let chrome_changed = match self.session_chrome_sigs.get(ix) {
+            Some(Some(existing)) => existing != &sig,
+            _ => true,
+        };
+        if chrome_changed {
+            self.session_chrome_sigs[ix] = Some(sig);
+        }
+        if self.inspector_open && ix == self.active {
+            self.schedule_git_refresh(cx);
+            cx.notify();
+            return;
+        }
+        if chrome_changed {
+            cx.notify();
+        }
+    }
+
+    fn schedule_git_refresh(&mut self, cx: &mut Context<Self>) {
+        if !self.inspector_open {
+            return;
+        }
+        let Some(session) = self.sessions.get(self.active).cloned() else {
+            return;
+        };
+        let cwd = {
+            let session = session.read(cx);
+            session
+                .session_cwd
+                .clone()
+                .unwrap_or_else(|| session.launcher_cwd.clone())
+        };
+        if !git_inspector_needs_refresh(&cwd) || self.git_refresh_task.is_some() {
+            return;
+        }
+        self.git_refresh_task = Some(cx.spawn(async move |this, cx| {
+            let changed = cx
+                .background_spawn(async move {
+                    let before = probe_git_inspector(&cwd);
+                    let after = refresh_git_inspector(&cwd);
+                    before != after
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.git_refresh_task.take();
+                if this.inspector_open && changed {
+                    cx.notify();
+                }
+            });
+        }));
     }
 
     pub(crate) fn end_sidebar_resize(&mut self, cx: &mut Context<Self>) {
@@ -371,11 +451,10 @@ impl WorkspaceView {
                 },
             )
         });
-        let subscription = cx.observe(&session, |_this, _session, cx| {
-            cx.notify();
-        });
+        let subscription = Self::observe_session(&session, cx);
         self.sessions.push(session.clone());
         self.session_subscriptions.push(subscription);
+        self.session_chrome_sigs.push(None);
         self.active = self.sessions.len() - 1;
         self.sync_inspector_open_to_sessions(cx);
         cx.notify();
@@ -441,6 +520,9 @@ impl WorkspaceView {
         }
         self.sessions.remove(index);
         drop(self.session_subscriptions.remove(index));
+        if index < self.session_chrome_sigs.len() {
+            self.session_chrome_sigs.remove(index);
+        }
         if self.sessions.is_empty() {
             self.add_session(window, cx);
         } else {
@@ -462,6 +544,7 @@ impl WorkspaceView {
         self.sync_inspector_open_to_sessions(cx);
         if let Some(session) = self.sessions.get(self.active).cloned() {
             session.update(cx, SessionView::ensure_subagent_snapshots);
+            self.schedule_git_refresh(cx);
         }
         cx.notify();
     }
@@ -474,6 +557,7 @@ impl WorkspaceView {
             && let Some(session) = self.sessions.get(self.active).cloned()
         {
             session.update(cx, SessionView::ensure_subagent_snapshots);
+            self.schedule_git_refresh(cx);
         }
         cx.notify();
     }
@@ -1534,6 +1618,9 @@ impl Render for WorkspaceView {
             && session.read(cx).subagent_drawer_status.is_empty()
         {
             session.update(cx, SessionView::ensure_subagent_snapshots);
+        }
+        if inspector_open {
+            self.schedule_git_refresh(cx);
         }
 
         h_flex()

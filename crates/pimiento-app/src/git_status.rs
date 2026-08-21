@@ -2,15 +2,17 @@
 //!
 //! At-a-glance branch / sync / dirty / line-diff / HEAD / fetch age.
 //! This is **not** OMP authority — omit the section when cwd is not a git
-//! work tree or when `git` fails. Results are TTL-cached so inspector
-//! re-renders do not spawn a git process storm.
+//! work tree or when `git` fails. `Render` only peeks a TTL cache; refresh
+//! runs on a background task so inspector paints never wait on `git`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
-const CACHE_TTL: Duration = Duration::from_millis(1500);
+/// Inspector git is host chrome, not per-keystroke truth. Keep the TTL long
+/// enough that streaming paints never wait on `git` on the UI thread.
+const CACHE_TTL: Duration = Duration::from_secs(8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct GitDiffLines {
@@ -127,22 +129,35 @@ struct CacheEntry {
 
 static CACHE: Mutex<Option<CacheEntry>> = Mutex::new(None);
 
-/// Returns `None` when cwd is not inside a work tree or git is unavailable.
-/// Cached briefly so GPUI re-renders stay cheap.
+/// Never runs `git`. Returns the last snapshot for `cwd`, even if stale.
+///
+/// Call [`git_inspector_needs_refresh`] from a view that can spawn a
+/// background task; do not probe from `Render`.
 pub(crate) fn probe_git_inspector(cwd: &Path) -> Option<GitInspectorInfo> {
-    let cwd_key = cwd.to_path_buf();
-    if let Ok(guard) = CACHE.lock()
-        && let Some(entry) = guard.as_ref()
-        && entry.cwd == cwd_key
-        && entry.at.elapsed() < CACHE_TTL
-    {
-        return entry.info.clone();
-    }
+    let Ok(guard) = CACHE.lock() else {
+        return None;
+    };
+    guard
+        .as_ref()
+        .filter(|entry| entry.cwd == cwd)
+        .and_then(|entry| entry.info.clone())
+}
 
+pub(crate) fn git_inspector_needs_refresh(cwd: &Path) -> bool {
+    let Ok(guard) = CACHE.lock() else {
+        return false;
+    };
+    match guard.as_ref() {
+        Some(entry) if entry.cwd == cwd => entry.at.elapsed() >= CACHE_TTL,
+        _ => true,
+    }
+}
+
+pub(crate) fn refresh_git_inspector(cwd: &Path) -> Option<GitInspectorInfo> {
     let info = probe_git_inspector_uncached(cwd);
     if let Ok(mut guard) = CACHE.lock() {
         *guard = Some(CacheEntry {
-            cwd: cwd_key,
+            cwd: cwd.to_path_buf(),
             at: Instant::now(),
             info: info.clone(),
         });

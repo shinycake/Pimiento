@@ -29,7 +29,7 @@ use gpui_component::{
     separator::Separator,
     switch::Switch,
     tag::Tag,
-    text::TextView,
+    text::{TextView, TextViewState},
     v_flex,
 };
 use omp_rpc_client::{

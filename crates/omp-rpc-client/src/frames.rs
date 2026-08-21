@@ -715,7 +715,7 @@ pub struct AgentEndFrame {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnEndFrame {
     pub message: Value,
-    #[serde(rename = "toolResults")]
+    #[serde(default, rename = "toolResults")]
     pub tool_results: Value,
 }
 

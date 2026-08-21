@@ -736,6 +736,11 @@ fn dialog_key_select_digits_and_escape() {
         Some(DialogKeyAction::Cancel)
     );
     assert_eq!(dialog_key_action("y", "select", 3), None);
+    assert_eq!(
+        dialog_key_action("enter", "select", 3),
+        Some(DialogKeyAction::SubmitSelect)
+    );
+    assert_eq!(dialog_key_action("enter", "confirm", 0), None);
 }
 
 #[test]
@@ -1586,6 +1591,15 @@ fn slash_top_level_filter_matches_aliases_and_caps_after_filtering() {
 }
 
 #[test]
+fn slash_menu_skips_catalog_parse_until_draft_starts_with_slash() {
+    assert!(!slash_menu_should_scan(SlashMenuState::Closed, "hello"));
+    assert!(!slash_menu_should_scan(SlashMenuState::Closed, "  hello"));
+    assert!(slash_menu_should_scan(SlashMenuState::Closed, "/he"));
+    assert!(slash_menu_should_scan(SlashMenuState::Open, "hello"));
+    assert!(!slash_menu_should_scan(SlashMenuState::Dismissed, "/he"));
+}
+
+#[test]
 fn slash_nested_subcommands_flatten_and_filter_dynamically() {
     let raw = serde_json::json!([{
         "name": "mcp",
@@ -1665,6 +1679,16 @@ fn secondary_enter_sends_instead_of_accepting_slash_completion() {
         composer_enter_action(true, 1, true),
         ComposerEnterAction::Send
     );
+}
+
+#[test]
+fn composer_hard_rows_tracks_explicit_newlines_up_to_auto_grow_cap() {
+    assert_eq!(composer_hard_rows(""), COMPOSER_GROW_MIN_ROWS);
+    assert_eq!(composer_hard_rows("one line"), 1);
+    assert_eq!(composer_hard_rows("a\nb"), 2);
+    assert_eq!(composer_hard_rows("a\nb\n"), 3);
+    let nine_lines = "a\nb\nc\nd\ne\nf\ng\nh\ni";
+    assert_eq!(composer_hard_rows(nine_lines), COMPOSER_GROW_MAX_ROWS);
 }
 
 #[test]
@@ -2514,6 +2538,144 @@ fn dialog_questions_parse_descriptions_and_recommendations() {
 }
 
 #[test]
+fn select_draft_marks_recommended_and_detects_custom_option() {
+    assert!(is_custom_ask_option("Other (type your own)"));
+    assert!(is_custom_ask_option("type my own answer"));
+    assert!(!is_custom_ask_option("Ship it"));
+    assert_eq!(
+        dialog_option_display_label("Full pass (Recommended)"),
+        "Full pass"
+    );
+
+    let dialog = UiDialog {
+        id: "ask-3".into(),
+        method: "select".into(),
+        payload: serde_json::json!({
+            "title": "Which path?",
+            "options": ["Ship it", "Full pass (Recommended)", "Other (type your own)"]
+        }),
+        timeout_ms: None,
+    };
+    let draft = select_draft_for_dialog(&dialog);
+    assert_eq!(draft.dialog_id, "ask-3");
+    assert_eq!(draft.selected, Some(1));
+    assert_eq!(select_dialog_options(&dialog)[2], "Other (type your own)");
+
+    let custom_draft = SelectDraft {
+        dialog_id: "ask-3".into(),
+        selected: Some(2),
+        checked_values: Vec::new(),
+    };
+    assert!(select_option_is_custom(&dialog, &custom_draft));
+    assert!(!select_option_is_custom(
+        &dialog,
+        &SelectDraft {
+            dialog_id: "ask-3".into(),
+            selected: Some(0),
+            checked_values: Vec::new(),
+        }
+    ));
+}
+
+#[test]
+fn compact_editor_title_skips_tui_option_dump() {
+    let title = "Which path?\n ○ Ship it\n ● Other (type your own)\n\nEnter your response:";
+    assert_eq!(compact_editor_title(title), "Which path?");
+    assert_eq!(
+        compact_editor_title("\u{1b}[36mWhich path?\u{1b}[0m\n ○ Ship it"),
+        "Which path?"
+    );
+    assert_eq!(
+        compact_editor_title("○ A\n● Other (type your own)"),
+        "Your answer"
+    );
+}
+
+#[test]
+fn html_plain_transcript_text_escapes_and_keeps_newlines() {
+    let html = html_plain_transcript_text("a <b> & c\nnext");
+    assert!(html.contains("&lt;b&gt;"));
+    assert!(html.contains("&amp;"));
+    assert!(html.contains("<br/>"));
+    assert!(!html.contains("<b>"));
+}
+
+#[test]
+fn select_continue_finishes_repeating_last_question() {
+    assert!(is_select_completion_option("Done selecting"));
+    assert!(is_select_completion_option("\u{1b}[32m Done selecting"));
+    assert!(is_select_completion_option("Next →"));
+    assert!(!is_select_completion_option("Ship it"));
+
+    let first = UiDialog {
+        id: "ask-1".into(),
+        method: "select".into(),
+        payload: serde_json::json!({
+            "title": "Which checks? (2/2)",
+            "options": ["lint", "tests (Recommended)", "Other (type your own)"]
+        }),
+        timeout_ms: None,
+    };
+    let repeating = UiDialog {
+        id: "ask-2".into(),
+        method: "select".into(),
+        payload: serde_json::json!({
+            "title": "Which checks? (2/2)",
+            "options": [
+                "lint",
+                "tests (Recommended)",
+                "\u{1b}[32m Done selecting",
+                "Other (type your own)"
+            ]
+        }),
+        timeout_ms: None,
+    };
+    assert_eq!(
+        select_question_fingerprint(&first),
+        select_question_fingerprint(&repeating)
+    );
+    assert_eq!(select_completion_value(&first), None);
+    assert_eq!(
+        select_completion_value(&repeating),
+        Some("\u{1b}[32m Done selecting".into())
+    );
+    assert_eq!(
+        select_dialog_options(&repeating),
+        vec![
+            "lint".to_owned(),
+            "tests (Recommended)".to_owned(),
+            "Other (type your own)".to_owned()
+        ]
+    );
+
+    let options = dialog_primary_options(&first);
+    assert_eq!(
+        resolve_select_continue(&options, Some(0), None, None, &[], ""),
+        SelectContinue::Send("lint".into())
+    );
+    assert_eq!(
+        resolve_select_continue(&options, Some(0), None, Some("lint"), &["lint".into()], ""),
+        SelectContinue::FinishCustom {
+            other_value: "Other (type your own)".into(),
+            answer: "lint".into(),
+        }
+    );
+
+    let repeating_options = dialog_primary_options(&repeating);
+    assert_eq!(
+        resolve_select_continue(
+            &repeating_options,
+            Some(0),
+            Some("\u{1b}[32m Done selecting"),
+            Some("lint"),
+            &["lint".into()],
+            ""
+        ),
+        SelectContinue::Send("\u{1b}[32m Done selecting".into())
+    );
+}
+
+#[test]
 fn dialog_primary_options_keep_wire_values_for_keyboard_selection() {
     let dialog = UiDialog {
         id: "ask-2".into(),
@@ -2638,6 +2800,10 @@ fn abort_bash_has_no_correlatable_target_field() {
     assert_eq!(
         serde_json::to_value(RpcCommandBody::AbortBash).expect("serialize abort_bash"),
         serde_json::json!({"type": "abort_bash"})
+    );
+    assert_eq!(
+        serde_json::to_value(RpcCommandBody::Abort).expect("serialize abort"),
+        serde_json::json!({"type": "abort"})
     );
 }
 
